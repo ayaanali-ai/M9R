@@ -117,6 +117,12 @@ async function acquireSharedLease(
   const ownerPath = join(lock, "owner.json");
   const token = randomUUID();
   const record: SharedOwner = { pid: process.pid, token, owner: owner.slice(0, 128), startedAt: now() };
+  // A live lock owner is correctly never stolen, but that previously had no
+  // bound at all beyond an optional caller-supplied AbortSignal: a wedged
+  // operation in a live broker process could block every physical-input
+  // action indefinitely. Cap the wait so this always surfaces a clear error
+  // instead of hanging forever when no caller deadline is in play.
+  const acquireDeadline = now() + 20_000;
 
   while (true) {
     signal?.throwIfAborted();
@@ -135,6 +141,7 @@ async function acquireSharedLease(
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const current = readSharedOwner(ownerPath);
       if (current && isAlive(current.pid)) {
+        if (now() >= acquireDeadline) throw new Error("The foreground input lease is held by another live process and did not free up in time; no input was sent.");
         await waitForRetry(signal, pollMs);
         continue;
       }
@@ -185,7 +192,15 @@ export function createForegroundInputLease(options: ForegroundInputLeaseOptions 
         }
         try { item.resolve(await item.operation()); }
         catch (error) { item.reject(error); }
-        finally { releaseSharedLease!(); }
+        finally {
+          // Release does synchronous filesystem work and can throw (sharing
+          // violation, permission error). This loop runs detached from any
+          // caller via pump()'s `void drain()`, so an uncaught throw here
+          // would escape as an unhandled rejection instead of just leaving
+          // the lock held -- catch it so the queue keeps draining; a lock
+          // that failed to release is still reclaimed once stale.
+          try { releaseSharedLease!(); } catch { /* the lock remains held; it is reclaimed once stale */ }
+        }
       }
     } finally {
       running = false;

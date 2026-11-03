@@ -1,4 +1,4 @@
-import { isLogicalContinuation, isExplicitNewWork, logicalTaskHandoff } from "./logical-task-context";
+import { isLogicalContinuation, isExplicitNewWork, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -395,7 +395,13 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     // A provider may expose a catalog but not a live reconfiguration method.
     // In that case the persisted choice remains durable for a later restart;
     // it never blocks startup or changes authentication/browser routing.
-    await connection.applyModelSelection(validation.selection).catch(() => undefined);
+    // The failure was previously swallowed entirely, so a persisted preference
+    // silently not taking effect looked identical to it having applied --
+    // the connection then ran on whatever model it defaulted to with no trace
+    // of why. Surface it as a diagnostic instead of changing the behavior.
+    await connection.applyModelSelection(validation.selection).catch((error) => {
+      process.stderr.write(`[managed-provider-owner] model selection for ${profile.handle} did not apply: ${errorText(error)}\n`);
+    });
   }
 
   function resolveProfile(handle: string): ManagedProviderConnectionProfile | undefined {
@@ -441,7 +447,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     if (deps.store.prepareLogicalTaskContext && !task) throw new Error("M9R could not preserve the logical task handoff; no provider turn was started.");
     const context = contextFor(profile);
     return context.prompt + "\n\n" + (task ? logicalTaskHandoff(task) + "\n\n" : "")
-      + "Report the actual outcome with m9r_result and an explicit completion status. Use completed with no remaining work only when every requested requirement is done; otherwise use incomplete and list the remaining requirements. Ending the provider turn alone never completes M9R work.\n\n"
+      + COMPLETION_DISCIPLINE + "\n\n"
       + "The owner's latest instruction for M9R task " + taskId + ":\n" + text;
   }
 

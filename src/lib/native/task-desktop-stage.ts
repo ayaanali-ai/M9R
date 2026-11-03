@@ -1130,7 +1130,15 @@ export function createTaskDesktopStageService(input: {
         child.on("error", (error) => { launchError = error; });
         try {
           const pollStartedAt = Date.now();
-          for (let attempt = 0; attempt < 60; attempt++) {
+          // 60 fixed attempts assumed each iteration was fast; listVisibleWindows
+          // can itself be slow under load, so a fixed attempt count could run
+          // past the 55s mutation timeout and 70s transport ceiling while the
+          // app was actually still appearing, producing an open window plus an
+          // uncertain launch outcome instead of a clean result. Bound by actual
+          // elapsed wall time as well, so this loop always yields before those
+          // ceilings regardless of per-iteration cost.
+          const LAUNCH_POLL_BUDGET_MS = 45_000;
+          for (let attempt = 0; attempt < 60 && Date.now() - pollStartedAt < LAUNCH_POLL_BUDGET_MS; attempt++) {
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
             if (launchError) throw launchError;

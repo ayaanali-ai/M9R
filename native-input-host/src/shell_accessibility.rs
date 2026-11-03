@@ -8,14 +8,17 @@ use windows::Win32::{
         CUIAutomation8, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
         IUIAutomationLegacyIAccessiblePattern, IUIAutomationSelectionItemPattern,
         IUIAutomationTogglePattern, IUIAutomationTreeWalker, UIA_InvokePatternId,
+        UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_EditControlTypeId,
+        UIA_HyperlinkControlTypeId, UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId,
+        UIA_RadioButtonControlTypeId, UIA_TabItemControlTypeId, UIA_TreeItemControlTypeId,
         UIA_LegacyIAccessiblePatternId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
     },
     UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
         SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN},
 };
 
-const MAX_DESKTOP_STRUCTURE_ELEMENTS: usize = 64;
-const MAX_DESKTOP_STRUCTURE_DEPTH: usize = 10;
+const MAX_DESKTOP_STRUCTURE_ELEMENTS: usize = 4096;
+const MAX_DESKTOP_STRUCTURE_DEPTH: usize = 64;
 
 struct ComApartment;
 
@@ -37,7 +40,24 @@ pub fn control_at_point(value: &Value, invoke: bool) -> Result<Value, String> {
     let mut root_pid = 0;
     unsafe { GetWindowThreadProcessId(root, Some(&mut root_pid)) };
     let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }.map_err(|e| e.to_string())?;
-    let element = unsafe { automation.ElementFromPoint(point) }.map_err(|e| e.to_string())?;
+    let hit = unsafe { automation.ElementFromPoint(point) }.map_err(|e| e.to_string())?;
+    // A decorative, unnamed icon/glyph child is a common hit target for a
+    // normal toolbar/taskbar button (the visible, accessible control is its
+    // parent). Walk up a few ancestors for one that is named, enabled, and
+    // whose bounds still contain the point, rather than failing the whole
+    // activation because the exact leaf happened to be unnamed.
+    let walker: IUIAutomationTreeWalker = unsafe { automation.ControlViewWalker() }.map_err(|e| e.to_string())?;
+    let mut element = hit;
+    for _ in 0..4 {
+        let label = unsafe { element.CurrentName() }.ok().map(|v| v.to_string()).unwrap_or_default();
+        let enabled = unsafe { element.CurrentIsEnabled() }.ok().map(|v| v.as_bool()).unwrap_or(false);
+        let pid = unsafe { element.CurrentProcessId() }.unwrap_or(0);
+        let rect = unsafe { element.CurrentBoundingRectangle() }.ok();
+        let contains = rect.is_some_and(|r| point.x >= r.left && point.y >= r.top && point.x < r.right && point.y < r.bottom);
+        if pid > 0 && enabled && contains && !label.trim().is_empty() { break; }
+        let Ok(parent) = (unsafe { walker.GetParentElement(&element) }) else { break; };
+        element = parent;
+    }
     let label = unsafe { element.CurrentName() }.map_err(|e| e.to_string())?.to_string();
     let class = unsafe { element.CurrentClassName() }.map_err(|e| e.to_string())?.to_string();
     let pid = unsafe { element.CurrentProcessId() }.map_err(|e| e.to_string())?;
@@ -92,12 +112,12 @@ pub fn desktop_structure(value: &Value) -> Result<Value, String> {
     let max_elements = value
         .get("maxElements")
         .and_then(Value::as_u64)
-        .unwrap_or(64)
+        .unwrap_or(MAX_DESKTOP_STRUCTURE_ELEMENTS as u64)
         .clamp(1, MAX_DESKTOP_STRUCTURE_ELEMENTS as u64) as usize;
     let max_depth = value
         .get("maxDepth")
         .and_then(Value::as_u64)
-        .unwrap_or(10)
+        .unwrap_or(MAX_DESKTOP_STRUCTURE_DEPTH as u64)
         .clamp(0, MAX_DESKTOP_STRUCTURE_DEPTH as u64) as usize;
 
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().map_err(|e| e.to_string())?;
@@ -162,7 +182,18 @@ fn walk_desktop_elements(
     let rect = unsafe { element.CurrentBoundingRectangle() }.ok();
     let rect_is_visible = rect.as_ref().is_some_and(|value| value.right > value.left && value.bottom > value.top);
     let label = unsafe { element.CurrentName() }.ok().map(|value| value.to_string()).unwrap_or_default();
-    let role = unsafe { element.CurrentLocalizedControlType() }.ok().map(|value| value.to_string()).unwrap_or_default();
+    // CurrentLocalizedControlType returns the OS display language's name
+    // (e.g. French "bouton" instead of "button"), but role-based reasoning
+    // elsewhere in the stack (role === "textbox", etc.) assumes English.
+    // CurrentControlType is a locale-independent numeric UIA constant; map
+    // the common ones to the same canonical English names so role matching
+    // keeps working on a non-English Windows install. Fall back to the
+    // localized string for the long tail of control types.
+    let role = unsafe { element.CurrentControlType() }.ok()
+        .and_then(canonical_control_type_name)
+        .map(|value| value.to_string())
+        .or_else(|| unsafe { element.CurrentLocalizedControlType() }.ok().map(|value| value.to_string()))
+        .unwrap_or_default();
     let class_name = unsafe { element.CurrentClassName() }.ok().map(|value| value.to_string()).unwrap_or_default();
     let enabled = unsafe { element.CurrentIsEnabled() }.map(|value| value.as_bool()).unwrap_or(false);
     let focused = unsafe { element.CurrentHasKeyboardFocus() }.map(|value| value.as_bool()).unwrap_or(false);
@@ -206,4 +237,21 @@ fn walk_desktop_elements(
 
 fn truncate_text(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
+}
+
+fn canonical_control_type_name(control_type: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) -> Option<&'static str> {
+    match control_type {
+        UIA_ButtonControlTypeId => Some("button"),
+        UIA_CheckBoxControlTypeId => Some("checkbox"),
+        UIA_ComboBoxControlTypeId => Some("combo box"),
+        UIA_EditControlTypeId => Some("edit"),
+        UIA_HyperlinkControlTypeId => Some("hyperlink"),
+        UIA_ListControlTypeId => Some("list"),
+        UIA_ListItemControlTypeId => Some("list item"),
+        UIA_MenuItemControlTypeId => Some("menu item"),
+        UIA_RadioButtonControlTypeId => Some("radio button"),
+        UIA_TabItemControlTypeId => Some("tab item"),
+        UIA_TreeItemControlTypeId => Some("tree item"),
+        _ => None,
+    }
 }

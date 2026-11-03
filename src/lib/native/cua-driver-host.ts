@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { CuaDriverLike } from "@trycua/cua-driver";
 
 export const CUA_DRIVER_VERSION = "0.37.0";
-const START_TIMEOUT_MS = 12_000;
+const START_TIMEOUT_MS = 30_000;
 const RETRY_INTERVAL_MS = 100;
 
 class HostConfigurationError extends Error {}

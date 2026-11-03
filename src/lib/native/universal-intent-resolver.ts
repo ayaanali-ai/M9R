@@ -29,7 +29,7 @@ export interface UniversalIntentContract {
   surface: IntentSurface;
   action: IntentAction;
   mode: IntentMode;
-  constraints: { allowAdvance: boolean; allowSubmit: boolean };
+  constraints: { allowAdvance: boolean; allowSubmit: boolean; allowNavigationCommit: boolean };
   confidence: number;
   ambiguity: readonly string[];
   entities: {
@@ -129,10 +129,14 @@ function inferMode(text: string, action: IntentAction): UniversalIntentContract[
   // normal way a "navigate" action finishes, on every provider and every surface.
   // The no-submit gate in computer-use-mcp.ts otherwise blocks that Enter keystroke
   // for any task whose text never happened to contain a word like "submit"/"send",
-  // which is every plain "go to <url>" request. Grant it only for that one action,
-  // leaving the submit gate unchanged for every click/key on an actual form or message.
-  const allowSubmit = submit || action === "navigate";
-  return { mode, allowAdvance: advance || submit, allowSubmit };
+  // which is every plain "go to <url>" request. This exception used to widen the
+  // single shared allowSubmit flag, which also bypassed the separate check for
+  // clicking an actual control labelled submit/send/post/publish/finish/done --
+  // a "go to example.com" task could then click a real Send button later in the
+  // same task with the no-submit gate never catching it. Keep it as its own,
+  // narrower flag so only the Enter/URL-bar-commit checks see it.
+  const allowNavigationCommit = action === "navigate";
+  return { mode, allowAdvance: advance || submit, allowSubmit: submit, allowNavigationCommit };
 }
 
 function planFor(surface: IntentSurface, action: IntentAction): UniversalIntentStep[] {
@@ -170,7 +174,7 @@ export function resolveUniversalIntent(rawText: string, hint?: IntentObservation
   const preferredObservation = surface === "browser" ? "browser-tab" : surface === "app" ? "app-window" : "desktop";
   return {
     version: "m9r.intent.v1", rawText, normalizedText, surface, action, mode: mode.mode,
-    constraints: { allowAdvance: mode.allowAdvance, allowSubmit: mode.allowSubmit },
+    constraints: { allowAdvance: mode.allowAdvance, allowSubmit: mode.allowSubmit, allowNavigationCommit: mode.allowNavigationCommit },
     confidence: Math.max(0, Math.min(1, 0.45 + (surface !== "unknown" ? 0.2 : 0) + (action !== "unknown" ? 0.2 : 0) - ambiguity.length * 0.1)),
     ambiguity, entities, preferredObservation, plan: planFor(surface, action),
     fallbackPolicy: { structureFirst: true, screenshotFallback: true, currentForegroundFirst: true, startSearchBeforeTaskbar: true, boundedReobserveAfterMutation: true, noImplicitForegroundTakeover: true },

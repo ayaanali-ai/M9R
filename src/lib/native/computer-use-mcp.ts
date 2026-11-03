@@ -17,6 +17,7 @@ import {
   type ComputerUseTelemetry,
 } from "./computer-use-contract";
 import { resolveUniversalIntent, type IntentObservationHint } from "./universal-intent-resolver";
+import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { preDispatchRetry, type ComputerUseRetry } from "./computer-use-recovery";
 import { recordComputerUseLatency } from "./computer-use-latency";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
@@ -26,6 +27,7 @@ import type { ComputerOperationInput, LocalStore, StageOperationClaim } from "./
 import type { StageClientResult, WebBrokerClient } from "./web-broker-client";
 import type { WebRequest, WebResponse } from "./web-broker-core";
 
+const MAX_PUBLIC_CONTROLS = 2_000;
 const MAX_TARGETS = 256;
 const MAX_CHANGE_BASELINES = 256;
 const CHANGE_BASELINE_TTL_MS = 120_000;
@@ -544,8 +546,14 @@ function capabilitiesForDesktop(controls: readonly DesktopControl[], view: "desk
   const semanticControls = controls.filter((control) => control.enabled !== false && control.stageRef
     && control.actions?.some((action) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(action)));
   const visualControls = controls.filter((control) => control.enabled !== false && control.rect);
-  const visualAvailable = representation === "visual" || structureStatus === "partial" || structureStatus === "unknown"
-    || structureStatus === "unavailable" || structureStatus === "not-requested";
+  // Point click, drag, middle click, and scroll all dispatch by coordinate
+  // through the native input path -- they never depend on a screenshot/visual
+  // representation, only on having a desktop/app surface at all. Gating them
+  // off whenever structure reading happened to succeed completely took away
+  // ordinary input capabilities (e.g. scroll, right-click, drag) for the exact
+  // observations where the agent has the most complete picture of the screen.
+  const visualAvailable = representation === "visual" || structureStatus === "complete" || structureStatus === "partial"
+    || structureStatus === "unknown" || structureStatus === "unavailable" || structureStatus === "not-requested";
   const accessibleAvailable = structureStatus === "complete" || structureStatus === "partial"
     || (structureStatus === undefined && controls.some((control) => Boolean(control.stageRef)));
   return [
@@ -862,8 +870,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (!Number.isSafeInteger(observedAt) || observedAt < 0) throw new Error("The desktop broker returned an invalid capture timestamp.");
     const controls: DesktopControl[] = [];
     const allElements = Array.isArray(structure?.elements) ? structure.elements : [];
-    if (allElements.length > 200 && structureStatus === "complete") structureStatus = "partial";
-    const rawElements = allElements.slice(0, 200).map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
+    if (allElements.length > MAX_PUBLIC_CONTROLS && structureStatus === "complete") structureStatus = "partial";
+    const rawElements = allElements.slice(0, MAX_PUBLIC_CONTROLS).map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
     const stageRefMap = new Map<string, string>();
     for (const element of rawElements) {
       if (typeof element.ref === "string" && STAGE_REF.test(element.ref) && !stageRefMap.has(element.ref)) {
@@ -895,7 +903,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (visibleCapture?.controlsTruncated === true && structureStatus === "complete") structureStatus = "partial";
     if (visibleCapture && Array.isArray(visibleCapture.controls)) {
       const controlByStageRef = new Map(controls.filter((control) => control.stageRef).map((control) => [control.stageRef!, control]));
-      for (const raw of visibleCapture.controls.slice(0, 200)) {
+      for (const raw of visibleCapture.controls.slice(0, MAX_PUBLIC_CONTROLS)) {
         const control = recordOf(raw);
         if (!control || !validRect(control.rect)) continue;
         const rect = control.rect;
@@ -1044,7 +1052,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       sessionId: input.identity.sessionId,
       action: "snapshot",
       ...(input.tab ? { tab: input.tab } : {}),
-      args: { limit: 150 },
+      args: { limit: MAX_PUBLIC_CONTROLS },
     });
     if (!response.ok) throw new Error(response.error ?? "The M9R browser snapshot failed.");
     const mutationRevision = mutationRevisionOf(response.mutationRevision);
@@ -1062,8 +1070,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const tabName = resolvedTab ?? "default";
     const tabId = opaqueBrowserIdentity(`${browserInstanceId}\0${typeof snapshot.tabId === "string" ? snapshot.tabId : tabName}`);
     const rawElementRecords = snapshot.elements.map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
-    const browserCompleteness: FingerprintCompleteness = rawElementRecords.length > 150 ? "partial" : "complete";
-    const rawElements = rawElementRecords.slice(0, 150);
+    const browserCompleteness: FingerprintCompleteness = rawElementRecords.length > MAX_PUBLIC_CONTROLS ? "partial" : "complete";
+    const rawElements = rawElementRecords.slice(0, MAX_PUBLIC_CONTROLS);
     const observedRefs = new Set(rawElements.flatMap((element) => typeof element.ref === "string" && BROWSER_REF.test(element.ref)
       && element.sensitive !== true ? [element.ref] : []));
     const elements: BrowserElement[] = [];
@@ -1107,7 +1115,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         structureStatus: browserCompleteness,
         ...(typeof snapshot.browserInstanceId === "string" ? { browserInstanceId: snapshot.browserInstanceId } : {}),
         ...(typeof snapshot.tabId === "string" ? { tabId: snapshot.tabId } : {}),
-        ...(typeof snapshot.text === "string" ? { text: snapshot.text.slice(0, 4_000) } : {}), elements: elementMap },
+        ...(typeof snapshot.text === "string" ? { text: snapshot.text.slice(0, 40_000) } : {}), elements: elementMap },
       extra: { browserInstanceId, tabId, ...(url ? { url } : {}) },
       fingerprint,
       ...(mutationRevision === undefined ? {} : { mutationRevision }),
@@ -1117,7 +1125,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       observation: {
         url,
         title,
-        text: typeof snapshot.text === "string" ? snapshot.text.slice(0, 4_000) : "",
+        text: typeof snapshot.text === "string" ? snapshot.text.slice(0, 40_000) : "",
         elements,
         change: record.change,
       },
@@ -1157,10 +1165,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (!intent.allowSubmit && controlText && /\b(?:submit|send|post|publish|finish|done)\b/i.test(controlText)) {
         return "The current intent forbids submitting or sending; no click was sent.";
       }
-      if (!intent.allowSubmit && action.kind === "key" && action.key.toLowerCase() === "enter") {
+      if (!intent.allowSubmit && !intent.allowNavigationCommit && action.kind === "key" && action.key.toLowerCase() === "enter") {
         return "The current intent forbids submit-like Enter input; no key was sent.";
       }
-      if (!intent.allowSubmit && action.kind === "text_then_enter") {
+      if (!intent.allowSubmit && !intent.allowNavigationCommit && action.kind === "text_then_enter") {
         return "The current intent forbids submit-like Enter input; neither the text nor the key was sent.";
       }
     }
@@ -1302,8 +1310,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     if (record.context.kind !== "desktop") throw new Error("The selected route is not a desktop target.");
     if (locator.kind === "point") return { x: locator.x, y: locator.y };
     const control = record.context.controls.get(locator.ref);
-    if (!control || locator.snapshotId !== record.target.revision) throw new Error("The desktop control reference is stale.");
-    if (!control.rect) throw new Error("This structured element has no visual bounds; request a fresh visual observation before a coordinate-based action.");
+    if (!control || locator.snapshotId !== record.target.revision) throw new DesktopInputNotDispatchedError("The desktop control reference is stale.");
+    if (!control.rect) throw new DesktopInputNotDispatchedError("This structured element has no visual bounds; request a fresh visual observation before a coordinate-based action.");
     return { x: Math.floor(control.rect.x + control.rect.width / 2), y: Math.floor(control.rect.y + control.rect.height / 2) };
   }
 
@@ -1405,29 +1413,47 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   async function dispatchDesktop(record: TargetRecord, action: ComputerUseAction, token: string): Promise<StageClientResult> {
-    if (record.context.kind !== "desktop" || !deps.web?.taskStageAction) throw new Error("The owner-launched desktop stage broker is unavailable.");
+    if (record.context.kind !== "desktop" || !deps.web?.taskStageAction) throw new DesktopInputNotDispatchedError("The owner-launched desktop stage broker is unavailable.");
     let stageAction: unknown;
     if (action.kind === "click") {
-      const control = action.locator.kind === "element" ? record.context.controls.get(action.locator.ref) : undefined;
-      const semanticClick = action.locator.kind === "element" && action.button === "left" && action.count === 1
-        && control?.stageRef && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name));
       const confirmFocusForeground = action.confirmFocusForeground === true;
-      if (semanticClick) {
-        stageAction = { kind: "click_element", ref: control.stageRef, view: "app",
-          ...(control.role !== undefined ? { expectedRole: control.role } : {}),
-          ...(control.label !== undefined ? { expectedLabel: control.label } : {}),
+      if (action.targetPopup) {
+        // No observation exists for a popup's own elements, so a popup click is
+        // always point-based (enforced by the schema) and dispatched straight to
+        // the app's currently owned popup window rather than its own window.
+        const point = desktopPoint(record, action.locator);
+        stageAction = { kind: action.count === 2 ? "double_click" : action.button === "right" ? "right_click" : action.button === "middle" ? "middle_click" : "click", ...point, view: "popup",
           ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };
       } else {
-        const point = desktopPoint(record, action.locator);
-      stageAction = { kind: action.count === 2 ? "double_click" : action.button === "right" ? "right_click" : action.button === "middle" ? "middle_click" : "click", ...point, view: record.context.view,
-          ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };
+        const control = action.locator.kind === "element" ? record.context.controls.get(action.locator.ref) : undefined;
+        // click_element always resolves its ref against the single app window
+        // claimed for this task (task-stage-actions.ts's driver.clickElement).
+        // That's correct when the observation itself was scoped to that one
+        // window (view:"app"), but a desktop-wide composite observation
+        // (view:"desktop") can carry controls from other visible windows; routing
+        // those through click_element would select against the wrong window
+        // instead of the one the control actually came from. Fall through to the
+        // coordinate-based click below for anything from a composite observation.
+        const semanticClick = record.context.view === "app" && action.locator.kind === "element" && action.button === "left" && action.count === 1
+          && control?.stageRef && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name));
+        if (semanticClick) {
+          stageAction = { kind: "click_element", ref: control.stageRef, view: "app",
+            ...(control.role !== undefined ? { expectedRole: control.role } : {}),
+            ...(control.label !== undefined ? { expectedLabel: control.label } : {}),
+            ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };
+        } else {
+          const point = desktopPoint(record, action.locator);
+        stageAction = { kind: action.count === 2 ? "double_click" : action.button === "right" ? "right_click" : action.button === "middle" ? "middle_click" : "click", ...point, view: record.context.view,
+            ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };
+        }
       }
     } else if (action.kind === "key") {
       const keys = [...(action.modifiers ?? []), action.key];
+      const keyView = action.targetPopup ? "popup" : record.context.view;
       stageAction = keys.length === 1
-        ? { kind: "press_key", key: action.key, view: record.context.view,
+        ? { kind: "press_key", key: action.key, view: keyView,
           ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) }
-        : { kind: "hotkey", keys, view: record.context.view,
+        : { kind: "hotkey", keys, view: keyView,
           ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "drag") {
       // Element endpoints resolve to their visual centers, exactly as click does.
@@ -1447,8 +1473,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       // action: a non-null assertion here instead threw a raw, unlabeled TypeError on a
       // stale or unknown ref rather than desktopPoint()'s clean "reference is stale" error.
       const control = record.context.controls.get(action.locator.ref);
-      if (!control || action.locator.snapshotId !== record.target.revision) throw new Error("The desktop control reference is stale.");
-      if (control.stageRef) {
+      if (!control || action.locator.snapshotId !== record.target.revision) throw new DesktopInputNotDispatchedError("The desktop control reference is stale.");
+      if (control.stageRef && record.context.view === "app") {
         stageAction = { kind: "replace_element", ref: control.stageRef, text: action.text, view: "app" };
       } else {
         const point = desktopPoint(record, action.locator);
@@ -1485,7 +1511,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           ...(action.confirmSharedClipboard ? { confirmSharedClipboard: true } : {}) }
         : { kind: "clipboard_write", view: "app", text: action.text, confirmSharedClipboard: true };
     } else {
-      throw new Error(`The desktop route does not support ${action.kind}.`);
+      throw new DesktopInputNotDispatchedError(`The desktop route does not support ${action.kind}.`);
     }
     return deps.web.taskStageAction(token, record.context.taskId, stageAction, record.context.mode, action.operationId,
       record.mutationRevision);
@@ -1834,6 +1860,15 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       let response: StageClientResult;
       try { response = await timing.measure("actionMs", () => dispatchDesktop(record, action, authToken)); }
       catch (error) {
+        // A DesktopInputNotDispatchedError means dispatchDesktop's own
+        // pre-RPC validation refused the action (a stale/unknown ref, an
+        // invalid locator) before any native call was attempted -- there is
+        // nothing to reconcile and no replay restriction is warranted. Only
+        // an error from the RPC itself leaves a genuinely unknown outcome.
+        if (error instanceof DesktopInputNotDispatchedError) {
+          if (receiptInput) { try { deps.store.releaseComputerOperation(receiptInput); } catch { /* the running receipt still blocks replay */ } }
+          return refusal(action, action.targetId, "not-dispatched", error.message);
+        }
         const receipt = receiptInput ? settleReceipt(receiptInput, "uncertain") : undefined;
         return reconcileOperation({ action, identity, receipt: receipt ?? { state: "uncertain" }, record, token: authToken,
           timing,

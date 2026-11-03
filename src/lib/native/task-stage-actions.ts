@@ -28,7 +28,7 @@ type TaskStageActionBody =
   | { kind: "clipboard_read"; includeText: boolean; confirmSharedClipboard?: boolean }
   | { kind: "clipboard_write"; text?: string; imagePath?: string; filePath?: string; confirmSharedClipboard: true }
   | ({ kind: "system_control" } & WindowsSystemControlRequest);
-export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" };
+export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" | "popup" };
 
 const KEY_NAMES = new Set([
   "Ctrl", "Control", "Alt", "Shift", "Meta", "Win", "Enter", "Return", "Escape", "Esc", "Tab", "Space",
@@ -38,8 +38,14 @@ const KEY_NAMES = new Set([
 const CANONICAL_KEYS = new Map([...KEY_NAMES].map((key) => [key.toLowerCase(), key]));
 
 function validKey(value: unknown): value is string {
+  // Letters and digits already pass through as a single literal character to
+  // the underlying driver; ordinary punctuation shortcut keys (;, =, ,, -, .,
+  // /, `, [, ], \, ') are the same single-character case and were simply
+  // missing from the allowed set, which made every punctuation shortcut
+  // (e.g. Ctrl+/, Ctrl+-) unavailable even though nothing downstream rejects
+  // them.
   return typeof value === "string" && value.length <= 20
-    && (/^[a-z0-9]$/i.test(value) || /^F(?:[1-9]|1[0-9]|2[0-4])$/i.test(value) || CANONICAL_KEYS.has(value.toLowerCase()));
+    && (/^[a-z0-9;=,\-./`[\]\\']$/i.test(value) || /^F(?:[1-9]|1[0-9]|2[0-4])$/i.test(value) || CANONICAL_KEYS.has(value.toLowerCase()));
 }
 
 /** Reject extra fields so an action cannot carry a desktop name, HWND, or command. */
@@ -60,7 +66,14 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   const commonOptionalFields = ["view", "confirmFocusForeground"];
   if (Object.keys(action).some((key) => key !== "kind" && !commonOptionalFields.includes(key) && !allowedFields.includes(key))
     || requiredFields.some((key) => !Object.hasOwn(action, key))) throw new Error("Invalid stage action fields.");
-  if (action.view !== undefined && action.view !== "desktop" && action.view !== "app") throw new Error("Invalid stage action view.");
+  if (action.view !== undefined && action.view !== "desktop" && action.view !== "app" && action.view !== "popup") throw new Error("Invalid stage action view.");
+  // "popup" targets the exact app's currently owned popup window (a Windows
+  // error dialog, a Save-As box) instead of the app's own window -- only
+  // meaningful for the small set of actions that dispatch input by point or
+  // key, not for the semantic/structural ones that assume the registered app.
+  if (action.view === "popup" && !["click", "double_click", "middle_click", "right_click", "press_key", "hotkey", "capture"].includes(action.kind)) {
+    throw new Error("A popup view is only valid for click, press_key, hotkey, or capture.");
+  }
   if (action.kind === "read_structure" && action.view !== "app" && action.view !== "desktop") throw new Error("Structure observation requires an exact app or desktop view.");
   if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
   if (["click_element", "replace_element", "type_then_enter", "window_frame", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
@@ -78,9 +91,9 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     for (const key of ["x", "y"]) if (!Number.isSafeInteger(action[key]) || (action[key] as number) < -16383 || (action[key] as number) > 16383) throw new Error("Invalid window frame coordinates.");
     for (const key of ["width", "height"]) if (!Number.isSafeInteger(action[key]) || (action[key] as number) < 1 || (action[key] as number) > 16383) throw new Error("Invalid window frame dimensions.");
   }
-  if (action.kind === "type" && (typeof action.text !== "string" || !action.text.length || action.text.length > 500
+  if (action.kind === "type" && (typeof action.text !== "string" || action.text.length > 5_000
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text))) throw new Error("Invalid stage input text.");
-  if (action.kind === "type_then_enter" && (typeof action.text !== "string" || !action.text.length || action.text.length > 500
+  if (action.kind === "type_then_enter" && (typeof action.text !== "string" || !action.text.length || action.text.length > 5_000
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text))) throw new Error("Invalid stage input text.");
   if (action.kind === "type" && action.mode !== undefined && action.mode !== "insert" && action.mode !== "replace") throw new Error("Invalid text mode.");
   if (action.kind === "type" && action.mode === "replace" && (action.x === undefined || action.y === undefined)) throw new Error("Replace text requires an exact field point.");
@@ -110,7 +123,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     && (typeof action.durationMs !== "number" || !Number.isSafeInteger(action.durationMs) || action.durationMs < 1 || action.durationMs > 10_000)) {
     throw new Error("Invalid drag duration.");
   }
-  if ((action.kind === "replace_element" || (action.kind === "clipboard_write" && action.text !== undefined)) && (typeof action.text !== "string" || !action.text.length || action.text.length > 500)) throw new Error("Invalid stage input text.");
+  if (action.kind === "replace_element" && (typeof action.text !== "string" || action.text.length > 5_000)) throw new Error("Invalid stage input text.");
+  if (action.kind === "clipboard_write" && action.text !== undefined && (typeof action.text !== "string" || !action.text.length || action.text.length > 5_000)) throw new Error("Invalid stage input text.");
   if (action.kind === "clipboard_write") {
     if (["text", "imagePath", "filePath"].filter((key) => action[key] !== undefined).length !== 1) throw new Error("Clipboard write requires exactly one payload.");
     for (const key of ["imagePath", "filePath"]) if (action[key] !== undefined
@@ -153,12 +167,14 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     for (const key of Object.keys(normalized)) if (normalized[key] === undefined) delete normalized[key];
     return Object.keys(normalized).length ? normalized as T : undefined;
   };
-  const desktopWide = mode === "owner-preview" && action.view !== "app";
-  const capture = () => desktopWide ? driver.captureDesktop(name, identity) : driver.capture(name, identity);
+  const popupTargeted = action.view === "popup";
+  const desktopWide = mode === "owner-preview" && action.view !== "app" && !popupTargeted;
+  const capture = () => popupTargeted ? driver.capturePopup(name) : desktopWide ? driver.captureDesktop(name, identity) : driver.capture(name, identity);
   const cursor = (x: number, y: number) => desktopWide ? driver.moveDesktopCursor(name, x, y, identity) : driver.moveCursor(name, x, y, identity);
   const click = (x: number, y: number, options: { button?: "left" | "middle" | "right"; count?: 1 | 2; confirmFocusForeground?: boolean } = {}) => {
     const normalized = { ...options, deliveryMode: mode, ...(signal ? { signal } : {}) };
     if (normalized.confirmFocusForeground === undefined) delete normalized.confirmFocusForeground;
+    if (popupTargeted) return driver.clickPopup(name, x, y, normalized);
     return desktopWide
       ? driver.clickDesktop(name, x, y, identity, normalized) : driver.click(name, x, y, identity, normalized);
   };
@@ -193,6 +209,14 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
       const typed = options
         ? await driver.typeText(name, action.text, identity, options)
         : await driver.typeText(name, action.text, identity);
+      // typeText resolving without throwing is not proof it actually landed --
+      // "suspected-noop" and "unverifiable" mean the driver could not confirm
+      // the text was accepted. Pressing Enter anyway can submit a stale or
+      // empty form; stop here and report a partial batch instead.
+      if (typed.outcome.status === "suspected-noop" || typed.outcome.status === "unverifiable") {
+        return { ...typed, batchOutcome: { status: "partial", completedSteps: 1, totalSteps: 2,
+          stoppedAt: "enter", message: "Typing was not confirmed as accepted; Enter was not sent to avoid submitting a stale or empty field." } };
+      }
       try {
         const entered = options
           ? await driver.pressKey(name, "Enter", identity, options)
@@ -210,8 +234,10 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
       : driver.scrollDelta(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }));
     case "drag": return desktopWide ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }))
       : driver.drag(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }));
-    case "press_key": return desktopWide ? driver.pressKeyDesktop(name, action.key, identity, stageOptions({ confirmFocusForeground })) : driver.pressKey(name, action.key, identity, stageOptions({ confirmFocusForeground }));
-    case "hotkey": return desktopWide ? driver.hotkeyDesktop(name, action.keys, identity, stageOptions({ confirmFocusForeground })) : driver.hotkey(name, action.keys, identity, stageOptions({ confirmFocusForeground }));
+    case "press_key": return popupTargeted ? driver.pressKeyPopup(name, action.key, { confirmFocusForeground, deliveryMode: mode, ...(signal ? { signal } : {}) })
+      : desktopWide ? driver.pressKeyDesktop(name, action.key, identity, stageOptions({ confirmFocusForeground })) : driver.pressKey(name, action.key, identity, stageOptions({ confirmFocusForeground }));
+    case "hotkey": return popupTargeted ? driver.hotkeyPopup(name, action.keys, { confirmFocusForeground, deliveryMode: mode, ...(signal ? { signal } : {}) })
+      : desktopWide ? driver.hotkeyDesktop(name, action.keys, identity, stageOptions({ confirmFocusForeground })) : driver.hotkey(name, action.keys, identity, stageOptions({ confirmFocusForeground }));
     case "click_element": return driver.clickElement(name, action.ref, identity, stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }));
     case "replace_element": return driver.replaceElement(name, action.ref, action.text, identity,
       stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground }));

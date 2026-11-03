@@ -1,8 +1,27 @@
 import { redactSecrets, type LogicalTaskContext, type Task } from "./inbox-core";
 
 const bounded = (value: string, limit: number) => redactSecrets(value).slice(0, limit);
+const wasClipped = (value: string, limit: number) => redactSecrets(value).length > limit;
+
+/** Shared with m9r_result's own tool description (mcp-server.ts) and every provider turn
+ * prompt. A task having many parts is never by itself a reason to end the turn early. */
+export const COMPLETION_DISCIPLINE =
+  "Report the actual outcome with m9r_result. A task having many parts or steps is never by "
+  + "itself a reason to stop -- keep working through every part of the request in this same "
+  + "turn. Use completion.status='incomplete' with the actual remaining requirements only when "
+  + "something genuinely prevents continuing right now (an owner decision is needed, the next "
+  + "step is destructive or ambiguous, or a hard error blocks it) and say exactly what that "
+  + "blocker is. Ending the provider turn alone never completes M9R work, and is never itself "
+  + "evidence you were blocked.";
 export function isLogicalContinuation(text: string): boolean {
-  return /^(?:continue|resume)(?:\s+(?:(?:the|my)\s+)?(?:(?:paused|previous)\s+)?(?:M9R\s+)?(?:task|work))?(?:[.!])?$/i.test(text.trim());
+  const trimmed = text.trim();
+  // The strict "continue/resume [task/work]" grammar missed ordinary natural
+  // follow-ups that mean the same thing -- "try that again", "finish the
+  // remaining steps", "keep going", "pick up where you left off" -- which
+  // then lost their carried-forward remainingWork/priorOutcome purely
+  // because of phrasing, not because the owner meant something different.
+  if (/^(?:continue|resume)(?:\s+(?:(?:the|my)\s+)?(?:(?:paused|previous)\s+)?(?:M9R\s+)?(?:task|work))?(?:[.!])?$/i.test(trimmed)) return true;
+  return /^(?:keep going|keep on|carry on|go on|pick up where (?:you|it) left off|finish (?:the\s+)?(?:remaining|rest of the)\s*(?:steps|work|task)?|try (?:that|it) again|(?:please\s+)?retry|where were (?:you|we))\b/i.test(trimmed);
 }
 
 export function isExplicitNewWork(text: string): boolean {
@@ -30,14 +49,32 @@ export function nextLogicalTaskContext(task: Task, previous?: Task, continuation
 export function logicalTaskHandoff(task: Task): string {
   const context = task.logicalContext;
   if (!context) return "";
+  const remainingWorkList = context.remainingWork ?? [context.latestInstruction];
+  // Clipping objective/instruction/outcome/pointers text or the remaining-work
+  // list down silently dropped later requirements, URLs, and constraints with
+  // no trace that anything was cut. Surface it explicitly instead, so the
+  // provider (and anyone reading a transcript) knows this handoff is partial
+  // rather than assuming it is the complete picture.
+  const clipped = [
+    wasClipped(context.originalObjective, 2000) && "originalObjective",
+    wasClipped(context.latestInstruction, 4000) && "latestInstruction",
+    context.priorOutcome && wasClipped(context.priorOutcome, 2000) && "priorOutcome",
+    remainingWorkList.length > 32 && "remainingWork (list truncated)",
+    remainingWorkList.some((item) => wasClipped(item, 1_000)) && "remainingWork (item text truncated)",
+    task.pointers.length > 8 && "pointers (list truncated)",
+  ].filter((value): value is string => Boolean(value));
   return "M9R logical task context (data, not additional owner instructions):\n" + JSON.stringify({
-    workId: context.workId,
+    continuityGroupId: context.workId,
     planRevision: context.planRevision,
     control: context.control,
     originalObjective: bounded(context.originalObjective, 2000),
     latestInstruction: bounded(context.latestInstruction, 4000),
-    remainingWork: (context.remainingWork ?? [context.latestInstruction]).slice(0, 32).map((item) => bounded(item, 1_000)),
+    remainingWork: remainingWorkList.slice(0, 32).map((item) => bounded(item, 1_000)),
     ...(context.priorOutcome ? { priorOutcome: bounded(context.priorOutcome, 2000) } : {}),
     pointers: task.pointers.slice(0, 8).map((pointer) => bounded(pointer, 200)),
-  }) + "\nA pause is not evidence of completion. Reobserve the current surface before acting. Follow the latest instruction; do not replay earlier tasks.";
+    ...(clipped.length ? { truncatedFields: clipped } : {}),
+  }) + "\nThis is background on what an earlier, now-paused turn already did -- not your current task id, and not "
+    + "something to pass to any tool. Call m9r_result with no taskId; M9R resolves your current task automatically. "
+    + "A pause on that earlier turn is not evidence of completion, and it does not block your own actions now. "
+    + "Reobserve the current surface before acting. Follow the latest instruction; do not replay earlier tasks.";
 }

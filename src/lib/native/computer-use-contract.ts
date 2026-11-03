@@ -129,6 +129,11 @@ export const computerUseIntentSchema = z.object({
   mode: z.enum(["explain", "prepare", "advance", "submit"]),
   allowAdvance: z.boolean(),
   allowSubmit: z.boolean(),
+  // Optional and separate from allowSubmit: granted only for the one Enter
+  // keystroke that commits a URL-bar navigation, never for clicking an actual
+  // submit/send control. Optional so an intent object carried over from
+  // before this field existed still validates.
+  allowNavigationCommit: z.boolean().optional(),
 }).strict();
 
 export const computerUsePostconditionSchema = z.discriminatedUnion("kind", [
@@ -190,9 +195,17 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
     // not an automatic retry or standing mode. It requires input.shared-os
     // to be advertised by the exact desktop-window target.
     confirmFocusForeground: z.boolean().optional(),
+    // Targets the exact app's currently owned popup window (a Windows error
+    // dialog, a Save As box -- listed as `ownedPopups` on a prior
+    // observation) instead of the app's own window. Point coordinates are
+    // relative to that popup's own capture, not the app window's.
+    targetPopup: z.boolean().optional(),
   }).strict().superRefine((action, context) => {
     if (action.count === 2 && action.button !== "left") {
       context.addIssue({ code: "custom", path: ["button"], message: "Double-click is defined as two left-button activations." });
+    }
+    if (action.targetPopup && action.locator.kind !== "point") {
+      context.addIssue({ code: "custom", path: ["locator"], message: "A popup-targeted click requires a point locator; popups have no observed element references." });
     }
   }),
   z.object({
@@ -228,6 +241,9 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
     modifiers: z.array(z.enum(["Control", "Alt", "Shift", "Meta", "Win"])).max(3)
       .refine((values) => new Set(values).size === values.length, "Key modifiers must be unique.").optional(),
     confirmFocusForeground: z.boolean().optional(),
+    // Sends the key/hotkey to the exact app's currently owned popup window
+    // instead of the app's own window. See `targetPopup` on "click".
+    targetPopup: z.boolean().optional(),
   }).strict(),
   z.object({
     ...actionEnvelope,

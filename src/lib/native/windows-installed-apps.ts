@@ -172,6 +172,9 @@ export async function discoverInstalledWindowsApp(
   // (Notepad is one example). These are two launch routes for the same app.
   if (packaged.length === 1 && unique.every((app) => app === packaged[0]
     || (typeof packaged[0].windowExecutable === "string" && app.executable.split(/[\\/]/).at(-1)?.toLowerCase() === packaged[0].windowExecutable.toLowerCase()))) return packaged[0];
-  if (unique.length > 1) throw new Error(`Windows found multiple installed apps named "${name}"; select the intended app.`);
+  if (unique.length > 1) {
+    const candidates = unique.slice(0, 10).map((app) => app.executable).join("; ");
+    throw new Error(`Windows found multiple installed apps named "${name}" (${candidates}); select the intended app.`);
+  }
   return unique[0];
 }

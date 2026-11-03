@@ -141,8 +141,13 @@ export function createMultiplayerRuntime(input: {
     if (delivery) {
       // Delivery is deliberately detached from contract acceptance. A provider
       // may be busy, but the structured sidecar remains accepted and durable in
-      // the runtime until the task path can present it.
-      void Promise.resolve(delivery(message)).catch(() => undefined);
+      // the runtime until the task path can present it. A delivery rejection
+      // used to vanish entirely here -- the sender saw acceptance with no
+      // trace that the teammate never actually saw the handoff. Surface it
+      // as a diagnostic; the detached/accepted contract itself is unchanged.
+      void Promise.resolve(delivery(message)).catch((error) => {
+        process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      });
     }
   });
 

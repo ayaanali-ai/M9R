@@ -1011,7 +1011,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_result",
     {
-      description: "Report the concrete outcome of the assigned task. Include completion.status='incomplete' and a dynamic remainingWork list when any requested requirement remains; M9R preserves that work for continuation instead of marking the task completed. A provider turn ending is not proof of task completion.",
+      description: "Report the concrete outcome of the assigned task. A task having many parts or steps is never by itself a reason to stop; keep working through every part of the request in this same turn. Use completion.status='incomplete' with a dynamic remainingWork list only when something genuinely prevents continuing right now -- an owner decision is needed, the next step is destructive or ambiguous, or a hard error blocks it -- and say exactly what that blocker is. M9R preserves incomplete work for continuation, but ending this turn is never itself evidence the task is done or that you were blocked.",
       inputSchema: {
         ...AUTH_FIELD,
         taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Optional legacy correlation field. Omit it for normal provider-bound delivery; M9R resolves the one current delivered work item automatically."),

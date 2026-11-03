@@ -9,7 +9,7 @@ import { defaultStoreRoot } from "./local-store";
 
 const STAGE_REGISTRY_VERSION = 3;
 const MAX_STAGES = 16;
-const MAX_NATIVE_RESPONSE_BYTES = 32 * 1024;
+const MAX_NATIVE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const OWNER_PREVIEW_STAGE_PREFIX = "preview-agent-";
 const DESKTOP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EMPTY_DESKTOP_ID_RE = /^00000000-0000-0000-0000-000000000000$/i;

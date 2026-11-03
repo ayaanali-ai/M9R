@@ -226,7 +226,12 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
   }
 
   async pause(): Promise<void> {
-    if (this.activeTaskId) throw new Error(`@${this.profile.handle} cannot pause while task ${this.activeTaskId} is active`);
+    // pause() used to require the caller to interrupt() an active turn first
+    // and only then call pause(), an implicit two-step protocol every caller
+    // had to know; a caller that just called pause() to suspend work got
+    // rejected instead. interrupt() is the same operation every subclass
+    // already implements for exactly this purpose, so do it here.
+    if (this.activeTaskId) await this.interrupt(this.activeTaskId);
     if (this.statusValue === "stopped") throw new Error(`@${this.profile.handle} is stopped`);
     this.paused = true;
     this.statusValue = "paused";

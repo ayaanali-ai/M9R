@@ -15,7 +15,7 @@ import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { prepareTaskStageNotice } from "./task-stage-notice";
 import { sessionHasUnfinishedDelivery } from "./task-delivery-pump";
-import { isExplicitNewWork, isLogicalContinuation, logicalTaskHandoff } from "./logical-task-context";
+import { isExplicitNewWork, isLogicalContinuation, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
 import type { Task } from "./inbox-core";
 
 class DeferredDelivery extends Error {
@@ -59,11 +59,6 @@ function pausedCodexTask(store: LocalStore, taskId: string, taskCwd: string | un
       && (!candidate.cwd || normCwd(candidate.cwd) === normCwd(taskCwd ?? "")))
     .sort((a, b) => b.seq - a.seq)[0];
 }
-
-const COMPLETION_DISCIPLINE =
-  "Report the actual outcome with m9r_result and an explicit completion status. Use completed with no remaining "
-  + "work only when every requested requirement is done; otherwise use incomplete and list the remaining "
-  + "requirements. Ending the provider turn alone never completes M9R work.";
 
 /** A task launched by M9R itself can inherit ~/.m9r/bin as process.cwd(); that is install state, never a project. */
 function projectCwdForTask(store: LocalStore, cwd: string | undefined): string | undefined {
