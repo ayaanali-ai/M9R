@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -408,9 +408,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   function roomFor(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
     return registry.stages.length >= MAX_STAGES ? withoutStaleOwnerPreviewStages(registry.stages, processAlive) : registry.stages;
   }
-  const invokeNative = deps.invokeNative ?? ((request) => invokeWindowsStageHelper(
-    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), request,
-  ));
+  const persistentHost = deps.invokeNative ? undefined : createPersistentWindowsStageHost(
+    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"),
+  );
+  const invokeNative = deps.invokeNative ?? ((request) => persistentHost!.invoke(request));
   function verifiedWindowInfo(value: unknown, currentDesktopId?: string) {
     const window = normalizeWindowInfo(value, currentDesktopId);
     if (!deps.invokeNative && !window.processGeneration) throw new Error("The native runtime cannot verify process generations; stage input requires the current verified candidate.");
@@ -1283,50 +1284,117 @@ function parseWindowId(value: string): string {
   return value;
 }
 
-function invokeWindowsStageHelper(executable: string, request: Record<string, unknown>): Promise<NativeStageResponse> {
-  if (!existsSync(executable)) throw new Error(`The native Windows stage helper is missing at ${executable}. Reinstall or rebuild the M9R Windows runtime first.`);
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, ["--desktop-stage-json"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill();
-      const operation = typeof request.op === "string" ? request.op : "unknown";
-      reject(new Error(`Native Windows desktop-stage operation “${operation}” timed out after 8 seconds; the helper was terminated.`));
-    }, 8_000);
-    const finish = (error?: Error, value?: NativeStageResponse) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve(value!);
-    };
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      stdout += chunk;
-      if (Buffer.byteLength(stdout, "utf8") > MAX_NATIVE_RESPONSE_BYTES) {
-        child.kill();
-        finish(new Error("The native Windows stage helper response exceeded its safe size."));
+interface PendingNativeStageRequest {
+  readonly operation: string;
+  readonly resolve: (response: NativeStageResponse) => void;
+  readonly reject: (error: Error) => void;
+  readonly timeout: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * One long-lived native stage host per manager.  Spawning the helper for every
+ * inspect/capture/input operation made a multi-step task pay process startup,
+ * DLL loading, and UIA initialization repeatedly.  The host speaks the same
+ * bounded length-prefixed JSON protocol as the input host; requests remain
+ * independently identified so concurrent reads cannot be confused.
+ */
+function createPersistentWindowsStageHost(executable: string) {
+  let child: ChildProcessWithoutNullStreams | undefined;
+  let buffer = Buffer.alloc(0);
+  const pending = new Map<string, PendingNativeStageRequest>();
+
+  const failAll = (error: Error): void => {
+    const active = [...pending.values()];
+    pending.clear();
+    for (const request of active) {
+      clearTimeout(request.timeout);
+      request.reject(error);
+    }
+    child = undefined;
+    buffer = Buffer.alloc(0);
+  };
+
+  const parseFrames = (): void => {
+    while (buffer.length >= 4) {
+      const length = buffer.readUInt32LE(0);
+      if (length < 1 || length > MAX_NATIVE_RESPONSE_BYTES) {
+        const error = new Error("The native Windows stage helper response exceeded its safe size.");
+        child?.kill();
+        failAll(error);
+        return;
       }
-    });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-2_000); });
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (settled) return;
+      if (buffer.length < 4 + length) return;
+      const body = buffer.subarray(4, 4 + length);
+      buffer = buffer.subarray(4 + length);
       let parsed: unknown;
-      try { parsed = JSON.parse(stdout); } catch { finish(new Error(`Native Windows stage helper returned invalid JSON${stderr.trim() ? `: ${stderr.trim()}` : "."}`)); return; }
+      try { parsed = JSON.parse(body.toString("utf8")); }
+      catch { failAll(new Error("Native Windows stage helper returned invalid JSON.")); return; }
       if (!parsed || typeof parsed !== "object" || typeof (parsed as NativeStageResponse).ok !== "boolean") {
-        finish(new Error("Native Windows stage helper returned an invalid response."));
+        failAll(new Error("Native Windows stage helper returned an invalid response."));
         return;
       }
       const response = parsed as NativeStageResponse;
-      if (code !== 0 && response.ok) finish(new Error("Native Windows stage helper exited unsuccessfully after reporting success."));
-      else finish(undefined, response);
+      const requestId = typeof (response as NativeStageResponse & { requestId?: unknown }).requestId === "string"
+        ? (response as NativeStageResponse & { requestId: string }).requestId : undefined;
+      if (!requestId) continue;
+      const request = pending.get(requestId);
+      if (!request) continue;
+      pending.delete(requestId);
+      clearTimeout(request.timeout);
+      request.resolve(response);
+    }
+  };
+
+  const ensureChild = (): ChildProcessWithoutNullStreams => {
+    if (child) return child;
+    if (!existsSync(executable)) throw new Error(`The native Windows stage helper is missing at ${executable}. Reinstall or rebuild the M9R Windows runtime first.`);
+    const spawned = spawn(executable, ["--desktop-stage-server"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    child = spawned;
+    spawned.stdout.on("data", (chunk: Buffer | string) => {
+      buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+      parseFrames();
     });
-    child.stdin.end(JSON.stringify(request));
-  });
+    spawned.stderr.resume();
+    spawned.once("error", (error) => failAll(error));
+    spawned.once("close", (code) => {
+      if (child === spawned) failAll(new Error(`Native Windows stage helper exited (${code ?? "unknown"}) before completing its request.`));
+    });
+    return spawned;
+  };
+
+  const invoke = (request: Record<string, unknown>): Promise<NativeStageResponse> => {
+    const requestId = typeof request.requestId === "string" && request.requestId.length > 0 ? request.requestId : randomUUID();
+    const payload = Buffer.from(JSON.stringify({ ...request, requestId }), "utf8");
+    if (payload.length > 16 * 1024) return Promise.reject(new Error("desktop stage request is invalid or too large"));
+    const host = ensureChild();
+    return new Promise((resolve, reject) => {
+      const operation = typeof request.op === "string" ? request.op : "unknown";
+      const timeout = setTimeout(() => {
+        pending.delete(requestId);
+        host.kill();
+        failAll(new Error(`Native Windows desktop-stage operation “${operation}” timed out after 8 seconds; the helper was terminated.`));
+      }, 8_000);
+      pending.set(requestId, { operation, resolve, reject, timeout });
+      const frame = Buffer.allocUnsafe(4 + payload.length);
+      frame.writeUInt32LE(payload.length, 0);
+      payload.copy(frame, 4);
+      host.stdin.write(frame, (error) => {
+        if (error) {
+          clearTimeout(timeout);
+          pending.delete(requestId);
+          failAll(error);
+        }
+      });
+    });
+  };
+
+  const close = (): void => {
+    if (!child) return;
+    child.kill();
+    failAll(new Error("Native Windows stage helper was closed."));
+  };
+  process.once("exit", close);
+  return { invoke, close };
 }
 
 export async function runWindowsDesktopStageCli(args: string[], deps: WindowsStageDependencies = {}): Promise<number> {

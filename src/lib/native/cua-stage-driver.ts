@@ -1903,12 +1903,23 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           const popups = await manager.ownedPopups(pid, windowId.toString());
           if (popups.length >= 8) popupCaptureStatus = "unavailable"; // bounded enumeration may have more surfaces
           for (const popup of popups) {
-            const popupId = BigInt(popup.windowId);
-            const snapshot = await driver.getWindowState({ pid, windowId: popupId, session, includeAccessibilityTree: false,
-              includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1_500 });
             const verified = (await manager.ownedPopups(pid, windowId.toString())).some((p) => p.windowId === popup.windowId);
             if (!verified) { popupCaptureStatus = "unavailable"; continue; }
-            const image = imageFromWindowState(snapshot, pid, popupId);
+            // Popup perception is native in production just like the owning
+            // window.  The old path asked Cua for a second screenshot here,
+            // which reintroduced a closed perception engine into every menu
+            // and suggestion-list read.  Keep that route only for injected
+            // compatibility fixtures.
+            let image: { dataUrl: string; width: number; height: number };
+            try {
+              image = await manager.captureWindow(pid, popup.windowId);
+            } catch (nativeError) {
+              if (!allowCuaCompatibility) throw nativeError;
+              const popupId = BigInt(popup.windowId);
+              const snapshot = await driver.getWindowState({ pid, windowId: popupId, session, includeAccessibilityTree: false,
+                includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1_500 });
+              image = imageFromWindowState(snapshot, pid, popupId);
+            }
             ownedPopups.push({ dataUrl: image.dataUrl, width: image.width, height: image.height, capturedAt: now().toISOString(), coordinateSpace: "popup-local" });
           }
         } catch { popupCaptureStatus = "unavailable"; }
@@ -2308,8 +2319,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       const current = await manager.currentForegroundWindow().catch(() => undefined);
       const windows: CuaDesktopStructureWindow[] = [];
       const elements: CuaDesktopStructureElement[] = [];
-      for (let index = 0; index < visible.length && windows.length < MAX_DESKTOP_STRUCTURE_WINDOWS; index++) {
-        const item = visible[index]!;
+      const rankedVisible = [...visible].sort((left, right) => {
+        const leftFrontmost = current && current.pid === left.pid && current.windowId === left.windowId ? 1 : 0;
+        const rightFrontmost = current && current.pid === right.pid && current.windowId === right.windowId ? 1 : 0;
+        if (leftFrontmost !== rightFrontmost) return rightFrontmost - leftFrontmost;
+        return (right.width * right.height) - (left.width * left.height);
+      });
+      for (let index = 0; index < rankedVisible.length && windows.length < MAX_DESKTOP_STRUCTURE_WINDOWS; index++) {
+        const item = rankedVisible[index]!;
         if (/m9r(?:[- ]overlay)?|agent cursor overlay|cua cursor overlay/i.test(`${item.className ?? ""} ${item.title}`)) continue;
         const x = Number.isFinite(item.x) ? item.x! : 0;
         const y = Number.isFinite(item.y) ? item.y! : 0;

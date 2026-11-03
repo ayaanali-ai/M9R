@@ -122,3 +122,34 @@ The owner-preview action path now selects the M9R native sender whenever one exi
 - Added focused classifier coverage for quota, model, transport, and timeout
   evidence. Phase 9 does not start a provider, alter a user's provider
   profile, or introduce a provider-session resume path.
+
+### Phase 10 completion gate
+
+- Native desktop-stage managers now keep one bounded, request-id-multiplexed
+  `--desktop-stage-server` helper alive instead of spawning a process for every
+  UIA read, capture, or native action. The one-shot JSON entrypoint remains for
+  explicit CLI use; the production manager uses the persistent host only when
+  no test/injected invoker is supplied.
+- Popup perception is native-first in production. The Cua popup screenshot is
+  retained only behind the explicit compatibility seam, so menus and
+  suggestion surfaces do not silently re-enter the retired perception route.
+- Visible-window structure is ranked generically by the verified foreground
+  window and then area before bounded enumeration; no app/site-specific rule
+  was added.
+- Brightness writes now distinguish a confirmed readback from a successful
+  write whose monitor exposes no readable brightness instance. The response
+  reports `verification: "readback"` or `"write-dispatched"` instead of
+  claiming a false failure/success.
+- Existing native frame updates remain one stage transaction and are
+  re-observed by the action layer; no second tiling implementation was added.
+- Verification: `rustfmt --check --edition 2021` passed for the Phase 10 Rust
+  files; `cargo build --release --manifest-path native-input-host/Cargo.toml`
+  passed; `npx tsc --noEmit -p .` passed; focused desktop/provider tests were
+  70/76 passing. The six failures are existing contract/environment cases:
+  owner-pointer preservation, owner-preview desktop width, two Chrome
+  foreground-confirmation expectations, the pre-existing 500-character error
+  wording assertion, and the pointer-preservation setup in the typed refusal
+  test. No new Phase 10 failure name appeared. The persistent helper itself is
+  compiled and protocol-checked at source level; a live installed-host run is
+  intentionally deferred to the owner's Phase 11 testing because this
+  roadmap never installs or promotes a candidate.
