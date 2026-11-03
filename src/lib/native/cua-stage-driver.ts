@@ -1488,9 +1488,21 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     if (!isBackgroundInputRefusal(background) && (background as ToolResult).isError !== true) {
       return actionOutcome(background, fallback);
     }
-    if (!isBackgroundInputRefusal(background)) return actionOutcome(background, fallback);
+    if (!isBackgroundInputRefusal(background)) {
+      // Cua Driver's background path can fail for reasons that have nothing
+      // to do with background delivery itself (e.g. its own hotkey resolver
+      // refusing a modern XAML/UWP target). When we own a real foreground
+      // path for this action, that is a reason to use it, not a reason to
+      // give up -- only surface Cua's error directly when we have no native
+      // fallback to try instead.
+      if (options.nativeForeground) return runForeground();
+      return actionOutcome(background, fallback);
+    }
   } catch (error) {
-    if (!isBackgroundInputRefusal(error)) throw error;
+    if (!isBackgroundInputRefusal(error)) {
+      if (options.nativeForeground) return runForeground();
+      throw error;
+    }
   }
 
   if (options.deliveryMode === "owner-preview" || options.deliveryMode === "background") {
