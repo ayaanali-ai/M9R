@@ -1160,10 +1160,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!result.ok) throw new Error(result.error ?? "Windows declined the drag.");
   }
 
-  async function sendScroll(pid: number, windowId: string, x: number, y: number, amount: number) {
+  async function sendScroll(pid: number, windowId: string, x: number, y: number, amount: number, axis: "horizontal" | "vertical" = "vertical") {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
-    const result = await invokeNative({ op: "sendScroll", pid, windowId, x, y, amount });
+    const result = await invokeNative({ op: "sendScroll", pid, windowId, x, y, amount, axis });
     if (!result.ok) throw new Error(result.error ?? "Windows declined the scroll.");
   }
 

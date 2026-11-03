@@ -2682,9 +2682,6 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     const scroll = scrollDeltaAmount(deltaX, deltaY, unit);
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the latest desktop screenshot.");
-      if (scroll.direction === "left" || scroll.direction === "right") {
-        throw new DesktopInputNotDispatchedError("Native horizontal wheel delivery is unavailable for this stage; no scroll input was sent.", "native-dispatch-unavailable");
-      }
       forgetDesktopInputTarget(name, identity);
       const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
       const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, screen);
@@ -2698,7 +2695,9 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
-            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, scroll.direction === "up" ? scroll.amount : -scroll.amount);
+            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y,
+              (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount,
+              (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical");
           }),
       });
     });
@@ -3145,7 +3144,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(name, pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
-            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
+            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount, "vertical");
           }),
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };
@@ -3267,12 +3266,12 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         pid, window_id: Number(windowId), x, y, direction: scroll.direction, by: scroll.by, amount: scroll.amount, session,
       }, "Cua Driver could not scroll the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        // Native dispatch only implements the vertical mouse wheel; a
-        // horizontal scroll (left/right) still has no native primitive.
-        ...((scroll.direction === "up" || scroll.direction === "down") ? { nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
-            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, scroll.direction === "up" ? scroll.amount : -scroll.amount);
-          }) } : {}),
+            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y,
+              (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount,
+              (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical");
+          }),
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);

@@ -413,7 +413,7 @@ pub fn send_drag(from_x: i32, from_y: i32, to_x: i32, to_y: i32, duration_ms: u3
 
 /// Scrolls the mouse wheel at an absolute screen point. `amount` is in wheel
 /// clicks (120 units each, matching `WHEEL_DELTA`); positive scrolls up.
-pub fn send_scroll_at_screen_point(x: i32, y: i32, amount: i32) -> Result<(), &'static str> {
+pub fn send_scroll_at_screen_point_axis(x: i32, y: i32, amount: i32, horizontal: bool) -> Result<(), &'static str> {
     if !send_mouse(x, y, MOUSEEVENTF_MOVE) {
         return Err("Windows declined trusted mouse movement");
     }
@@ -426,6 +426,7 @@ pub fn send_scroll_at_screen_point(x: i32, y: i32, amount: i32) -> Result<(), &'
         return Err("Windows returned no virtual screen bounds");
     }
     const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+    const MOUSEEVENTF_HWHEEL: u32 = 0x01000;
     let input = Input {
         kind: INPUT_MOUSE,
         data: InputData {
@@ -433,7 +434,7 @@ pub fn send_scroll_at_screen_point(x: i32, y: i32, amount: i32) -> Result<(), &'
                 dx: absolute_axis(x, origin_x, width),
                 dy: absolute_axis(y, origin_y, height),
                 mouse_data: (amount * 120) as u32,
-                flags: MOUSEEVENTF_WHEEL | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                flags: (if horizontal { MOUSEEVENTF_HWHEEL } else { MOUSEEVENTF_WHEEL }) | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 time: 0,
                 extra_info: 0,
             },
@@ -443,6 +444,10 @@ pub fn send_scroll_at_screen_point(x: i32, y: i32, amount: i32) -> Result<(), &'
         return Err("Windows declined the trusted scroll event");
     }
     Ok(())
+}
+
+pub fn send_scroll_at_screen_point(x: i32, y: i32, amount: i32) -> Result<(), &'static str> {
+    send_scroll_at_screen_point_axis(x, y, amount, false)
 }
 
 #[cfg(test)]

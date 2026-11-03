@@ -1928,7 +1928,8 @@ mod platform {
 
     /// Scrolls the mouse wheel at an absolute screen point, after confirming
     /// the target is the real foreground window. `amount` is in wheel clicks;
-    /// negative scrolls down.
+    /// negative scrolls down/left. The axis is explicit so horizontal wheel
+    /// input does not fall back to the retired semantic driver.
     pub(super) fn send_scroll(value: &serde_json::Value) -> Result<(), String> {
         let (pid, handle) = super::parse_window_identity(value)?;
         require_real_foreground(pid, handle)?;
@@ -1936,7 +1937,12 @@ mod platform {
         let amount = value.get("amount").and_then(serde_json::Value::as_i64)
             .filter(|n| (-100..=100).contains(n)).ok_or("invalid scroll amount")? as i32;
         if amount == 0 { return Err("scroll amount must not be zero".into()); }
-        crate::win32::send_scroll_at_screen_point(x, y, amount).map_err(str::to_owned)
+        let horizontal = value.get("axis").and_then(serde_json::Value::as_str).map(|axis| match axis {
+            "horizontal" => Ok(true),
+            "vertical" | "" => Ok(false),
+            _ => Err("invalid scroll axis"),
+        }).transpose()?.unwrap_or(false);
+        crate::win32::send_scroll_at_screen_point_axis(x, y, amount, horizontal).map_err(str::to_owned)
     }
 
     /// Presses one key or a modifier-combination hotkey (1-4 names, pressed in
