@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildId": "8c0099022b468667d1bcb582612e14b6830bb1053bb823c1d577aa8305412167",
-  "builtAt": "2026-11-03T20:56:14.533Z",
+  "buildId": "badfd7e85aa9f513882f3f7a1d62184fe189b8a2a47023aa12f5ebd1b7d237cb",
+  "builtAt": "2026-11-03T21:13:09.434Z",
   "artifacts": {
     "cua-driver-runtime/bin/cua-cursor-theme.exe": "27cab49c44aa9ed2013d969ef8b53955bbf4df87ae3522aa9167e1f9e4c33ca0",
     "cua-driver-runtime/bin/cua-driver-uia.exe": "e9dd9f16d55acc3b029d84aec3ae699d8244a1fc72414b206512d52f7ed77f5b",
@@ -189,7 +189,7 @@
     "m9r-web-broker.exe": "7bbe6a4d5c4ec404df3cad2468f0b8436ad50d0376e6d3feb90612bce7bf5380"
   },
   "source": {
-    "sourceCommit": "65ce2a46711aa63e50091de272c4f2f1d6030f0e",
+    "sourceCommit": "1e5292fc88ec7c3cdec91f5487d875b9281563b6",
     "sourceDirty": false
   }
 }
