@@ -509,22 +509,12 @@ async function typeIntoExactField(input: {
   // UIA ValuePattern has no caret/selection range in this driver contract.
   // Background insertion therefore appends to the freshly read value; never
   // replace existing content or invent an empty value when it is unavailable.
-  const nextValue = typeof element.value === "string" ? element.value + text : text;
-  try {
-    return actionOutcome(await driver.callTool("set_value", JSON.stringify({
-      pid: selected.pid, window_id: Number(selected.windowId), element_token: element.elementToken,
-      value: nextValue, session,
-    }), signal ? { signal } : undefined), "Cua Driver could not type into the exact accessibility field.");
-  } catch (error) {
-    // Chromium's UIA ValuePattern is observable but not writable through the
-    // background route for either an owner-preview task or an ordinary
-    // background one. The fallback is driverInputAction's own bounded,
-    // owner-idle-respecting foreground recovery (see its comment); it is not
-    // available for every deliveryMode, just these two explicit ones.
-    if (!backgroundInputRefused(error) || (input.deliveryMode !== "owner-preview" && input.deliveryMode !== "background")) throw error;
-    if (!input.fallback) throw error;
-    return input.fallback();
-  }
+  // UIA ValuePattern is perception only in the native runtime. Text delivery
+  // must use the same owned SendInput path as every other text action; callers
+  // provide the exact-window fallback with its native foreground/background
+  // sender. Never invoke the retired semantic Cua set_value operation here.
+  if (!input.fallback) throw new DesktopInputNotDispatchedError("Native text delivery is unavailable for the selected field; no text was sent.", "native-dispatch-unavailable");
+  return input.fallback();
 }
 
 function normalizeTypeDelayMs(value: number | undefined): number {
@@ -1454,20 +1444,15 @@ function backgroundRefusalMessage(value: unknown): string {
  * Uses `deps.ownerPointer` when supplied (the test seam); production always uses the real native
  * Windows stage manager's get/restore, which is in closure scope here via `manager`.
  */
-async function driverInputAction(driver: CuaDriverLike, name: string, args: Record<string, unknown>, fallback: string,
+async function driverInputAction(_driver: CuaDriverLike, name: string, args: Record<string, unknown>, fallback: string,
   options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview";
-    dispatch?: (delivery: "background" | "foreground") => Promise<ActionResult | ToolResult>;
-    /**
-     * Real, owned SendInput dispatch for the foreground-delivery path only.
-     * Background (non-activating) delivery has no native equivalent -- only
-     * Cua Driver can deliver input to a window that is not the real OS
-     * foreground -- so this is never used for that path. When present, the
-     * foreground path brings the target window to the real foreground and
-     * sends input through this instead of through Cua Driver at all.
-     */
     nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void>; sendBackground?: () => Promise<void> } } = {}) {
   options.signal?.throwIfAborted();
-  const asyncOptions = options.signal ? { signal: options.signal } : undefined;
+  // Registered app stages default to the non-activating/background contract.
+  // Owner-preview callers pass `owner-preview` explicitly. Treating an omitted
+  // mode as an error made ordinary stage actions fall through to a refusal even
+  // though the native stage adapter had a valid desktop-isolation route.
+  const deliveryMode = options.deliveryMode ?? "background";
   const ownerPointer = deps.ownerPointer ?? { get: () => manager.getOwnerCursorPosition(), restore: (x: number, y: number) => manager.restoreOwnerCursorPosition(x, y) };
   let foregroundPointer: { x: number; y: number } | undefined;
   const deliverForeground = async (): Promise<CuaStageActionOutcome> => {
@@ -1485,37 +1470,20 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
     // The owner has explicitly opted into sharing real input: the agent dispatches
     // regardless of concurrent owner pointer movement. Only the pointer's resting
-    // position is preserved below, for a clean restore after the action -- the
-    // owner's movement itself is never a reason to refuse or delay dispatch.
-    // `delivery_mode: foreground` selects SendInput in the native driver, but
-    // it does not itself activate a registered background window. Make the
-    // ownership transition explicit before any keyboard/pointer event so the
-    // visible app, the synthetic cursor, and the input target cannot diverge.
+    // position is preserved below, for a clean restore after the action.
     options.signal?.throwIfAborted();
-    if (!options.nativeForeground) {
-      actionOutcome(await driver.callTool("bring_to_front", JSON.stringify({ pid, window_id: windowId, session }), asyncOptions),
-        "Cua Driver could not bring the exact target window to the foreground.");
-    }
+    if (!options.nativeForeground) throw new DesktopInputNotDispatchedError(
+      "Native desktop input is unavailable for the exact target window; no input was sent.", "native-dispatch-unavailable");
     let outcome: CuaStageActionOutcome | undefined;
     let actionError: unknown;
     try {
       options.signal?.throwIfAborted();
-      if (options.nativeForeground) {
-        await options.nativeForeground.bringToFront();
-        options.signal?.throwIfAborted();
-        await options.nativeForeground.send();
-        // Native SendInput reports only whether the OS accepted the event --
-        // it has no visibility into whether the target app actually reflected
-        // it. That is intentionally a separate, later, non-blocking check
-        // (the before/after capture comparison callers already do), not
-        // collapsed into this status the way Cua Driver's own semantic
-        // confirmation was.
-        outcome = { status: "unverified" };
-      } else {
-        outcome = actionOutcome(await (options.dispatch
-          ? options.dispatch("foreground")
-          : driver.callTool(name, JSON.stringify({ ...args, delivery_mode: "foreground" }), asyncOptions)), fallback);
-      }
+      await options.nativeForeground.bringToFront();
+      options.signal?.throwIfAborted();
+      await options.nativeForeground.send();
+      // Native SendInput reports only OS-level delivery. The caller's refreshed
+      // UIA capture is the separate semantic verification signal.
+      outcome = { status: "unverified" };
     } catch (error) {
       actionError = error;
     }
@@ -1566,62 +1534,16 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     if (actionError) throw actionError;
     return { status: "unverified", summary: "Native stage input was delivered on the stage desktop; the refreshed UI state is the semantic verification." };
   };
-  // Native foreground dispatch is the canonical production path. Cua Driver
-  // remains available only for the synthetic cursor/presentation and for
-  // legacy callers that have no native sender at all. Never probe the Cua
-  // action endpoint first: a refusal there used to turn a valid native action
-  // into a false "uncertain" result and added a full round trip of latency.
-  // Owner-preview actions are already authorized to use the user's visible
-  // desktop. When the native sender is available, make it the canonical route
-  // even when the caller did not spell out `confirmFocusForeground`; otherwise
-  // an ordinary click/type/scroll silently took the slow Cua action path and
-  // could be refused by Cua's own semantic resolver. Background stages retain
-  // their non-activating route until a stage-scoped native adapter is supplied.
-  if (options.nativeForeground && options.deliveryMode === "owner-preview") return runForeground();
-  if (options.nativeForeground?.sendBackground && options.deliveryMode === "background") return runBackgroundNative();
-  if (options.deliveryMode === "background" && options.preferForeground) {
+  // Native SendInput is the only production input path. A stage that can safely
+  // deliver without activation supplies sendBackground; otherwise it escalates
+  // to the same exact-window foreground path. There is no Cua action fallback.
+  if (options.nativeForeground?.sendBackground && deliveryMode === "background" && !options.preferForeground) return runBackgroundNative();
+  if (options.nativeForeground && (deliveryMode === "owner-preview" || options.preferForeground || deliveryMode === "background")) return runForeground();
+  if (deliveryMode === "background" && options.preferForeground) {
     throw new DesktopInputNotDispatchedError("A background stage cannot request foreground input; no input was sent. Use an owner-preview stage for an explicitly visible action.", "background-unavailable");
   }
-  if (options.preferForeground) return runForeground();
-  const backgroundArgs = JSON.stringify({ ...args, delivery_mode: "background" });
-  try {
-    const background = await timed("background-dispatch", () => options.dispatch
-      ? options.dispatch("background")
-      : driver.callTool(name, backgroundArgs, asyncOptions), {
-      detail: `action=${name};delivery=background`,
-    });
-    if (!isBackgroundInputRefusal(background) && (background as ToolResult).isError !== true) {
-      return actionOutcome(background, fallback);
-    }
-    if (!isBackgroundInputRefusal(background)) {
-      // Cua Driver's background path can fail for reasons that have nothing
-      // to do with background delivery itself (e.g. its own hotkey resolver
-      // refusing a modern XAML/UWP target). When we own a real foreground
-      // path for this action, that is a reason to use it, not a reason to
-      // give up -- only surface Cua's error directly when we have no native
-      // fallback to try instead.
-      if (options.nativeForeground) return runForeground();
-      return actionOutcome(background, fallback);
-    }
-  } catch (error) {
-    if (!isBackgroundInputRefusal(error)) {
-      if (options.nativeForeground) return runForeground();
-      throw error;
-    }
-  }
-
-  if (options.deliveryMode === "owner-preview" || options.deliveryMode === "background") {
-    // Some window classes (Chrome foremost among them) refuse background
-    // SendInput outright -- no amount of retrying the background route ever
-    // delivers it. The only real alternatives are an isolated CDP-connected
-    // profile or a browser extension; the owner has explicitly ruled both
-    // out and wants their one real, already-signed-in window used as-is. The
-    // owner has also explicitly waived pointer-coexistence deferral: bring
-    // the exact target window forward and deliver the input immediately,
-    // regardless of concurrent owner pointer movement (deliverForeground).
-    return runForeground();
-  }
-  throw new DesktopInputNotDispatchedError("background input is unavailable; Background delivery is not available for the selected window. No text was sent; M9R will not activate the window as a fallback. The owner's pointer was not used; foreground input requires an explicit foreground action.", "background-unavailable");
+  throw new DesktopInputNotDispatchedError(
+    `${fallback} Native background delivery is unavailable for this target and no input was sent.`, "background-unavailable");
 }
 
   async function deliverTextToExactWindow(input: {
@@ -1635,7 +1557,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     preferForeground?: boolean;
     deliveryMode?: "background" | "owner-preview";
     delayMs?: number;
-    dispatch?: (delivery: "background" | "foreground") => Promise<ActionResult | ToolResult>;
     nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void>; sendBackground?: () => Promise<void> };
     signal?: AbortSignal;
   }): Promise<CuaStageActionOutcome> {
@@ -1648,7 +1569,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           pid: selected.pid, window_id: Number(selected.windowId), text: input.text,
           delay_ms: input.delayMs ?? DEFAULT_TYPE_DELAY_MS, session: input.session,
         }, "Cua Driver could not type into the selected window.", {
-          deliveryMode: input.deliveryMode, dispatch: input.dispatch, signal: input.signal,
+          deliveryMode: input.deliveryMode, signal: input.signal,
           nativeForeground: input.nativeForeground,
         }),
       });
@@ -1667,7 +1588,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }, "Cua Driver could not type into the selected window.", {
       preferForeground: input.preferForeground,
       deliveryMode: input.deliveryMode,
-      dispatch: input.dispatch,
       signal: input.signal,
       nativeForeground: input.nativeForeground,
     });
@@ -2615,35 +2535,22 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       // native sender owns the actual click and uses the already verified
       // window-local point; this keeps semantic clicks from silently falling
       // back into the vendored Cua action endpoint.
-      const semanticClick = false;
       const outcome = await driverInputAction(runtime.driver, "click", {
         pid: point.target.pid,
         window_id: Number(point.target.windowId),
-        ...(semanticClick ? { element_token: point.element!.elementToken! } : { x: point.localPoint.x, y: point.localPoint.y }),
+        x: point.localPoint.x, y: point.localPoint.y,
         button: options.button === "right" ? "right" : options.button === "middle" ? "middle" : "left",
         count: options.count ?? 1,
         session: session.session,
       }, "Cua Driver could not click the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: (delivery) => runtime.driver.click({
-          target: new runtime.sdk.ActionTarget.Window(point.target),
-          position: semanticClick
-            ? new runtime.sdk.ClickPosition.Element!({ elementToken: point.element!.elementToken! })
-            : new runtime.sdk.ClickPosition.Coordinates({ x: point.localPoint.x, y: point.localPoint.y }),
-          deliveryMode: delivery === "foreground" ? runtime.sdk.InputDeliveryMode.Foreground : runtime.sdk.InputDeliveryMode.Background,
-          button: options.button === "right" ? runtime.sdk.ClickButton.Right : options.button === "middle" ? runtime.sdk.ClickButton.Middle : runtime.sdk.ClickButton.Left,
-          count: options.count ?? 1,
-          session: session.session,
-        }, options.signal ? { signal: options.signal } : undefined),
-        // Native dispatch can only target an absolute screen point, not Cua's
-        // semantic element-token click; fall through to Cua for that case.
-        ...(!semanticClick ? { nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
+        nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
             await manager.sendClick(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
               ...(options.count ? { count: options.count } : {}),
             });
-          }) } : {}),
+          }),
       });
       // Only a driver-confirmed click can establish where later keyboard input
       // should go. Returning an unverified click is truthful; remembering its
@@ -2691,11 +2598,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         await moveOwnerCursor(runtime, session, point);
         await inspectOwnerDesktop(name, identity);
         forgetDesktopInputTarget(name, identity);
-        if (!options.confirmFocusForeground) {
-          return actionOutcome(await runtime.driver.callTool("set_value", JSON.stringify({
-            pid: point.target.pid, window_id: Number(point.target.windowId), element_token: element.elementToken, value: text, session: session.session,
-          }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the field's value.");
-        }
         return nativeReplaceTextAtScreenPoint(point.target.pid, point.target.windowId, point.screenPoint.x, point.screenPoint.y, text);
       });
       invalidateDesktopCaptures();
@@ -2721,12 +2623,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         return await deliverTextToExactWindow({ runtime, session: session.session, pid: selected.pid,
           windowId: selected.windowId, selected, text, delayMs, preferForeground: options.confirmFocusForeground,
           deliveryMode: options.deliveryMode,
-          dispatch: () => runtime.driver.typeText({
-            target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }),
-            text,
-            session: session.session,
-            ...(delayMs !== undefined ? { delayMs } : {}),
-          } as never, options.signal ? { signal: options.signal } : undefined),
           nativeForeground: nativeStageInput(name, selected.pid, selected.windowId, () => manager.sendText(selected.pid, selected.windowId.toString(), text)),
           signal: options.signal });
       } catch (error) {
@@ -2753,11 +2649,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         direction, by: "line", amount, session: session.session,
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: () => runtime.driver.scroll({
-          target: new runtime.sdk.ActionTarget.Window(point.target), x: point.localPoint.x, y: point.localPoint.y,
-          direction: direction === "up" ? runtime.sdk.ScrollDirection.Up : runtime.sdk.ScrollDirection.Down,
-          by: runtime.sdk.ScrollBy.Line, amount: BigInt(amount), session: session.session,
-        }, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
             await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
@@ -2774,6 +2665,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     const scroll = scrollDeltaAmount(deltaX, deltaY, unit);
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the latest desktop screenshot.");
+      if (scroll.direction === "left" || scroll.direction === "right") {
+        throw new DesktopInputNotDispatchedError("Native horizontal wheel delivery is unavailable for this stage; no scroll input was sent.", "native-dispatch-unavailable");
+      }
       forgetDesktopInputTarget(name, identity);
       const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
       const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, screen);
@@ -2785,19 +2679,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         direction: scroll.direction, by: scroll.by, amount: scroll.amount, session: session.session,
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: () => runtime.driver.scroll({
-          target: new runtime.sdk.ActionTarget.Window(point.target), x: point.localPoint.x, y: point.localPoint.y,
-          direction: scroll.direction === "up" ? runtime.sdk.ScrollDirection.Up : runtime.sdk.ScrollDirection.Down,
-          by: scroll.by === "page" ? (runtime.sdk.ScrollBy.Page ?? runtime.sdk.ScrollBy.Line) : runtime.sdk.ScrollBy.Line,
-          amount: BigInt(scroll.amount), session: session.session,
-        }, options.signal ? { signal: options.signal } : undefined),
-        // Native dispatch only implements the vertical mouse wheel; a
-        // horizontal scroll (left/right) still has no native primitive and
-        // keeps using Cua Driver.
-        ...((scroll.direction === "up" || scroll.direction === "down") ? { nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
+        nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
             await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, scroll.direction === "up" ? scroll.amount : -scroll.amount);
-          }) } : {}),
+          }),
       });
     });
     invalidateDesktopCaptures();
@@ -2824,11 +2709,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         duration_ms: options.durationMs ?? 500, steps: 10, session: session.session,
       }, "Cua Driver could not drag on the owner's current desktop.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: () => runtime.driver.drag({
-          target: new runtime.sdk.ActionTarget.Window(start.target),
-          fromX: start.localPoint.x, fromY: start.localPoint.y, toX: end.localPoint.x, toY: end.localPoint.y,
-          durationMs: BigInt(options.durationMs ?? 500), steps: BigInt(10), session: session.session,
-        }, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: nativeStageInput(name, start.target.pid, start.target.windowId, async () => {
             const fromScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), start.localPoint.x, start.localPoint.y, capture.width, capture.height);
             const toScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), end.localPoint.x, end.localPoint.y, capture.width, capture.height);
@@ -2852,7 +2732,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           pid: selected.pid, window_id: Number(selected.windowId), key, session: session.session,
         }, "Cua Driver could not press the requested key in the selected window.", {
           preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-          dispatch: () => runtime.driver.pressKey({ key, target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }), session: session.session }, options.signal ? { signal: options.signal } : undefined),
           nativeForeground: nativeStageInput(name, selected.pid, selected.windowId, () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), [key])),
         });
       } catch (error) {
@@ -2873,7 +2752,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           pid: selected.pid, window_id: Number(selected.windowId), keys, session: session.session,
         }, "Cua Driver could not send the key combination to the selected window.", {
           preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-          dispatch: () => runtime.driver.hotkey({ keys, target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }), session: session.session }, options.signal ? { signal: options.signal } : undefined),
           nativeForeground: nativeStageInput(name, selected.pid, selected.windowId, () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), keys)),
         });
       } catch (error) {
@@ -2993,37 +2871,24 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         outcome: { status: "unverifiable", summary: "Routed the click to the exact native child control; application effect requires verification." } };
       await clearNativeInputSelection(name);
       const element = sdk.ClickPosition.Element ? await elementAtPoint(x, y, "click") : undefined;
-      const token = element?.elementToken;
-      // An element-token click still routes through Cua Driver -- we have no
-      // native equivalent of its accessibility-element click target, only
-      // raw screen-point dispatch. Point clicks (the common case, and the one
-      // the modern-Notepad failure actually hit) use our own SendInput.
-      const useNative = !(token && sdk.ClickPosition.Element);
+      // Accessibility data supplies the semantic target metadata; the actual
+      // input is always an exact screen-point SendInput dispatch.
       const outcome = await driverInputAction(driver, "click", {
         pid,
         window_id: Number(windowId),
-        ...(token && sdk.ClickPosition.Element ? { element_token: token } : { x, y }),
+        x, y,
         ...(options.button ? { button: options.button === "right" ? "right" : options.button === "middle" ? "middle" : "left" } : {}),
         ...(options.count ? { count: options.count } : {}),
         session,
       }, "Cua Driver could not click the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: (delivery) => driver.click({
-          target: new sdk.ActionTarget.Window({ pid, windowId }),
-          position: token && sdk.ClickPosition.Element
-            ? new sdk.ClickPosition.Element({ elementToken: token })
-            : new sdk.ClickPosition.Coordinates({ x, y }),
-          deliveryMode: delivery === "foreground" ? sdk.InputDeliveryMode.Foreground : sdk.InputDeliveryMode.Background,
-          ...(options.button ? { button: options.button === "right" ? sdk.ClickButton.Right : options.button === "middle" ? sdk.ClickButton.Middle : sdk.ClickButton.Left } : {}),
-          ...(options.count ? { count: options.count } : {}), session,
-        }, options.signal ? { signal: options.signal } : undefined),
-        ...(useNative ? { nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
             await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
               ...(options.count ? { count: options.count } : {}),
             });
-          }) } : {}),
+          }),
       });
       if (cursorIdentity) {
         if (element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(element.role ?? "")) {
@@ -3057,7 +2922,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         pid, window_id: Number(windowId), key, session,
       }, "Cua Driver could not press the requested key in the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: () => driver.pressKey({ key, target: new sdk.ActionTarget.Window({ pid, windowId }), session }, options.signal ? { signal: options.signal } : undefined),
         // Every key name reaching this point was already validated upstream
         // (task-stage-actions.ts's validKey/KEY_NAMES) against exactly the
         // set our own native vk_for_key_name mapping covers.
@@ -3081,7 +2945,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         pid, window_id: Number(windowId), keys, session,
       }, "Cua Driver could not send the requested key combination to the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: () => driver.hotkey({ keys, target: new sdk.ActionTarget.Window({ pid, windowId }), session }, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: nativeStageInput(name, pid, windowId, () => manager.sendKeyCombo(pid, windowId.toString(), keys)),
       });
       try { return { capture: stageCapture(await captureWindow(), now), outcome }; }
@@ -3104,12 +2967,9 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   // agent that a popup is there, with no way to click or type into it at all.
   // Every click/key dispatch is bound to the registered app's own windowId,
   // which the popup is not -- so a click aimed "at the dialog" always landed
-  // on the app window behind it, never the dialog itself. These three
-  // functions resolve the app's current owned popup and dispatch straight to
-  // its own pid/windowId, the same way click/pressKey/hotkey dispatch to the
-  // registered app window, with a plain callTool fallback instead of the
-  // typed SDK dispatch path (click/pressKey/hotkey's `dispatch` option is an
-  // optimization over that same fallback, not a different mechanism).
+  // on the app window behind it, never the dialog itself. These functions
+  // resolve the app's current owned popup and dispatch straight to its own
+  // pid/windowId through the same native SendInput path as the app window.
   async function withRegisteredPopup<T>(nameInput: string, run: (input: {
     driver: CuaDriverLike; session: string; pid: number; popupWindowId: bigint;
     capture: () => Promise<CuaStageCapture>;
@@ -3242,8 +3102,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       const outcome = await deliverTextToExactWindow({ runtime: { sdk, driver }, session, pid, windowId,
         text, selected, nativeInput: () => nativeControl(name, "type", undefined, { text }),
         delayMs, preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode,
-        dispatch: () => driver.typeText({ target: new sdk.ActionTarget.Window({ pid, windowId }), text, session,
-          ...(delayMs !== undefined ? { delayMs } : {}), } as never, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: nativeStageInput(name, pid, windowId, () => manager.sendText(pid, windowId.toString(), text)),
         signal: options.signal });
       return { capture: stageCapture(await captureWindow(), now), outcome };
@@ -3268,9 +3126,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         direction, by: "line", amount, session,
       }, "Cua Driver could not scroll the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: () => driver.scroll({ target: new sdk.ActionTarget.Window({ pid, windowId }), x, y,
-          direction: direction === "up" ? sdk.ScrollDirection.Up : sdk.ScrollDirection.Down,
-          by: sdk.ScrollBy.Line, amount: BigInt(amount), session }, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: nativeStageInput(name, pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
             await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
@@ -3292,8 +3147,6 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         duration_ms: options.durationMs ?? 500, steps: 10, session,
       }, "Cua Driver could not drag in the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: () => driver.drag({ target: new sdk.ActionTarget.Window({ pid, windowId }), fromX, fromY, toX, toY,
-          durationMs: BigInt(options.durationMs ?? 500), steps: BigInt(10), session }, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: nativeStageInput(name, pid, windowId, async () => {
             const fromScreen = await localToScreenPoint(pid, windowId, fromX, fromY, before.width, before.height, before.windowBounds);
             const toScreen = await localToScreenPoint(pid, windowId, toX, toY, before.width, before.height, before.windowBounds);
@@ -3329,24 +3182,18 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       const point = elementCursorPoint(selected.element, selected.frame);
       const selectedElementToken = selected.element.elementToken;
       if (!selectedElementToken) throw new DesktopInputNotDispatchedError("The accessibility element is missing its driver token; no click was sent.");
+      if (!point) throw new DesktopInputNotDispatchedError("The accessibility element has no usable screen point; no click was sent.", "target-identity");
       if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
       await clearNativeInputSelection(name);
       const outcome = await driverInputAction(driver, "click", {
-        pid, window_id: Number(windowId), element_token: selectedElementToken, button: "left", count: 1, session,
+        pid, window_id: Number(windowId), x: point.x, y: point.y, button: "left", count: 1, session,
       }, "Cua Driver could not click the selected accessibility element.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        dispatch: (delivery) => driver.click({ target: new sdk.ActionTarget.Window({ pid, windowId }),
-          position: sdk.ClickPosition.Element ? new sdk.ClickPosition.Element({ elementToken: selectedElementToken }) : new sdk.ClickPosition.Coordinates({ x: point?.x ?? 0, y: point?.y ?? 0 }),
-          deliveryMode: delivery === "foreground" ? sdk.InputDeliveryMode.Foreground : sdk.InputDeliveryMode.Background,
-          button: sdk.ClickButton.Left, count: 1, session }, options.signal ? { signal: options.signal } : undefined),
-        // Native dispatch needs a concrete screen point; when the element's
-        // on-screen position couldn't be computed, there is nothing for it
-        // to click and this stays on Cua's semantic element-token click.
-        ...(point ? { nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, point.x, point.y, selected.frame.width, selected.frame.height, selected.frame.windowBounds);
             await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {});
-          }) } : {}),
+          }),
       });
       if (cursorIdentity && point && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
         && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(selected.element.role ?? "")) {
@@ -3370,11 +3217,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       if (!point) throw new DesktopInputNotDispatchedError("The selected accessibility field has no usable point; no text was sent.");
       const before = await captureWindow();
       const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
-      const outcome = options.confirmFocusForeground || options.deliveryMode === "owner-preview"
-        ? await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text)
-        : actionOutcome(await driver.callTool("set_value", JSON.stringify({
-          pid, window_id: Number(windowId), element_token: selected.element.elementToken, value: text, session,
-        }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the selected accessibility value.");
+      const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text);
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }

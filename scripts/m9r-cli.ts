@@ -3460,7 +3460,6 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
 }
 
 async function runWebCli(args: string[]): Promise<number> {
-  if (args[0] === "chrome") return (await import("../src/lib/native/agent-chrome-cli")).runAgentChromeCli(args.slice(1));
   if (args[0] === "broker-update") return runManagedBrokerUpdate(args.slice(1));
   if (args[0] === "stage") {
     if (args[1] === "approve-app") throw new Error("Per-app catalog approvals are retired. Resolve installed apps by name; grant computer control once per agent.");

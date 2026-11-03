@@ -90,8 +90,12 @@ test("desktop app launch resolution prefers Windows-installed apps over package-
   }), /package-manager command shim.*was not launched/);
 
   const direct = { executable: "C:\\Program Files\\Notepad\\notepad.exe", args: [] };
+  const packagedNotepad = { executable: "C:\\Windows\\explorer.exe", args: ["shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"], windowExecutable: "Notepad.exe" };
   assert.deepEqual(await resolveStageLaunchApp("notepad", {
-    env, resolveDirect: () => direct, discoverInstalledApp: async () => assert.fail("a resolved native app should not require discovery"),
+    env, resolveDirect: () => direct, discoverInstalledApp: async () => packagedNotepad,
+  }), packagedNotepad, "friendly names prefer the registered packaged app over a legacy compatibility executable");
+  assert.deepEqual(await resolveStageLaunchApp("C:\\Program Files\\Notepad\\notepad.exe", {
+    env, resolveDirect: () => direct, discoverInstalledApp: async () => assert.fail("an explicit executable path must bypass installed-app discovery"),
   }), direct);
   assert.deepEqual(await resolveStageLaunchApp("notepad", {
     env, resolveDirect: () => { throw new Error("No direct executable on PATH"); }, discoverInstalledApp: async () => installed,

@@ -211,10 +211,18 @@ export async function resolveStageLaunchApp(appId: string, input: {
   let direct: StageAppLaunchSpec | undefined;
   let directError: unknown;
   try { direct = input.resolveDirect(); } catch (error) { directError = error; }
+  // A friendly app name is not an instruction to launch whichever executable
+  // happens to win PATH/App-Paths lookup. Windows often exposes a legacy
+  // compatibility stub beside the packaged app (Notepad is the common case),
+  // and the stub can open the wrong window class or bypass the app's registered
+  // activation route. Ask the installed-app inventory first for names; only an
+  // explicit absolute executable path keeps the direct route authoritative.
+  const explicitPath = isAbsolute(appId);
+  const installed = explicitPath ? undefined : await input.discoverInstalledApp(appId);
+  if (installed) return installed;
   const packageShim = direct !== undefined && isPackageManagerShimPath(direct.executable, env);
   if (direct && !packageShim) return direct;
 
-  const installed = await input.discoverInstalledApp(appId);
   if (installed) return installed;
   if (packageShim) {
     throw new Error(`The app name "${appId}" resolved to a package-manager command shim, but Windows did not find a registered installed desktop app; the command shim was not launched.`);

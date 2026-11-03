@@ -5,6 +5,7 @@ export type DesktopInputGateCode =
   | "overlay-not-visible"
   | "foreground-lease"
   | "background-unavailable"
+  | "native-dispatch-unavailable"
   | "driver-refused"
   | "mutation-lease"
   | "mutation-revision";
