@@ -75,3 +75,16 @@ Status: controlled implementation record. This roadmap supplements Source of Tru
 ## Change-control rule
 
 Each phase is committed only after its own gate passes. A failing gate blocks the next phase; it is not worked around or silently deferred.
+
+## Controlled commits
+
+- Phase 1 baseline/inventory: `43647aad`.
+- Phase 2 native exact-window perception and capture: `3d22ae71` (the dependency lockfile is carried forward into the next controlled commit because Cargo regenerated it after the phase commit).
+- Phase 3 native-first foreground action and observation: `dd355420`.
+- Phase 4 native visible-window launch verification: `76d0f528`.
+- Phase 5 configurable cursor-only presentation boundary: `f88cdf57`.
+- Phase 6 owner-preview native dispatch preference is prepared in the working tree; it is not signed off until its focused gate is recorded below.
+
+### Phase 6 gate note
+
+The owner-preview action path now selects the M9R native sender whenever one exists, even when the caller did not set an explicit foreground confirmation flag. This removes the old silent Cua semantic-action round trip for visible work. Background-stage delivery is intentionally not claimed here: raw `SendInput` cannot target an off-desktop window without a stage-scoped activate/send/restore transaction, which remains a separate gate rather than being disguised as complete.
