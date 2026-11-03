@@ -20,6 +20,7 @@ import { resolveUniversalIntent, type IntentObservationHint } from "./universal-
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { preDispatchRetry, type ComputerUseRetry } from "./computer-use-recovery";
 import { recordComputerUseLatency } from "./computer-use-latency";
+import { runComputerUseProgram } from "./computer-use-program";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
 import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
 import type { VerifiedIdentity } from "./identity-core";
@@ -100,6 +101,12 @@ function buildInputSchemas(authField: ComputerUseMcpDeps["authField"]) {
       tab: z.string().min(1).max(40).optional(),
     },
     action: { ...tokenField, action: computerUseActionWireSchema },
+    program: {
+      ...tokenField,
+      code: z.string().min(1).max(64 * 1024),
+      timeoutMs: z.number().int().min(1).max(120_000).optional(),
+      maxCalls: z.number().int().min(1).max(512).optional(),
+    },
   };
 }
 
@@ -1828,6 +1835,42 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     description: "Execute one action against an observed desktop targetId and targetRevision with a stable operationId. Element locators carry ref and snapshotId from the same observation. The extension-backed browser-tab action route is retired; use m9r_stage_app plus an app-window observation for browser work. Supports native controls, text, hotkeys, scroll, drag, windows, menus, and system controls. On a confirmed exact desktop input target, text_then_enter batches text insertion and Enter in one bounded call; durable no-submit intent blocks both steps before dispatch. Reuse the operationId to reconcile a lost response. Delivery and verification are separate receipt fields. Follow refresh-target advice before replanning; background work never takes global focus.",
     inputSchema: inputSchemas.action, outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry(executeComputerAction, monotonicNow));
+
+  server.registerTool("m9r_computer_program", {
+    description: "Run a short broker-owned JavaScript program that composes M9R observations and actions. The program receives only the capability-scoped m9r.observe(), m9r.act(), and m9r.sleep() functions; it has no filesystem, network, process, browser-extension, or native-handle access. Each action still uses the normal target revision, identity, lease, and durable operation receipt checks. Use this for multi-step work instead of asking the provider to serialize dozens of brittle tool calls.",
+    inputSchema: inputSchemas.program,
+    outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
+  }, withComputerUseTelemetry<{ token?: unknown; code: string; timeoutMs?: number; maxCalls?: number }>(async ({ token, code, timeoutMs, maxCalls }, timing) => {
+    const identity = await deps.requireIdentity(token);
+    const authToken = await deps.identityToken(identity, token);
+    try {
+      const program = await runComputerUseProgram({ code, timeoutMs, maxCalls }, {
+        observe: async (input) => {
+          const target = input.target;
+          if (target !== "desktop" && target !== "app-window") throw new Error("Program observations support desktop or app-window targets only; browser extension routes are retired.");
+          const resolvedTaskId = deps.resolveTaskId(identity, typeof input.taskId === "string" ? input.taskId : undefined);
+          const observed = await timing.measure("observationMs", () => observeDesktop({
+            token: authToken,
+            identity,
+            taskId: resolvedTaskId,
+            mode: input.mode === "background" ? "background" : "owner-preview",
+            view: target === "app-window" ? "app" : "desktop",
+            representation: input.representation === "visual" ? "visual" : "structured",
+            bindForeground: input.bindForeground === true,
+          }));
+          return { target: observed.record.target, observation: observed.observation };
+        },
+        act: async (input) => {
+          const response = await executeComputerAction({ token: authToken, action: input as unknown as ComputerUseAction }, timing);
+          return response.structuredContent ?? response.content;
+        },
+        sleep: async (ms) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); },
+      });
+      return toolResponse({ program: { value: program.value, calls: program.calls, elapsedMs: program.elapsedMs } });
+    } catch (error) {
+      return toolResponse({ error: error instanceof Error ? error.message : "The computer-use program failed." }, undefined, true);
+    }
+  }, monotonicNow));
 
   if (deps.enableIsolatedBrowser) server.registerTool("m9r_browser_open", {
     description: "Retired. The extension-backed and isolated-browser routes are no longer available; use m9r_stage_app followed by m9r_computer_observe/action on the exact owner-visible browser window.",

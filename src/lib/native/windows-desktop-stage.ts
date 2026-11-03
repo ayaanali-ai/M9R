@@ -496,10 +496,14 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   async function desktopStructure(options: { maxElements?: number; maxDepth?: number } = {}): Promise<NativeDesktopStructure> {
     assertWindows();
     assertOwner();
-    const maxElements = options.maxElements ?? 64;
-    const maxDepth = options.maxDepth ?? 10;
-    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 64
-      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 10) {
+    // Keep the wrapper aligned with the native UIA walker. The previous
+    // desktop-wide 64/10 ceiling silently dropped taskbar, shell, and app
+    // controls before the provider ever saw them; the native host already
+    // supports the same 4096/64 bounds used for exact windows.
+    const maxElements = options.maxElements ?? 4096;
+    const maxDepth = options.maxDepth ?? 64;
+    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 4096
+      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 64) {
       throw new Error("Windows desktop structure bounds are invalid.");
     }
     const result = await invokeNative({ op: "inspectDesktopStructure", maxElements, maxDepth });

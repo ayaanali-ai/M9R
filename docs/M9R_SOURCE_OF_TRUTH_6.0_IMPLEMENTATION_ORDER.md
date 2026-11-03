@@ -596,3 +596,23 @@ create parallel implementations when a current path already exists.
     process tree and live provider behavior, and keep homepage deployment
     separate from desktop-runtime rollout.
 
+## XV. Final polish execution ledger
+
+The first implementation slice is now concrete and broker-owned:
+
+- `m9r_computer_program` is the single multi-step JavaScript composition entry
+  point. It composes the existing observe/action contracts instead of creating a
+  second input engine.
+- Program code receives only `m9r.observe`, `m9r.act`, and `m9r.sleep`; it has no
+  filesystem, network, process, browser-extension, or native-handle access.
+- Every composed action still passes through M9R identity, target revision,
+  operation receipts, leases, native dispatch, and post-action observation.
+- Program limits are explicit and bounded (64 KiB source, 120 s wall clock,
+  512 broker calls) and are transport safeguards, not app-specific workflows.
+- The TypeScript desktop-structure wrapper now exposes the same 4096-element /
+  64-depth bounds already supported by the native UIA walker; the old 64/10
+  wrapper ceiling was silently dropping desktop controls.
+
+This ledger is not a release claim. Remaining items in XIV must be completed and
+verified before candidate acceptance or installation.
+
