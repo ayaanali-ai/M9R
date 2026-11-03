@@ -48,7 +48,7 @@ const live = [
   },
   {
     title: "Guardrails on browser and desktop control",
-    desc: "Agent control of your browser and computer runs locally, over a connection limited to your own machine. Site access is granted per site and limited by action, path, and time; agents' cursors and status are shown on screen; tasks that look risky wait for a person's approval; and there is a stop control. The extension refuses targeted reads or typing on password, payment-card, and one-time-code fields.",
+    desc: "Agent control of your browser and computer runs locally through the broker-owned desktop runtime, over a connection limited to your own machine. Agents' cursors and status are shown on screen; tasks that look risky wait for a person's approval; and there is a stop control. Sensitive actions remain subject to the active approval and provider policies.",
   },
 ];
 
@@ -62,7 +62,7 @@ const planned = [
 const limits = [
   "Browser and desktop control acts with your own permissions. Risk checks are pattern-based heuristics, not a sandbox, and can miss a harmful action or let one through.",
   "Anything an agent reads or sees on your screen is sent to that agent's AI provider and handled under the provider's terms.",
-  "The local connection between the browser extension and the M9R app is not encrypted. Do not run M9R's local components on shared or untrusted computers.",
+  "The local broker-to-desktop connection is not an internet service. Do not run M9R's local components on shared or untrusted computers.",
 ];
 
 export default function SecurityPage() {

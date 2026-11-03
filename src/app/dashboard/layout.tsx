@@ -63,10 +63,9 @@ export default async function DashboardLayout({ children }: { children: React.Re
       ]);
 
   return (
-    // data-m9r-app-shell: an explicit marker the browser extension checks before mounting its own floating presence
-    // overlay (the pill, the dock). The dashboard already has its own in-page chat, composer and @mention menu; the
-    // overlay has nothing to add here and was confirmed to sit above the @mention menu at a higher z-index, catching
-    // its clicks. See extensions/browser/src/content.js.
+    // data-m9r-app-shell remains a stable shell marker for in-app layout and
+    // automation diagnostics. The retired browser-extension overlay no longer
+    // mounts against this page.
     <div className={`${wfMono.variable} wf-root contents`} data-bs-mode="night" data-m9r-app-shell suppressHydrationWarning>
       {/* Pre-paint: restore the persisted Watchfloor mode before first render
           so Night Watch users never see a bone flash. Uses the supported

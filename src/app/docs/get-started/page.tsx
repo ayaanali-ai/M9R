@@ -8,15 +8,15 @@ import { SOURCE_URL } from "@/lib/marketing-content";
 
 export const metadata: Metadata = {
   title: "Get started — M9R docs",
-  description: "Connect your agents and shared browser with two commands.",
+  description: "Connect your agents and native desktop runtime with two commands.",
 };
 
 const TROUBLESHOOTING = [
   ["Command not found", <>Use the commands exactly as shown: <code>npx m9r-cli ...</code>. Check that Node.js 18 or newer and npm are installed, then open a new terminal.</>],
-  ["The browser extension is missing", <>Run <code>npx m9r-cli web setup</code>, load the copied managed folder in <code>chrome://extensions</code> or <code>edge://extensions</code>, and reload that same folder after an update.</>],
+  ["Browser work is unavailable", <>Run <code>npx m9r-cli web setup --broker-only</code> and then <code>npx m9r-cli doctor</code>. Browser work uses the native desktop runtime; no extension or Developer mode is required.</>],
   ["An agent is missing", <>Install the provider CLI, sign in to its own app, and run <code>npx m9r-cli connect</code> again. M9R does not sign in to providers for you.</>],
   ["The connection looks offline", <>Run <code>npx m9r-cli doctor</code>. If it reports that no connection exists, run <code>npx m9r-cli connect</code> again and approve the browser request.</>],
-  ["I want to undo this", <>Run <code>npx m9r-cli web uninstall</code> to remove the managed browser setup, or <code>npx m9r-cli disconnect</code> to revoke the hosted connection and remove its local token.</>],
+  ["I want to undo this", <>Run <code>npx m9r-cli web uninstall</code> to remove the M9R-owned broker login task, or <code>npx m9r-cli disconnect</code> to revoke the hosted connection and remove its local token.</>],
 ] as const;
 
 export default function GetStarted() {
@@ -27,9 +27,9 @@ export default function GetStarted() {
     >
       <Panel id="quick-start" title="Quick start" heading="Quick start" status="Any terminal">
         <p>Install Node.js 18 or newer, keep the provider apps you want signed in, then run these commands from any terminal:</p>
-        <code className={d.pre}>{"npx m9r-cli connect\nnpx m9r-cli web setup\nnpx m9r-cli doctor"}</code>
-        <p className={d.small}><code>connect</code> finds Claude Code, Codex, and OpenCode and opens one browser approval. <code>web setup</code> installs the managed browser extension and local broker. <code>doctor</code> confirms the connection.</p>
-        <p className={d.small}>The only manual browser step is loading the copied <code>%LOCALAPPDATA%\M9R\extension</code> folder with Developer mode enabled. Use that same folder after updates; do not load a second repository copy.</p>
+        <code className={d.pre}>{"npx m9r-cli connect\nnpx m9r-cli web setup --broker-only\nnpx m9r-cli doctor"}</code>
+        <p className={d.small}><code>connect</code> finds Claude Code, Codex, and OpenCode and opens one browser approval. <code>web setup --broker-only</code> starts the broker-owned native desktop runtime. <code>doctor</code> confirms the connection.</p>
+        <p className={d.small}>No browser extension, unpacked folder, or Developer mode is required. The runtime works with the exact owner-visible browser window and other desktop apps.</p>
       </Panel>
 
       <Panel id="requirements" title="Requirements" heading="What you need" status="Node.js 18+">
