@@ -301,6 +301,41 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Ok((pid, hwnd, shell, keyboard_window, origin_x, origin_y)) => json!({"ok":true,"requestId":request_id,"pointWindow":{"pid":pid,"windowId":hwnd.to_string(),"shell":shell,"keyboardWindow":keyboard_window,"screenOrigin":{"x":origin_x,"y":origin_y}}}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
+        #[cfg(windows)]
+        Some("windowRect") => match platform::window_rect(value) {
+            Ok(rect) => json!({"ok":true,"requestId":request_id,"rect":rect}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("bringToForeground") => match platform::bring_to_real_foreground(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("sendClick") => match platform::send_click(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("sendDrag") => match platform::send_drag(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("sendScroll") => match platform::send_scroll(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("sendKeyCombo") => match platform::send_key_combo(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("sendText") => match platform::send_text(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
         Some("currentDesktop") => match current_desktop() {
             Ok(desktop) => {
                 json!({ "ok": true, "requestId": request_id, "desktop": desktop_to_json(desktop) })
@@ -1620,6 +1655,122 @@ mod platform {
             );
         }
         Ok(result)
+    }
+
+    /// Reads a window's real screen bounds (including its title bar and
+    /// borders, the same frame Cua Driver's own window-state bounds describe)
+    /// directly, with no dependency on Cua Driver for it.
+    pub(super) fn window_rect(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetWindowRect(window, &mut rect) } == 0 || rect.right <= rect.left || rect.bottom <= rect.top {
+            return Err("Windows returned no valid window bounds".into());
+        }
+        Ok(serde_json::json!({ "x": rect.left, "y": rect.top, "width": rect.right - rect.left, "height": rect.bottom - rect.top }))
+    }
+
+    /// Raises the given owned window to the real OS foreground -- the one
+    /// `SendInput` keyboard events actually reach -- not merely to the front
+    /// of the Z-order. Every raw-input dispatch op below requires this to
+    /// have been confirmed first; none of them raise a window themselves.
+    pub(super) fn bring_to_real_foreground(value: &serde_json::Value) -> Result<(), String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        crate::win32::bring_window_to_real_foreground(window as usize).map_err(str::to_owned)
+    }
+
+    fn require_real_foreground(pid: u32, handle: usize) -> Result<Hwnd, String> {
+        let window = validate_window(pid, handle)?;
+        if unsafe { GetForegroundWindow() } != window {
+            return Err("the target window is not the real OS foreground window; bring it to the foreground before sending raw input".into());
+        }
+        Ok(window)
+    }
+
+    fn screen_point(value: &serde_json::Value, x_key: &str, y_key: &str) -> Result<(i32, i32), String> {
+        let x = value.get(x_key).and_then(serde_json::Value::as_i64)
+            .filter(|n| (-32_768..=32_767).contains(n)).ok_or_else(|| format!("invalid {x_key}"))? as i32;
+        let y = value.get(y_key).and_then(serde_json::Value::as_i64)
+            .filter(|n| (-32_768..=32_767).contains(n)).ok_or_else(|| format!("invalid {y_key}"))? as i32;
+        Ok((x, y))
+    }
+
+    /// Sends a real click at an absolute screen point via `SendInput`, after
+    /// confirming the target is the real foreground window. The caller
+    /// supplies final screen coordinates already resolved from whatever
+    /// local/window space it observed -- this does no coordinate mapping.
+    pub(super) fn send_click(value: &serde_json::Value) -> Result<(), String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        require_real_foreground(pid, handle)?;
+        let (x, y) = screen_point(value, "x", "y")?;
+        let button = match value.get("button").and_then(serde_json::Value::as_str).unwrap_or("left") {
+            "left" => crate::MouseButton::Left,
+            "right" => crate::MouseButton::Right,
+            "middle" => crate::MouseButton::Middle,
+            other => return Err(format!("unsupported mouse button \"{other}\"")),
+        };
+        let count = value.get("count").and_then(serde_json::Value::as_u64).unwrap_or(1).clamp(1, 3) as u32;
+        crate::win32::send_click_at_screen_point(x, y, button, count).map_err(str::to_owned)
+    }
+
+    /// Presses and releases a left-button drag between two absolute screen
+    /// points, after confirming the target is the real foreground window.
+    pub(super) fn send_drag(value: &serde_json::Value) -> Result<(), String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        require_real_foreground(pid, handle)?;
+        let (from_x, from_y) = screen_point(value, "fromX", "fromY")?;
+        let (to_x, to_y) = screen_point(value, "toX", "toY")?;
+        let duration_ms = value.get("durationMs").and_then(serde_json::Value::as_u64)
+            .map(|ms| ms.clamp(1, 10_000) as u32).unwrap_or(250);
+        crate::win32::send_drag(from_x, from_y, to_x, to_y, duration_ms).map_err(str::to_owned)
+    }
+
+    /// Scrolls the mouse wheel at an absolute screen point, after confirming
+    /// the target is the real foreground window. `amount` is in wheel clicks;
+    /// negative scrolls down.
+    pub(super) fn send_scroll(value: &serde_json::Value) -> Result<(), String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        require_real_foreground(pid, handle)?;
+        let (x, y) = screen_point(value, "x", "y")?;
+        let amount = value.get("amount").and_then(serde_json::Value::as_i64)
+            .filter(|n| (-100..=100).contains(n)).ok_or("invalid scroll amount")? as i32;
+        if amount == 0 { return Err("scroll amount must not be zero".into()); }
+        crate::win32::send_scroll_at_screen_point(x, y, amount).map_err(str::to_owned)
+    }
+
+    /// Presses one key or a modifier-combination hotkey (1-4 names, pressed in
+    /// order and released in reverse), after confirming the target is the
+    /// real foreground window. Each name is resolved the same way
+    /// `task-stage-actions.ts`'s key-name validation already accepts them.
+    pub(super) fn send_key_combo(value: &serde_json::Value) -> Result<(), String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        require_real_foreground(pid, handle)?;
+        let names = value.get("keys").and_then(serde_json::Value::as_array)
+            .ok_or("keys must be a non-empty array of 1-4 key names")?;
+        if names.is_empty() || names.len() > 4 {
+            return Err("keys must contain 1-4 key names".into());
+        }
+        let mut keys = Vec::with_capacity(names.len());
+        for name in names {
+            let name = name.as_str().ok_or("each key name must be a string")?;
+            let (vk, extended) = crate::win32::vk_for_key_name(name)
+                .ok_or_else(|| format!("unsupported key name \"{name}\""))?;
+            keys.push(crate::win32::KeySpec::Virtual { vk, extended });
+        }
+        crate::win32::send_key_combo(&keys).map_err(str::to_owned)
+    }
+
+    /// Types literal text as a sequence of Unicode key events, after
+    /// confirming the target is the real foreground window.
+    pub(super) fn send_text(value: &serde_json::Value) -> Result<(), String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        require_real_foreground(pid, handle)?;
+        let text = value.get("text").and_then(serde_json::Value::as_str).ok_or("text must be a string")?;
+        if text.is_empty() || text.chars().count() > 5_000 || text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+            return Err("invalid input text".into());
+        }
+        crate::win32::send_unicode_text(text).map_err(str::to_owned)
     }
 }
 

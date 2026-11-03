@@ -69,6 +69,7 @@ interface NativeStageResponse {
   result?: unknown;
   state?: "minimized" | "maximized" | "restored";
   processGeneration?: string;
+  rect?: { x?: number; y?: number; width?: number; height?: number };
 }
 
 export interface NativePointControl {
@@ -1017,6 +1018,67 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windows;
   }
 
+  /**
+   * Real, owned input dispatch -- SendInput at the native layer, not the
+   * vendored Cua Driver. `pid`/`windowId` identify the target; every op here
+   * requires the target to already be (or be brought to) the real OS
+   * foreground window, since that is the only window `SendInput` keyboard
+   * events can ever reach, regardless of what the caller intends to target.
+   */
+  async function windowRect(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "windowRect", pid, windowId });
+    const rect = result.rect as { x?: number; y?: number; width?: number; height?: number } | undefined;
+    if (!result.ok || !rect || ![rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === "number" && Number.isFinite(n)) || (rect.width as number) <= 0 || (rect.height as number) <= 0) {
+      throw new Error(result.error ?? "Windows returned no valid window bounds.");
+    }
+    return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
+  }
+
+  async function bringToForeground(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "bringToForeground", pid, windowId });
+    if (!result.ok) throw new Error(result.error ?? "Windows declined to raise the target window to the foreground.");
+  }
+
+  async function sendClick(pid: number, windowId: string, x: number, y: number,
+    options: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3 } = {}) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendClick", pid, windowId, x, y, ...options });
+    if (!result.ok) throw new Error(result.error ?? "Windows declined the click.");
+  }
+
+  async function sendDrag(pid: number, windowId: string, fromX: number, fromY: number, toX: number, toY: number, durationMs?: number) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendDrag", pid, windowId, fromX, fromY, toX, toY, ...(durationMs !== undefined ? { durationMs } : {}) });
+    if (!result.ok) throw new Error(result.error ?? "Windows declined the drag.");
+  }
+
+  async function sendScroll(pid: number, windowId: string, x: number, y: number, amount: number) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendScroll", pid, windowId, x, y, amount });
+    if (!result.ok) throw new Error(result.error ?? "Windows declined the scroll.");
+  }
+
+  async function sendKeyCombo(pid: number, windowId: string, keys: string[]) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendKeyCombo", pid, windowId, keys });
+    if (!result.ok) throw new Error(result.error ?? "Windows declined the key combination.");
+  }
+
+  async function sendText(pid: number, windowId: string, text: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendText", pid, windowId, text });
+    if (!result.ok) throw new Error(result.error ?? "Windows declined the typed text.");
+  }
+
   async function setWindowState(name: string, state: "minimized" | "maximized" | "restored") {
     const inspected = await inspectStage(name);
     if (!inspected.anchor) throw new Error("No exact selected window.");
@@ -1078,7 +1140,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups };
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups,
+    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect };
 }
 
 function parsePid(value: string): number {
