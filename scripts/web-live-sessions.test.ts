@@ -293,6 +293,8 @@ test("OpenCode keeps one ACP process/session across turns, streams Done, and car
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(launches.length, 1, "the second message must not launch another provider process");
     assert.equal(prompts.length, 2, "the same ACP session receives both turns");
+    assert.doesNotMatch(prompts[1], /Your M9R session token/,
+      "persistent OpenCode receives the M9R bootstrap once per process, not once per visible turn");
     assert.equal(launches[0].resumeId, undefined);
     assert.equal(t.identities.length, 1, "a single M9R identity is held for the persistent agent session");
     t.sessions.close();

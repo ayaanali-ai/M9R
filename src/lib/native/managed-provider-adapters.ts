@@ -762,8 +762,8 @@ function managedCodexAssignment(options: CodexAppServerManagedProviderConnection
   };
 }
 
-function managedCodexPrompt(options: CodexAppServerManagedProviderConnectionOptions, task: ManagedProviderTask): string {
-  return `${options.promptPrefix}\n\nThe owner says:\n${task.prompt}`;
+function managedCodexPrompt(options: CodexAppServerManagedProviderConnectionOptions, task: ManagedProviderTask, includePrefix: boolean): string {
+  return `${includePrefix ? `${options.promptPrefix}\n\n` : ""}The owner says:\n${task.prompt}`;
 }
 
 class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionBase {
@@ -774,6 +774,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
   private startup?: Promise<ManagedProviderReady>;
   private cancelledTask?: string;
   private interruptedTask?: string;
+  private promptPrefixGeneration?: number;
 
   constructor(options: CodexAppServerManagedProviderConnectionOptions) {
     super(options.profile);
@@ -860,6 +861,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     if (this.startup) return this.startup;
     await this.closeRuntime();
     const generation = this.beginStart();
+    this.promptPrefixGeneration = undefined;
     const adapter = this.createAdapter();
     const assignment = this.assignment();
     const promise = (async () => {
@@ -908,6 +910,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
       throw new Error(reason);
     }
     const generation = this.generationValue;
+    const includePromptPrefix = this.promptPrefixGeneration !== generation;
     this.beginTask(task.taskId);
     this.cancelledTask = undefined;
     yield { kind: "status", status: "working", doing: "Working" };
@@ -915,9 +918,10 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     let completed = false;
     let failure: string | undefined;
     try {
-      const iterator = adapter.prompt({ session, text: managedCodexPrompt(this.options, task) })[Symbol.asyncIterator]();
+      const iterator = adapter.prompt({ session, text: managedCodexPrompt(this.options, task, includePromptPrefix) })[Symbol.asyncIterator]();
       const first = iterator.next();
       yield { kind: "accepted" };
+      if (includePromptPrefix) this.promptPrefixGeneration = generation;
       let next = await first;
       while (!next.done) {
         if (generation !== this.generationValue || this.stopping) return;

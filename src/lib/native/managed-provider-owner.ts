@@ -299,6 +299,11 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
   const active = new Map<string, ActiveTask>();
   const queuedOwnerPrompts = new Map<string, QueuedOwnerPrompt[]>();
   const pausedConnections = new Set<string>();
+  // Provider instructions are connection bootstrap state, not a new owner
+  // message.  Remember the generation that received them so a normal turn
+  // does not re-append the full M9R preface and shared-memory block.  A real
+  // process restart increments the generation and receives a fresh bootstrap.
+  const bootstrappedGenerations = new Map<string, number>();
   const pendingAcceptance = new Map<string, PendingAcceptance>();
   const fenced = new Set<string>();
   const halted = { value: false };
@@ -450,8 +455,11 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     const previous = isExplicitNewWork(text) ? undefined : pausedOwnerTask(profile);
     const task = deps.store.prepareLogicalTaskContext?.(taskId, previous?.id, isLogicalContinuation(text));
     if (deps.store.prepareLogicalTaskContext && !task) throw new Error("M9R could not preserve the logical task handoff; no provider turn was started.");
-    const context = contextFor(profile);
-    return context.prompt + "\n\n" + (task ? logicalTaskHandoff(task) + "\n\n" : "")
+    // Connection bootstrap instructions are added once by runTask after the
+    // provider generation is known.  Keeping them out of this per-turn
+    // string prevents the internal M9R transport preface and the same room
+    // memory from appearing as a fresh visible user message every turn.
+    return (task ? logicalTaskHandoff(task) + "\n\n" : "")
       + COMPLETION_DISCIPLINE + "\n\n"
       + "The owner's latest instruction for M9R task " + taskId + ":\n" + text;
   }
@@ -614,7 +622,14 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         throw new Error("The owner-delivery window expired before the provider accepted the task; M9R did not send it.");
       }
       const generation = connection.status().generation;
-      const task = { taskId, connectionId: profile.connectionId, handle: profile.handle, provider: profile.provider, cwd: profile.cwd, generation, prompt: text } as const;
+      // Claude receives the same bootstrap through its persistent system
+      // prompt at process creation. Codex/OpenCode do not expose an
+      // equivalent in the installed adapters, so they receive it once per
+      // M9R-owned process generation, never once per owner message.
+      const needsBootstrap = profile.provider !== "claude-code"
+        && bootstrappedGenerations.get(profile.connectionId) !== generation;
+      const providerPrompt = needsBootstrap ? `${context.prompt}\n\n${text}` : text;
+      const task = { taskId, connectionId: profile.connectionId, handle: profile.handle, provider: profile.provider, cwd: profile.cwd, generation, prompt: providerPrompt } as const;
       const dispatchStart = Date.now();
       dispatchStartedMs = dispatchStart;
       for await (const event of supervisor.dispatch(task)) {
@@ -640,6 +655,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           recordTurnTiming(taskId, "provider-acceptance", dispatchStart, Date.now(), "ok");
           acceptanceRecorded = true;
           accepted = true;
+          if (needsBootstrap) bootstrappedGenerations.set(profile.connectionId, generation);
         }
         if (event.kind === "accepted") continue;
         if (event.kind === "status") emitState(profile);
@@ -764,8 +780,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     }
 
     if (taskId) {
-      const context = contextFor(profile);
-      void runTask(profile, taskId, `${context.prompt}\n\nThe owner says:\n${text}`, "room");
+      void runTask(profile, taskId, `The owner says:\n${text}`, "room");
     } else {
       let ownerTaskId: string | undefined;
       try { ownerTaskId = makeOwnerTask(profile, text); }

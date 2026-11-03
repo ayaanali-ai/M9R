@@ -360,6 +360,8 @@ interface Slot {
   live?: LiveSession;
   worker?: WorkerProcess;
   openCodeRuntime?: OpenCodeLiveRuntime;
+  /** Generation whose OpenCode process has received the M9R bootstrap prompt. */
+  openCodePromptGeneration?: number;
   openCodePendingText?: string;
   openCodeRequestVersion: number;
   openCodeBusy: boolean;
@@ -518,6 +520,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
       status: cooldownUntil ? "failed" as SessionStatus : "idle" as SessionStatus,
       doing: cooldownUntil ? `Codex paused until ${new Date(cooldownUntil).toISOString()}` : `Ready${PERSISTENCE[config.provider]}`,
       openCodeRequestVersion: 0, openCodeBusy: false, openCodePrompting: false,
+      openCodePromptGeneration: undefined,
       initSeen: false, abortedResults: 0, cooldownUntil,
     }];
   }));
@@ -908,6 +911,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           effort: slot.config.effort,
         });
         slot.openCodeRuntime = runtime;
+        slot.openCodePromptGeneration = undefined;
         state(slot, "starting", "Starting OpenCode ACP");
         await runtime.ready();
         if (!isCurrentGeneration(slot, generation) || isStopping(slot)) { runtime.close(); return; }
@@ -917,17 +921,30 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
         const text = slot.openCodePendingText;
         slot.openCodePendingText = undefined;
         const requestVersion = slot.openCodeRequestVersion;
-        const prompt = `${promptFor(slot)}\n\nThe owner says:\n${text}`;
+        const includeBootstrap = slot.openCodePromptGeneration !== generation;
+        const prompt = `${includeBootstrap ? `${promptFor(slot)}\n\n` : ""}The owner says:\n${text}`;
         let answer = "";
         let failure = "";
         let completed = false;
         slot.openCodePrompting = true;
         state(slot, "working", `Working${PERSISTENCE.opencode}`);
         try {
-          const response = runtime.prompt(prompt, { onRequestSubmitted: () => markOwnerTaskQueued(slot) });
+          const response = runtime.prompt(prompt, { onRequestSubmitted: () => {
+            if (includeBootstrap) slot.openCodePromptGeneration = generation;
+            markOwnerTaskQueued(slot);
+          } });
+          let bootstrapObserved = false;
           for await (const event of response) {
             if (!isCurrentGeneration(slot, generation)) return;
             if (requestVersion !== slot.openCodeRequestVersion) continue;
+            // Test doubles and alternate ACP adapters may not expose the
+            // request-submitted callback.  The first provider event is still
+            // proof that the prompt was accepted, so record the bootstrap at
+            // that boundary rather than re-injecting it on every turn.
+            if (includeBootstrap && !bootstrapObserved) {
+              slot.openCodePromptGeneration = generation;
+              bootstrapObserved = true;
+            }
             if (event.type === "provider.usage_updated" && event.payload.usageBasis === "prompt_turn") recordUsage(slot,reportedTurnUsage(event.payload),"acp-prompt-response");
             else if (event.type === "provider.reply_text" && typeof event.payload.text === "string") {
               answer += event.payload.text;

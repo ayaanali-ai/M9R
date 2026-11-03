@@ -146,13 +146,14 @@ test("the managed Codex app-server preserves its live connection across turns", 
   let launches = 0;
   let sessions = 0;
   let prompts = 0;
+  const promptTexts: string[] = [];
   const fake = {
     async launchServer() { launches += 1; return { serverId: "server-1", adapterId: "codex-app-server" }; },
     getServerHealth() { return { state: "alive" as const, detail: "alive" }; },
     async initialize() { return { protocolVersion: "codex-app-server", agentName: "codex", capabilities: {} }; },
     async createSession() { sessions += 1; return { sessionId: "session-1", providerSessionRef: "thread-1" }; },
     async resumeSession() { sessions += 1; return { sessionId: "session-1", providerSessionRef: "thread-1" }; },
-    async *prompt() { prompts += 1; yield { type: "provider.reply_text", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { text: "ok" } }; yield { type: "provider.completed", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { stopReason: "end_turn" } }; },
+    async *prompt(input: { text: string }) { prompts += 1; promptTexts.push(input.text); yield { type: "provider.reply_text", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { text: "ok" } }; yield { type: "provider.completed", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { stopReason: "end_turn" } }; },
     async cancelTurn() {},
     async shutdown() {},
   };
@@ -168,6 +169,8 @@ test("the managed Codex app-server preserves its live connection across turns", 
   assert.equal(launches, 1);
   assert.equal(sessions, 1);
   assert.equal(prompts, 2);
+  assert.match(promptTexts[0], /^M9R\n\nThe owner says:/);
+  assert.doesNotMatch(promptTexts[1], /^M9R\n\n/);
   await managed.stop();
 });
 
