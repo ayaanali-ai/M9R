@@ -2911,27 +2911,10 @@ async function runWebSetup(args: string[]): Promise<number> {
       }
       process.stdout.write(`[${configured ? "PASS" : "FAIL"}] ${item.agent} MCP configuration\n`);
     }
-    if (status?.browserTransport === "native-desktop") {
-      process.stdout.write(`[${status.browserReady ? "PASS" : "FAIL"}] native desktop route (no browser extension or Developer Mode is required)\n`);
-    } else {
-      process.stdout.write(`[${status?.extensionReady ? "PASS" : "WAIT"}] extension ready handshake${status?.extensionReady ? "" : " (load unpacked once below)"}\n`);
-    }
+    process.stdout.write(`[${status?.browserTransport === "native-desktop" && status.browserReady ? "PASS" : "FAIL"}] native desktop route (browser extensions and Developer Mode are retired)\n`);
     if (!brokerReady || !status) return 1;
 
-    if (status?.browserTransport === "native-desktop") {
-      process.stdout.write("\nNative desktop route is active; no browser extension install or Developer Mode step is required.\n");
-    } else if (openBrowserSetup) {
-      await copyWebExtensionPath(extensionPath);
-      for (const browser of browsers) {
-        const programFiles = [process.env.PROGRAMFILES, process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter((v): v is string => !!v);
-        const exeNames = browser === "chrome" ? ["Google\\Chrome\\Application\\chrome.exe"] : ["Microsoft\\Edge\\Application\\msedge.exe"];
-        const executable = programFiles.map((base) => join(base, exeNames[0]!)).find(awaitableExists);
-        if (executable) spawn(executable, [browser === "chrome" ? "chrome://extensions/" : "edge://extensions/"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-      }
-      process.stdout.write(`\nOpened the selected browser extension page because --open-browser-setup was supplied. Load unpacked from ${extensionPath}, then allow the requested site.\n`);
-    } else {
-      process.stdout.write(`\nManual browser step: open the selected browser's Extensions page, enable Developer mode, load unpacked from ${extensionPath}, then allow the requested site. Use --open-browser-setup to open the browser page automatically.\n`);
-    }
+    process.stdout.write("\nNative desktop route is active; no browser extension install, Developer Mode, or unpacked-extension step is required.\n");
     process.stdout.write("First task: ask your agent to open https://en.wikipedia.org and read the heading.\n");
     return 0;
   } catch (error) {
@@ -3456,7 +3439,7 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
     await new Promise((wait) => setTimeout(wait, 250));
   }
   if (!authenticated) return { ok: false, message: `The login task was installed, but authenticated broker health did not pass on 127.0.0.1:${port}. The approved provider connections remain saved.` };
-  return { ok: true, message: `M9R local web broker is running on 127.0.0.1:${port} for project root ${projectRoot} and will start at login for this Windows user. The browser extension becomes ready after its authenticated handshake.` };
+  return { ok: true, message: `M9R local broker is running on 127.0.0.1:${port} for project root ${projectRoot} and will start at login for this Windows user. Native desktop control is the only active route.` };
 }
 
 async function runWebCli(args: string[]): Promise<number> {
