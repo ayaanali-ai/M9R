@@ -269,6 +269,23 @@ export function createTaskDesktopStageService(input: {
   });
   const activeInputs = new Map<string, { controller: AbortController; taskId: string }>();
   const stoppedTaskInputs = new Set<string>();
+  const listVisibleWindows = async () => {
+    try {
+      const native = await manager.listVisibleWindows();
+      return native.map((window) => ({
+        pid: window.pid,
+        windowId: window.windowId,
+        appName: window.className ?? "",
+        title: window.title,
+        width: window.width,
+        height: window.height,
+        isOnScreen: true,
+        minimized: false,
+      }));
+    } catch {
+      return driver.listVisibleWindows({ onScreenOnly: false });
+    }
+  };
   const readPolicy = input.readPolicy ?? (() => readTaskStagePolicy(root));
   // Serialize preparations so duplicate deliveries cannot create duplicate desktops --
   // but ONE queue per stage name, not one for the whole broker. A single shared queue
@@ -1064,7 +1081,7 @@ export function createTaskDesktopStageService(input: {
         process.stderr.write(`[stage-launch-pre] ${taskId}: calling adoptCurrentDesktop\n`);
         await manager.adoptCurrentDesktop(name);
         process.stderr.write(`[stage-launch-pre] ${taskId}: adoptCurrentDesktop done after ${Date.now() - preLoopStartedAt}ms, calling listVisibleWindows\n`);
-        const before = await driver.listVisibleWindows({ onScreenOnly: false });
+        const before = await listVisibleWindows();
         process.stderr.write(`[stage-launch-pre] ${taskId}: listVisibleWindows done after ${Date.now() - preLoopStartedAt}ms total, found ${before.length} windows\n`);
         const kind = stageBrowserKind(approved.executable);
         // A same-intent task from another provider may already have selected
@@ -1143,7 +1160,7 @@ export function createTaskDesktopStageService(input: {
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
             if (launchError) throw launchError;
             const iterationStartedAt = Date.now();
-            const windows = await driver.listVisibleWindows({ onScreenOnly: false });
+            const windows = await listVisibleWindows();
             const iterationMs = Date.now() - iterationStartedAt;
             if (iterationMs > 500 || attempt % 10 === 0) {
               process.stderr.write(`[stage-launch-poll] ${taskId}: attempt ${attempt} took ${iterationMs}ms (${Date.now() - pollStartedAt}ms elapsed total)\n`);
@@ -1209,7 +1226,7 @@ export function createTaskDesktopStageService(input: {
       // launcher-style apps (Explorer, Notepad, Calculator, etc.) are allowed
       // to hand the request to another process and exit immediately; the new
       // window, not the launcher PID, is the durable ownership signal.
-      const beforeLaunchWindows = await driver.listVisibleWindows({ onScreenOnly: false });
+      const beforeLaunchWindows = await listVisibleWindows();
       const beforeLaunchWindowKeys = new Set(beforeLaunchWindows.map((window) => `${window.pid}:${window.windowId}`));
       const beforeBrowserWindows = personalBrowser ? beforeLaunchWindowKeys : undefined;
       const child = launchStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: true, cwd: stageAppLaunchCwd(task.cwd) });
@@ -1230,7 +1247,7 @@ export function createTaskDesktopStageService(input: {
           let selectedWindowId: string | undefined;
           let candidateWindows: Array<{ pid: number; windowId: string; title?: string; width?: number; height?: number }>;
           if (personalBrowser) {
-            const candidate = selectPersonalBrowserWindow(browserKind!, await driver.listVisibleWindows({ onScreenOnly: false }), beforeBrowserWindows!);
+            const candidate = selectPersonalBrowserWindow(browserKind!, await listVisibleWindows(), beforeBrowserWindows!);
             if (!candidate) {
               await delay(100);
               continue;
@@ -1252,7 +1269,7 @@ export function createTaskDesktopStageService(input: {
               // enumerated. The desktop-wide window snapshot below remains
               // the safe hand-off path.
             }
-            const visibleWindows = await driver.listVisibleWindows({ onScreenOnly: false });
+            const visibleWindows = await listVisibleWindows();
             const delegatedWindows = await matchesLaunchedWindows(visibleWindows.filter((window) => !beforeLaunchWindowKeys.has(`${window.pid}:${window.windowId}`)));
             const candidates = [...exactProcessWindows, ...delegatedWindows.filter((window) =>
               !exactProcessWindows.some((exact) => exact.pid === window.pid && exact.windowId === window.windowId))];

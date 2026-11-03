@@ -232,6 +232,11 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
+        Some("listVisibleWindows") => match platform::list_visible_windows() {
+            Ok(windows) => json!({"ok":true,"requestId":request_id,"windows":windows}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
         Some("showAndMoveOwnedWindow") => match platform::show_and_move_owned_window(value) {
             Ok(window) => json!({"ok":true,"requestId":request_id,"window":to_json(window)}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
@@ -936,6 +941,45 @@ mod platform {
         let enumerated = unsafe { EnumWindows(visit, &mut search as *mut Search as isize) };
         if enumerated == 0 && search.windows.len() < 16 {
             return Err("Windows owned-window enumeration failed".into());
+        }
+        Ok(search.windows)
+    }
+
+    /// Enumerate visible top-level app windows from the public Win32 API. This
+    /// is intentionally independent of the Cua window inventory so packaged
+    /// UWP launchers (which hand off to ApplicationFrameHost) are observable
+    /// even when the launcher PID exits immediately.
+    pub(super) fn list_visible_windows() -> Result<Vec<serde_json::Value>, String> {
+        struct Search { windows: Vec<serde_json::Value> }
+        unsafe extern "system" fn visit(window: Hwnd, parameter: isize) -> i32 {
+            let search = unsafe { &mut *(parameter as *mut Search) };
+            if unsafe { IsWindowVisible(window) } == 0 || unsafe { IsIconic(window) } != 0 { return 1; }
+            let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+            if unsafe { GetWindowRect(window, &mut rect) } == 0 { return 1; }
+            let width = rect.right.saturating_sub(rect.left);
+            let height = rect.bottom.saturating_sub(rect.top);
+            if width < 80 || height < 60 { return 1; }
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(window, &mut pid); }
+            if pid == 0 { return 1; }
+            let mut title = [0u16; 512];
+            let title_len = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) }.max(0) as usize;
+            let mut class_name = [0u16; 256];
+            let class_len = unsafe { GetClassNameW(window, class_name.as_mut_ptr(), class_name.len() as i32) }.max(0) as usize;
+            search.windows.push(serde_json::json!({
+                "pid": pid,
+                "windowId": (window as usize).to_string(),
+                "title": String::from_utf16_lossy(&title[..title_len]),
+                "className": String::from_utf16_lossy(&class_name[..class_len]),
+                "width": width,
+                "height": height,
+                "visible": true,
+            }));
+            if search.windows.len() >= 256 { 0 } else { 1 }
+        }
+        let mut search = Search { windows: Vec::new() };
+        if unsafe { EnumWindows(visit, &mut search as *mut Search as isize) } == 0 {
+            return Err("Windows visible-window enumeration failed".into());
         }
         Ok(search.windows)
     }

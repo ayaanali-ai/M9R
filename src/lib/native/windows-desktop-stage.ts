@@ -64,7 +64,7 @@ interface NativeStageResponse {
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
-  windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
+  windows?: { pid: number; windowId: string; title: string; width: number; height: number; className?: string }[];
   position?: { x: number; y: number };
   windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
   foregroundWindow?: { pid: number; windowId: string; desktopId?: string; onCurrentDesktop?: boolean; title?: string; className?: string; visible?: boolean; minimized?: boolean };
@@ -949,6 +949,17 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windows;
   }
 
+  async function listVisibleWindows() {
+    assertWindows();
+    assertOwner();
+    const result = await invokeNative({ op: "listVisibleWindows" });
+    if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Windows could not enumerate visible application windows.");
+    return result.windows.filter((window): window is { pid: number; windowId: string; title: string; width: number; height: number; className?: string } =>
+      Number.isSafeInteger(window.pid) && window.pid > 0 && typeof window.windowId === "string" && WINDOW_ID_RE.test(window.windowId)
+      && typeof window.title === "string" && Number.isSafeInteger(window.width) && window.width > 0
+      && Number.isSafeInteger(window.height) && window.height > 0);
+  }
+
   /** The only automatic replacement resolver. A PID or title alone never
    * authorizes a rebind; creation time must match and exactly one HWND exists. */
   async function resolveWindowReplacement(nameInput: string) {
@@ -1213,7 +1224,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, captureWindow, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups,
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, captureWindow, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups,
     bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect, workArea };
 }
 
