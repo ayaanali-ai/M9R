@@ -128,6 +128,8 @@ const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
 const KEYEVENTF_KEYUP: u32 = 0x0002;
 const KEYEVENTF_UNICODE: u32 = 0x0004;
 const SW_RESTORE: i32 = 9;
+const SW_MINIMIZE: i32 = 6;
+const VK_MENU: u16 = 0x12;
 
 /// A key to send: either a real virtual-key code (used for modifiers, function
 /// keys, navigation keys, and any key the agent needs to combine with a
@@ -223,21 +225,10 @@ fn send_key_event(key: KeySpec, up: bool) -> bool {
     unsafe { SendInput(1, &input, size_of::<Input>() as i32) == 1 }
 }
 
-/// Brings a window to the real OS foreground (the one that receives
-/// `SendInput` keyboard events), not merely visually on top. Windows refuses
-/// `SetForegroundWindow` from a background process's thread unless that
-/// thread's input state is attached to the current foreground thread's, so
-/// this attaches, raises, and detaches around the single call rather than
-/// granting the process standing foreground-activation rights.
-pub fn bring_window_to_real_foreground(window: usize) -> Result<(), &'static str> {
-    let window = window as Hwnd;
-    if window.is_null() {
-        return Err("no window handle was given to bring to the foreground");
-    }
+/// One attempt at `AttachThreadInput` + `SetForegroundWindow` for `window`.
+/// Returns true once `GetForegroundWindow()` actually reports `window`.
+fn try_raise_to_foreground(window: Hwnd) -> bool {
     unsafe {
-        if IsIconic(window) != 0 {
-            ShowWindow(window, SW_RESTORE);
-        }
         let foreground = GetForegroundWindow();
         let current_thread = GetCurrentThreadId();
         let mut foreground_thread = 0u32;
@@ -261,11 +252,48 @@ pub fn bring_window_to_real_foreground(window: usize) -> Result<(), &'static str
         if attached_to_foreground {
             AttachThreadInput(current_thread, foreground_thread, 0);
         }
-        if !raised && GetForegroundWindow() != window {
-            return Err("Windows declined to raise the target window to the foreground");
+        raised || GetForegroundWindow() == window
+    }
+}
+
+/// Brings a window to the real OS foreground (the one that receives
+/// `SendInput` keyboard events), not merely visually on top. Windows refuses
+/// `SetForegroundWindow` from a background process's thread unless that
+/// thread's input state is attached to the current foreground thread's (the
+/// first attempt below), and can still refuse that even when attached --
+/// Windows additionally locks foreground activation to whichever process most
+/// recently received real input. Two further, equally standard workarounds
+/// for that lock, tried in order before giving up: (1) a harmless dummy Alt
+/// key tap via `SendInput`, which resets Windows' notion of "last input" and
+/// is the same trick most input-automation tools use for this exact
+/// restriction; (2) minimizing and immediately restoring the target window,
+/// which Windows always permits regardless of the foreground lock.
+pub fn bring_window_to_real_foreground(window: usize) -> Result<(), &'static str> {
+    let window = window as Hwnd;
+    if window.is_null() {
+        return Err("no window handle was given to bring to the foreground");
+    }
+    unsafe {
+        if IsIconic(window) != 0 {
+            ShowWindow(window, SW_RESTORE);
         }
     }
-    Ok(())
+    if try_raise_to_foreground(window) {
+        return Ok(());
+    }
+    send_key_event(KeySpec::Virtual { vk: VK_MENU, extended: false }, false);
+    send_key_event(KeySpec::Virtual { vk: VK_MENU, extended: false }, true);
+    if try_raise_to_foreground(window) {
+        return Ok(());
+    }
+    unsafe {
+        ShowWindow(window, SW_MINIMIZE);
+        ShowWindow(window, SW_RESTORE);
+    }
+    if try_raise_to_foreground(window) || unsafe { GetForegroundWindow() } == window {
+        return Ok(());
+    }
+    Err("Windows declined to raise the target window to the foreground")
 }
 
 /// Sends one real key press-and-release (or a modifier-combination hotkey,
