@@ -33,6 +33,7 @@ import {
 import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { discoverInstalledWindowsApp, discoverInstalledWindowExecutable } from "./windows-installed-apps";
+import { createBrowserSpaceLedger, type BrowserSpaceLedger } from "./browser-space-ledger";
 
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
@@ -232,6 +233,14 @@ export function createTaskDesktopStageService(input: {
   mutationFence?: MultiplayerDispatchFence;
 }) {
   const root = input.store.root;
+  const browserSpaces: BrowserSpaceLedger = createBrowserSpaceLedger(root);
+  function bindBrowserSpace(stageName: string, executable: string, pid: number, windowId: string): void {
+    const browser = stageBrowserKind(executable);
+    if (!browser) return;
+    // A space is a durable logical label for one exact owner-profile HWND;
+    // it never selects a different window on recovery.
+    browserSpaces.bind({ spaceId: `space-${stageName}`, stageName, browser, pid, windowId });
+  }
   const bundledHost = join(dirname(process.execPath), "m9r-native-input-host.exe");
   // A window host like explorer.exe or chrome.exe outlives any one task, so a dead-process
   // check alone never frees a finished task's claim on it (see assertWindowUnclaimed()).
@@ -1107,6 +1116,7 @@ export function createTaskDesktopStageService(input: {
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
             ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
+            bindBrowserSpace(name, approved.executable, selected.pid, selected.windowId);
             const capture = await presentAndFocusOwnerWindow(selected.pid, selected.windowId, coordinationKey);
             return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: true, capture });
           }
@@ -1123,6 +1133,7 @@ export function createTaskDesktopStageService(input: {
           authorize(token, taskId, mode);
           if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
           ownedApps.set(name, { taskId, appId, pid: existing.pid, windowId: existing.windowId, ownsProcess: false });
+          bindBrowserSpace(name, approved.executable, existing.pid, existing.windowId);
           const capture = await presentAndFocusOwnerWindow(existing.pid, existing.windowId, coordinationKey);
           return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: true, capture });
         }
@@ -1175,6 +1186,7 @@ export function createTaskDesktopStageService(input: {
             if (!selected && matches.length > 1 && !kind) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
             if (selected) {
               ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
+              bindBrowserSpace(name, approved.executable, selected.pid, selected.windowId);
               // An explicit owner-preview app launch owns this focus transition:
               // activate the exact new HWND once, verify its PID/HWND natively, and
               // return that same capture. No taskbar hunt or extra observe round trip.
@@ -1212,6 +1224,7 @@ export function createTaskDesktopStageService(input: {
           return finishLaunch({ name, taskId, appId, running: true });
         }
         ownedApps.delete(name);
+        browserSpaces.remove(`space-${name}`);
       }
       if (!manager.list().some((stage) => stage.name === name)) await manager.create(name);
       authorize(token, taskId, mode);
@@ -1297,6 +1310,7 @@ export function createTaskDesktopStageService(input: {
               ownsProcess: !personalBrowser,
               windowId: selectedWindowId,
             });
+            bindBrowserSpace(name, approved.executable, ownedPid, selectedWindowId);
             return finishLaunch({ name, taskId, appId, running: true });
           }
           await delay(100);
@@ -1343,6 +1357,7 @@ export function createTaskDesktopStageService(input: {
       // stage anchor but never closes the user's browser process.
       if (app.ownsProcess && app.process && app.process.exitCode === null && !app.process.killed) app.process.kill();
       ownedApps.delete(name);
+      browserSpaces.remove(`space-${name}`);
       return { name, taskId, closed: true };
     };
     return enqueueTimedStage(queueName, taskId, "close", undefined, run, queueName);
