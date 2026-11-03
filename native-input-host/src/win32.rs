@@ -129,6 +129,7 @@ const KEYEVENTF_KEYUP: u32 = 0x0002;
 const KEYEVENTF_UNICODE: u32 = 0x0004;
 const SW_RESTORE: i32 = 9;
 const SW_MINIMIZE: i32 = 6;
+const SW_SHOW: i32 = 5;
 const VK_MENU: u16 = 0x12;
 
 /// A key to send: either a real virtual-key code (used for modifiers, function
@@ -276,6 +277,15 @@ pub fn bring_window_to_real_foreground(window: usize) -> Result<(), &'static str
     unsafe {
         if IsIconic(window) != 0 {
             ShowWindow(window, SW_RESTORE);
+        } else if IsWindowVisible(window) == 0 {
+            // A window can win real foreground activation (SetForegroundWindow
+            // only moves Z-order/input focus) while still never having been
+            // shown -- e.g. a just-launched app whose window exists but has
+            // not painted/shown its first frame yet. That leaves it "focused"
+            // (taskbar highlight, keyboard input reaching it) with nothing
+            // visible on screen, which looked like a flaky invisible-success
+            // bug from the outside. Force it visible before raising.
+            ShowWindow(window, SW_SHOW);
         }
     }
     if try_raise_to_foreground(window) {
