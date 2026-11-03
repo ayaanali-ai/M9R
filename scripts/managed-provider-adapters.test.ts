@@ -249,6 +249,29 @@ test("OpenCode retains one runtime through messages and interruption", async () 
   assert.equal(closes, 1);
 });
 
+test("OpenCode exposes quota and model failures without relabeling them as transport errors", async () => {
+  const managed = createOpenCodeManagedProviderConnection({
+    profile: { connectionId: "m9r:opencode:health", handle: "opencode", provider: "opencode", cwd: "C:/RunLeak/runleak" },
+    exe: "opencode", environment: {}, missionId: "room-health",
+    runtimeFactory: () => ({
+      async ready() { return { sessionId: "session-health" }; },
+      alive() { return true; },
+      async *prompt() {
+        yield { type: "provider.failed", sessionId: "session-health", occurredAt: new Date().toISOString(), payload: { reason: "Free usage limit reached" } };
+      },
+      async cancelTurn() {},
+      close() {},
+    } as never),
+  });
+  await managed.start();
+  const events = [];
+  for await (const event of managed.send({ taskId: "T-health", connectionId: managed.profile.connectionId, handle: managed.profile.handle, provider: managed.profile.provider, cwd: managed.profile.cwd, generation: managed.status().generation, prompt: "health" })) events.push(event);
+  const failure = events.find((event) => event.kind === "error");
+  assert.equal(failure?.retryable, false);
+  assert.match(failure?.error ?? "", /OpenCode usage-limit: Free usage limit reached/);
+  await managed.stop();
+});
+
 test("the managed Codex app-server restarts cold without resuming a provider thread", async () => {
   let launches = 0;
   let creates = 0;

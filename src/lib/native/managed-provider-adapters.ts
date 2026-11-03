@@ -32,6 +32,7 @@ import {
   type ProviderModelSelection,
 } from "./provider-model-core";
 import { redactSecrets } from "./inbox-core";
+import { classifyProviderFailure } from "./provider-health";
 
 interface AsyncEventQueue<T> extends AsyncIterable<T> {
   push(value: T): void;
@@ -1082,7 +1083,8 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
       this.availableModels = validateProviderModelCatalog(ready.availableModels ?? null);
       return this.ready("Ready (OpenCode ACP, cold process)");
     })().catch((error: unknown) => {
-      this.fail(error instanceof Error ? error.message : String(error));
+      const classified = classifyProviderFailure("OpenCode", error instanceof Error ? error.message : String(error));
+      this.fail(classified.message);
       throw error instanceof Error ? error : new Error(String(error));
     });
     this.startup = promise;
@@ -1143,9 +1145,10 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     }
     if (this.cancelledTask === task.taskId) failure = "Task canceled";
     if (failure || !completed) {
+      const classified = classifyProviderFailure("OpenCode", failure ?? "ended the turn without a completion event");
       this.finishTask();
-      this.fail(failure ?? "OpenCode ended the turn without a completion event");
-      yield { kind: "error", error: failure ?? "OpenCode ended the turn without a completion event", retryable: true };
+      this.fail(classified.message);
+      yield { kind: "error", error: classified.message, retryable: classified.retryable };
       return;
     }
     this.finishTask();

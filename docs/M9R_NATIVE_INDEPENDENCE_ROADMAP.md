@@ -109,3 +109,16 @@ The owner-preview action path now selects the M9R native sender whenever one exi
 - Existing task-context, A2A sidecar, scheduler, mutation-fence, and run-coordinator contracts are retained as the single multiplayer path.
 - Added an acceptance test covering pause → release one assignment → redirect → reassign while an unaffected participant keeps its claimed work.
 - Progress witnesses continue to reset the no-progress streak only on observable state change; duplicate witnesses enter `waiting-agent` instead of creating an unbounded message loop.
+
+### Phase 9 completion gate
+
+- Managed OpenCode startup and turn failures retain a provider-specific
+  classification (`usage-limit`, `model-not-found`, `authentication`,
+  `timeout`, `not-running`, `internal`, or `unknown`) in the M9R-owned error
+  evidence. Quota and configuration failures are not presented as retryable
+  transport failures; transient transport failures remain retryable.
+- Normal M9R connection reuse, cold replacement after a dead runtime, and
+  provider-native session isolation remain unchanged.
+- Added focused classifier coverage for quota, model, transport, and timeout
+  evidence. Phase 9 does not start a provider, alter a user's provider
+  profile, or introduce a provider-session resume path.
