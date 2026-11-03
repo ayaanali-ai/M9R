@@ -23,6 +23,7 @@ type TaskStageActionBody =
   | { kind: "replace_element"; ref: string; text: string; expectedRole?: string; expectedLabel?: string }
   | { kind: "scroll_delta"; x?: number; y?: number; deltaX: number; deltaY: number; unit: "pixel" | "line" | "page"; confirmFocusForeground?: boolean }
   | { kind: "window_frame"; x: number; y: number; width: number; height: number }
+  | { kind: "snap"; position: "left" | "right" | "top" | "bottom" | "maximize"; confirmFocusForeground?: boolean }
   | { kind: "focus"; confirmFocusForeground?: boolean }
   | { kind: "invoke_menu"; path: string[] }
   | { kind: "clipboard_read"; includeText: boolean; confirmSharedClipboard?: boolean }
@@ -55,7 +56,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   const fields: Record<string, string[]> = { capture: [], stop: [], read_structure: [], window_status: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
     type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], type_then_enter: ["text"], scroll: ["x", "y", "direction", "amount"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
     click_element: ["ref", "expectedRole", "expectedLabel"], replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
-    window_frame: ["x", "y", "width", "height"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
+    window_frame: ["x", "y", "width", "height"], snap: ["position"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
     system_control: ["control", "action", "value", "step"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const allowedFields = fields[action.kind]!;
@@ -82,8 +83,9 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   }
   if (action.kind === "read_structure" && action.view !== "app" && action.view !== "desktop") throw new Error("Structure observation requires an exact app or desktop view.");
   if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
-  if (["click_element", "replace_element", "type_then_enter", "window_frame", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
+  if (["click_element", "replace_element", "type_then_enter", "window_frame", "snap", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
     && action.view !== "app") throw new Error("This semantic stage action requires the exact app view.");
+  if (action.kind === "snap" && !["left", "right", "top", "bottom", "maximize"].includes(String(action.position))) throw new Error("Invalid snap position.");
   if (action.kind === "click_element" || action.kind === "replace_element") {
     if (typeof action.ref !== "string" || !/^[A-Za-z0-9._:-]{1,512}$/.test(action.ref)) throw new Error("Invalid accessibility element reference.");
   }
@@ -260,6 +262,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
       stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground }));
     case "window_frame": return driver.windowFrame(name, action.x, action.y, action.width, action.height, identity,
       stageOptions({ confirmFocusForeground }));
+    case "snap": return driver.snapWindow(name, action.position, identity, stageOptions({ confirmFocusForeground }));
     case "focus": return driver.focusWindow(name, identity, stageOptions({ confirmFocusForeground: action.confirmFocusForeground }));
     case "invoke_menu": return driver.invokeMenu(name, action.path, identity, stageOptions({ confirmFocusForeground }));
     case "clipboard_read": return driver.clipboardRead(name, action.includeText, identity, stageOptions({ confirmFocusForeground }));

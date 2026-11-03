@@ -1036,6 +1036,26 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
   }
 
+  /**
+   * Reads the real usable work area of whichever monitor the window is
+   * currently on -- screen bounds with the taskbar (and any other app-bar)
+   * already subtracted, for that specific monitor in a multi-monitor setup,
+   * regardless of which edge the taskbar is docked to. A window snap/dock
+   * computed from this can never cover the taskbar the way one computed
+   * from full screen/monitor bounds, or from an approximate drag endpoint
+   * that misses the real edge pixel, can.
+   */
+  async function workArea(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "workArea", pid, windowId });
+    const rect = result.rect as { x?: number; y?: number; width?: number; height?: number } | undefined;
+    if (!result.ok || !rect || ![rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === "number" && Number.isFinite(n)) || (rect.width as number) <= 0 || (rect.height as number) <= 0) {
+      throw new Error(result.error ?? "Windows returned no valid monitor work area.");
+    }
+    return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
+  }
+
   async function bringToForeground(pid: number, windowId: string) {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
@@ -1141,7 +1161,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   }
 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups,
-    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect };
+    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect, workArea };
 }
 
 function parsePid(value: string): number {

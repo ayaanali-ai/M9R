@@ -3216,6 +3216,33 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }, cursorIdentity);
   }
 
+  /**
+   * Docks a window to a side/corner of its own monitor's real usable work
+   * area -- screen bounds with the taskbar already subtracted, read fresh
+   * from the native host, not guessed from full screen/monitor bounds and
+   * not dependent on a drag happening to land on the exact physical edge
+   * pixel Windows' own Aero Snap requires. This is the reliable way to
+   * "snap"/"dock" a window; a plain drag can miss the edge trigger and just
+   * reposition the window at its original size, which can end up hanging
+   * over the taskbar.
+   */
+  async function snapWindow(name: string, position: "left" | "right" | "top" | "bottom" | "maximize",
+    cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
+    return withRegisteredWindow(name, async ({ driver, session, pid, windowId, capture: captureWindow }) => {
+      options.signal?.throwIfAborted();
+      const work = await manager.workArea(pid, windowId.toString());
+      const half = (dimension: number) => Math.max(1, Math.floor(dimension / 2));
+      const frame = position === "maximize" ? { x: work.x, y: work.y, width: work.width, height: work.height }
+        : position === "left" ? { x: work.x, y: work.y, width: half(work.width), height: work.height }
+          : position === "right" ? { x: work.x + work.width - half(work.width), y: work.y, width: half(work.width), height: work.height }
+            : position === "top" ? { x: work.x, y: work.y, width: work.width, height: half(work.height) }
+              : { x: work.x, y: work.y + work.height - half(work.height), width: work.width, height: half(work.height) };
+      const outcome = actionOutcome(await driver.setWindowFrame({ pid, windowId, ...frame, session },
+        options.signal ? { signal: options.signal } : undefined), "Cua Driver could not dock the selected window.");
+      return { capture: stageCapture(await captureWindow(), now), outcome };
+    }, cursorIdentity);
+  }
+
   async function focusWindow(name: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     if (options.deliveryMode === "background") {
       throw new DesktopInputNotDispatchedError("A background stage cannot bring a window to the owner's foreground; no input was sent.");
@@ -3328,7 +3355,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   }
 
   return { capture, readStructure, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, drag,
-    clickElement, replaceElement, windowFrame, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
+    clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,
     clickPopup, pressKeyPopup, hotkeyPopup, capturePopup };

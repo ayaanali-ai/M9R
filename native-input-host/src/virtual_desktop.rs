@@ -307,6 +307,11 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
+        Some("workArea") => match platform::work_area(value) {
+            Ok(rect) => json!({"ok":true,"requestId":request_id,"rect":rect}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
         Some("bringToForeground") => match platform::bring_to_real_foreground(value) {
             Ok(()) => json!({"ok":true,"requestId":request_id}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
@@ -707,6 +712,8 @@ mod platform {
         fn GetWindowTextW(window: Hwnd, buffer: *mut u16, count: i32) -> i32;
         fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
         fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
+        fn MonitorFromWindow(window: Hwnd, flags: u32) -> isize;
+        fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
         fn WindowFromPoint(point: Point) -> Hwnd;
         fn GetAncestor(window: Hwnd, flags: u32) -> Hwnd;
         fn ScreenToClient(window: Hwnd, point: *mut Point) -> i32;
@@ -861,6 +868,14 @@ mod platform {
         top: i32,
         right: i32,
         bottom: i32,
+    }
+
+    #[repr(C)]
+    struct MonitorInfo {
+        size: u32,
+        monitor: Rect,
+        work: Rect,
+        flags: u32,
     }
 
     #[repr(C)]
@@ -1668,6 +1683,37 @@ mod platform {
             return Err("Windows returned no valid window bounds".into());
         }
         Ok(serde_json::json!({ "x": rect.left, "y": rect.top, "width": rect.right - rect.left, "height": rect.bottom - rect.top }))
+    }
+
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+
+    /// Reads the real usable work area of whichever monitor the window is
+    /// currently on -- the screen bounds with the taskbar (and any other
+    /// registered app-bar) already subtracted, on whichever edge it is
+    /// docked to, for that specific monitor in a multi-monitor setup. A
+    /// snap/dock computed from this can never cover the taskbar, unlike one
+    /// computed from the full screen or monitor bounds.
+    pub(super) fn work_area(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+        if monitor == 0 {
+            return Err("Windows could not resolve a monitor for the target window".into());
+        }
+        let mut info = MonitorInfo {
+            size: std::mem::size_of::<MonitorInfo>() as u32,
+            monitor: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+            work: Rect { left: 0, top: 0, right: 0, bottom: 0 },
+            flags: 0,
+        };
+        if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+            return Err("Windows returned no monitor information".into());
+        }
+        let work = info.work;
+        if work.right <= work.left || work.bottom <= work.top {
+            return Err("Windows returned no valid monitor work area".into());
+        }
+        Ok(serde_json::json!({ "x": work.left, "y": work.top, "width": work.right - work.left, "height": work.bottom - work.top }))
     }
 
     /// Raises the given owned window to the real OS foreground -- the one
