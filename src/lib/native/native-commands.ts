@@ -719,7 +719,19 @@ function printOpenSteps(io: NativeIo): void {
 export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?: boolean }): Promise<number> {
   const p = nativePaths(io);
   const manifest = readManifest(p.manifest);
-  if (!manifest || manifest.entries.length === 0) { io.out("Nothing to uninstall: M9R has not set anything up here."); return 0; }
+  // A standalone runtime install can legitimately have no profile/config
+  // entries: the installer owns only the engine image (and possibly its
+  // autostart/broker records). Treat the runtime manifest as setup state too;
+  // otherwise uninstall would report success while leaving m9r-engine.exe
+  // and all of its companions in place.
+  const hasManagedState = Boolean(manifest && (
+    manifest.entries.length > 0
+    || (manifest.runtimeFiles?.length ?? 0) > 0
+    || manifest.autostart === true
+    || manifest.brokerAutostart === true
+    || manifest.activeRuntime
+  ));
+  if (!manifest || !hasManagedState) { io.out("Nothing to uninstall: M9R has not set anything up here."); return 0; }
   io.out("M9R uninstall will:");
   for (const e of manifest.entries) io.out(`  - ${e.existedBefore ? "restore or clean" : "remove"} ${e.path}`);
   if (flags.purge) io.out(`  - delete the local M9R data in ${p.m9r}`);
