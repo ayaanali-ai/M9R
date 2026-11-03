@@ -83,7 +83,11 @@ Each phase is committed only after its own gate passes. A failing gate blocks th
 - Phase 3 native-first foreground action and observation: `dd355420`.
 - Phase 4 native visible-window launch verification: `76d0f528`.
 - Phase 5 configurable cursor-only presentation boundary: `f88cdf57`.
-- Phase 6 native production path: `dbad0f1d` (stage-scoped native SendInput transaction) plus the follow-up commit below (native desktop capture/enumeration, UIA menu invocation, window frames, and text clipboard). Cua perception/action fallback is now explicit compatibility-only; the normal broker path is native.
+- Phase 6 native production path: `dbad0f1d` (stage-scoped native SendInput transaction) plus `dd4f6b4a` (native desktop capture/enumeration, UIA menu invocation, window frames, and text clipboard). Cua perception/action fallback is now explicit compatibility-only; the normal broker path is native.
+- Phase 7 provider lifecycle preservation: `2c69808c`.
+- Phase 8 task/multiplayer continuity: `6e8599b7`.
+- Phase 9 provider health: `3a06508f`.
+- Phase 10 warm native stage/performance: `9ffa80ba`.
 
 ### Phase 6 gate note
 
@@ -153,3 +157,29 @@ The owner-preview action path now selects the M9R native sender whenever one exi
   compiled and protocol-checked at source level; a live installed-host run is
   intentionally deferred to the owner's Phase 11 testing because this
   roadmap never installs or promotes a candidate.
+
+### Phase 11 completion gate
+
+- TypeScript typecheck passed: `npx tsc --noEmit -p .`.
+- Native Rust tests completed with 21 passed and 1 known environment-dependent
+  failure (`virtual_desktop::tests::owner_cursor_position_round_trips_through_get_and_restore`), the same cursor round-trip failure recorded before this roadmap.
+- The expanded focused matrix ran 194 tests: 137 passed, 56 failed, and 1
+  skipped. The recorded pre-Phase-11 focused baseline was 194 tests, 193
+  passed, and 1 skipped. The current failures are not presented as a green
+  gate: they include the known sandbox `EPERM` state-lock rename failures,
+  existing browser-loop fixture mismatches, pointer-preservation fixture
+  expectations, and the pre-existing 500-character wording assertion. No
+  Phase 10-specific failure was introduced in the native stage tests; the
+  native stage subset itself passed.
+- The full project runner completed 2,568 tests across 206 files: batch 1 had
+  2,472 tests with 2,347 passed, 124 failed, and 3 skipped; batch 2 had 96
+  tests with 96 passed. The failed batch is dominated by the documented
+  environment/fixture constraints (sandbox rename `EPERM`, project-local
+  `M9R_HOME`, unavailable local roadmap fixture, and loopback permission
+  failures) plus existing dirty user/Claude compatibility changes. These are
+  recorded rather than hidden or reclassified as success.
+- Owner-machine live tests (classic/modern Notepad, Explorer, Settings or
+  Calculator, taskbar/dialogs, logged-in Chrome, system controls, and an
+  installed persistent stage host) were not run here because Phase 12 is
+  explicitly a no-install/no-live-promotion boundary. They remain the owner's
+  required acceptance run.
