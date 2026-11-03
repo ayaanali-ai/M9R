@@ -1038,15 +1038,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     // not asked for this gate at all -- it was never on the requested work list. The protocol ledger
     // code (packages/web-protocol-placeholder) stays in the tree for whenever it's actually built out
     // and proven, but nothing here calls authorizeAction to block dispatch until that happens.
-    const ready = await waitForExtensionReady(options.extensionConnectTimeoutMs ?? 30_000);
-    if (!ready) return reply(res, 200, { ok: false, error: "the browser extension did not become ready before the connection wait expired" });
-    const batch = req.url === "/batch";
-    const result = batch ? await broker.submitBatch(parsed as unknown as WebBatchRequest) : await broker.submit(parsed as WebRequest);
-    // AWARE disclosure-receipt gating is disabled too, same owner decision as the membership gate
-    // above -- it withheld the actual result of an action that had already run (page text, click
-    // labels, navigation titles) behind a manual per-result owner-approval step, which blocked
-    // ordinary agent use exactly like the membership gate did. Left in the tree, not called here.
-    return reply(res, 200, result);
+    // The extension-backed /cmd and /batch doors are retired. Native desktop
+    // control is the supported browser/app route now, so never wait for a
+    // WebSocket extension that is intentionally not installed. Keep these
+    // endpoints as an explicit compatibility response for stale callers.
+    return reply(res, 410, {
+      ok: false,
+      error: "The extension-backed browser route is retired; use m9r_stage_action (or m9r_computer_observe/action on an app-window) instead.",
+    });
   });
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_EXTENSION_MESSAGE_BYTES });

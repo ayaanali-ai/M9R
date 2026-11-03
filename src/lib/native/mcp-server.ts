@@ -1107,30 +1107,15 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   }
 
   async function runWeb(token: string | undefined, partial: Pick<WebRequest, "action"> & Partial<WebRequest>) {
-    const { identity } = await authenticate(token);
-    if (!deps.web) {
-      return { content: [{ type: "text" as const, text: "Browser tools are not available in this M9R setup." }], isError: true };
-    }
-    const result = await deps.web.run({ agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId, ...partial });
-    if (!result.ok) return { content: [{ type: "text" as const, text: result.error ?? "The browser action failed." }], isError: true };
-    const label = result.label ? `Target: ${result.label}\n` : "";
-    if (partial.action === "screenshot" && typeof result.data === "object" && result.data !== null) {
-      const image = result.data as { data?: unknown; mimeType?: unknown };
-      if (typeof image.data === "string" && (image.mimeType === "image/png" || image.mimeType === "image/jpeg")) {
-        return { content: [{ type: "text" as const, text: `${label}Screenshot of the current tab.` }, { type: "image" as const, data: image.data, mimeType: image.mimeType }] };
-      }
-    }
-    const room = result.room?.length ? `
-[teammates meanwhile] ${result.room.join(" | ")}` : "";
-    const text = `${label}${typeof result.data === "string" ? result.data : JSON.stringify(result.data ?? { done: true })}${room}`;
-    return { content: [{ type: "text" as const, text }] };
+    void token;
+    void partial;
+    return { content: [{ type: "text" as const, text: "The extension-backed browser route is retired; use m9r_stage_action (or m9r_computer_observe/action on an app-window) instead." }], isError: true };
   }
 
   async function runWebBatch(token: string | undefined, input: Omit<WebBatchRequest, "agent" | "provider" | "sessionId">) {
-    const { identity } = await authenticate(token);
-    if (!deps.web?.runBatch) return { content: [{ type: "text" as const, text: "Browser batch tools are not available in this M9R setup." }], isError: true };
-    const result = await deps.web.runBatch({ ...input, agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId });
-    return { content: [{ type: "text" as const, text: JSON.stringify(result) }], ...(result.ok ? {} : { isError: true }) };
+    void token;
+    void input;
+    return { content: [{ type: "text" as const, text: "The extension-backed browser route is retired; use m9r_stage_action (or m9r_computer_observe/action on an app-window) instead." }], isError: true };
   }
 
   const TAB_FIELD = {
@@ -1385,20 +1370,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       inputSchema: { ...AUTH_FIELD, ...POWER_TAB_FIELD, ...TARGET_FIELDS },
     },
     async ({ token, tab, selector, ref }) => {
-      const identity = await requireIdentity(token);
-      if (!deps.web) return { content: [{ type: "text" as const, text: "Browser tools are not available in this M9R setup." }], isError: true };
-      const link = await deps.web.run({
-        agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId,
-        action: "link", tab, selector: targetSelector(selector, ref),
-      });
-      if (!link.ok) return { content: [{ type: "text" as const, text: link.error ?? "The link could not be read." }], isError: true };
-      const href = typeof link.data === "object" && link.data !== null && "href" in link.data ? (link.data as { href?: unknown }).href : undefined;
-      if (typeof href !== "string") return { content: [{ type: "text" as const, text: "The selected element did not expose a safe link." }], isError: true };
-      let url: URL;
-      try { url = new URL(href); } catch { return { content: [{ type: "text" as const, text: "The selected link URL was invalid." }], isError: true }; }
-      if (url.protocol !== "http:" && url.protocol !== "https:") return { content: [{ type: "text" as const, text: "Only http and https links can be opened." }], isError: true };
-      const newTab = `${identity.handle.slice(0, 8)}_link_${Date.now().toString(36)}`.slice(0, 40);
-      return runWeb(token, { action: "open", tab: newTab, url: url.href });
+      void token; void tab; void selector; void ref;
+      return { content: [{ type: "text" as const, text: "The extension-backed browser route is retired; use m9r_stage_action (or m9r_computer_observe/action on an app-window) instead." }], isError: true };
     },
   );
   } // WEB_EXTENSION_ROUTE_ENABLED

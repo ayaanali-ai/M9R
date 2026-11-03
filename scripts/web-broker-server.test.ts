@@ -499,29 +499,22 @@ const until = async (check: () => boolean) => {
   assert.ok(check(), "condition was not met in time");
 };
 
-test("the local /cmd path auto-admits a first-contact local agent instead of blocking it forever", async () => {
-  // LOCAL_AWARE_ROOM_ID is the single-machine ledger: only the owner's own configured agents
-  // (claude/codex/opencode, all started by this same broker) ever reach this endpoint -- real
-  // cross-machine guests go through the separate Supabase /api/rooms join/admit flow, which
-  // does require a human to click Admit. Before this fix, a first-contact local agent was left
-  // "requested"/quiet-until-invited with no owner-facing way to ever admit it (nothing surfaces
-  // the /web/aware/members/invite endpoint), so every local agent was permanently locked out the
-  // moment this membership check started being enforced -- confirmed live, not just here.
+test("retired /cmd and /batch routes fail immediately without waiting for an extension", async () => {
   const t = await setup({ allowAnyExtension: true, ownerId: "local-machine" });
   try {
-    const identity = t.store.issueIdentity("claude", "claude-code", "aware-first-contact");
-    const { ws, received } = await t.connectExtension();
-    const pending = t.call("m9r_web_read", { token: identity.token, tab: "shared" });
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    const dispatched = received.some((message) => typeof message.id === "string" && typeof message.action === "string");
-    const command = received.find((message) => typeof message.id === "string" && typeof message.action === "string");
-    if (command) ws.send(JSON.stringify({ type: "result", id: command.id, ok: true, data: "private page contents" }));
-    const result = await pending;
-    assert.equal(dispatched, true, "a first-contact local agent must be auto-admitted and reach Chrome, not stuck forever");
-    // Reading page content back separately requires an owner-approved AWARE disclosure receipt
-    // (unrelated to membership, and correctly still enforced) -- this test only asserts the
-    // agent got PAST the membership gate, not that unreceipted disclosure also succeeds.
-    assert.doesNotMatch(result.content?.[0]?.text ?? "", /membership|invited/i);
+    const headers = { "x-m9r-key": t.key, "content-type": "application/json" };
+    for (const path of ["/cmd", "/batch"]) {
+      const started = Date.now();
+      const response = await fetch(`http://127.0.0.1:${t.broker.port}${path}`, {
+        method: "POST", headers, body: JSON.stringify({ agent: "claude", provider: "claude-code", sessionId: "retired-route", action: "snapshot" }),
+      });
+      const body = await response.json() as { ok?: boolean; error?: string };
+      assert.equal(response.status, 410);
+      assert.equal(body.ok, false);
+      assert.match(body.error ?? "", /extension-backed browser route is retired/i);
+      assert.match(body.error ?? "", /m9r_stage_action/i);
+      assert.ok(Date.now() - started < 500, `${path} must fail without the extension readiness wait`);
+    }
   } finally {
     await t.done();
   }

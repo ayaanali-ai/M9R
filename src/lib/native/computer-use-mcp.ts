@@ -25,7 +25,6 @@ import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDesc
 import type { VerifiedIdentity } from "./identity-core";
 import type { ComputerOperationInput, LocalStore, StageOperationClaim } from "./local-store";
 import type { StageClientResult, WebBrokerClient } from "./web-broker-client";
-import type { WebRequest, WebResponse } from "./web-broker-core";
 
 const MAX_PUBLIC_CONTROLS = 2_000;
 const MAX_TARGETS = 256;
@@ -41,6 +40,7 @@ const MAX_RESPONSE_IMAGE_BYTES = 512 * 1024;
 const MAX_RESPONSE_IMAGES = 4;
 const FINGERPRINT_SCHEMA_VERSION = 1;
 const BROWSER_REF = /^e[a-f0-9]{24}_\d{1,3}$/;
+const RETIRED_BROWSER_ROUTE = "The extension-backed browser route is retired; use m9r_stage_action (or m9r_computer_observe/action on an app-window) instead.";
 // Cua element tokens are opaque driver values and are not guaranteed to be
 // UUIDs. They stay private inside the desktop record; providers receive the
 // generated control_* ref below instead.
@@ -233,11 +233,6 @@ type ComputerUseActionArgs = { token?: unknown; action: ComputerUseAction | stri
 
 function identityKey(identity: VerifiedIdentity): string {
   return JSON.stringify([identity.handle, identity.provider, identity.sessionId]);
-}
-
-/** Opaque, stable browser identity derived from the authenticated M9R session. */
-function opaqueBrowserIdentity(value: string): string {
-  return `m9r-${createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
@@ -658,10 +653,6 @@ function stageMutationRevision(response: StageClientResult): number | undefined 
   return mutationRevisionOf(recordOf(response.result)?.mutationRevision);
 }
 
-function browserSnapshotData(response: WebResponse): Record<string, unknown> | undefined {
-  return recordOf(response.data);
-}
-
 function createComputerUseResult(input: ComputerUseResult) {
   return computerUseResultSchema.parse({ ...input, deliveryReceipt: {
     delivery: input.dispatchStatus === "dispatched" ? "delivered" : input.dispatchStatus === "not-dispatched" ? "not-delivered" : "uncertain",
@@ -1039,97 +1030,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     tab?: string;
     logicalKey?: string;
   }): Promise<{ record: TargetRecord; observation: Record<string, unknown>; image?: ImageBlock }> {
-    if (!deps.web) throw new Error("The M9R browser broker is unavailable.");
-    const taskId = deps.resolveTaskId(input.identity);
-    // Use the request-start time as a conservative freshness bound. The broker
-    // does not carry a capture timestamp through every browser transport, so
-    // stamping on response completion would make a slow/queued observation
-    // appear newer than the snapshot that produced its element refs.
-    const observationStartedAt = now().getTime();
-    const response = await deps.web.run({
-      agent: input.identity.handle,
-      provider: input.identity.provider,
-      sessionId: input.identity.sessionId,
-      action: "snapshot",
-      ...(input.tab ? { tab: input.tab } : {}),
-      args: { limit: MAX_PUBLIC_CONTROLS },
-    });
-    if (!response.ok) throw new Error(response.error ?? "The M9R browser snapshot failed.");
-    const mutationRevision = mutationRevisionOf(response.mutationRevision);
-    const snapshot = browserSnapshotData(response);
-    if (!snapshot || !Array.isArray(snapshot.elements)) throw new Error("The browser broker returned no structured page snapshot.");
-    // Prefer a resolved logical tab when the broker includes it in the
-    // snapshot envelope. If an older broker omits it, preserve the explicit
-    // requested tab or the documented default path rather than guessing a
-    // different window.
-    const resolvedTab = typeof snapshot.tab === "string" && snapshot.tab.length > 0
-      ? snapshot.tab.slice(0, 40)
-      : input.tab;
-    const browserInstanceId = typeof snapshot.browserInstanceId === "string" && snapshot.browserInstanceId
-      ? opaqueBrowserIdentity(snapshot.browserInstanceId) : opaqueBrowserIdentity(identityKey(input.identity));
-    const tabName = resolvedTab ?? "default";
-    const tabId = opaqueBrowserIdentity(`${browserInstanceId}\0${typeof snapshot.tabId === "string" ? snapshot.tabId : tabName}`);
-    const rawElementRecords = snapshot.elements.map(recordOf).filter((value): value is Record<string, unknown> => Boolean(value));
-    const browserCompleteness: FingerprintCompleteness = rawElementRecords.length > MAX_PUBLIC_CONTROLS ? "partial" : "complete";
-    const rawElements = rawElementRecords.slice(0, MAX_PUBLIC_CONTROLS);
-    const observedRefs = new Set(rawElements.flatMap((element) => typeof element.ref === "string" && BROWSER_REF.test(element.ref)
-      && element.sensitive !== true ? [element.ref] : []));
-    const elements: BrowserElement[] = [];
-    for (const element of rawElements) {
-      if (!element || typeof element.ref !== "string" || !BROWSER_REF.test(element.ref) || element.sensitive === true) continue;
-      const actions = Array.isArray(element.actions)
-        ? element.actions.filter((action): action is string => typeof action === "string" && action.length > 0).slice(0, 16).map((action) => action.slice(0, 40))
-        : undefined;
-      elements.push({
-        ref: element.ref,
-        role: typeof element.role === "string" ? element.role.slice(0, 80) : "unknown",
-        name: typeof element.name === "string" ? element.name.slice(0, 160) : "",
-        ...(typeof element.parentRef === "string" && observedRefs.has(element.parentRef) && element.parentRef !== element.ref
-          ? { parentRef: element.parentRef } : {}),
-        ...(Number.isSafeInteger(element.depth) && (element.depth as number) >= 0 && (element.depth as number) <= 255
-          ? { depth: element.depth as number } : {}),
-        ...(typeof element.disabled === "boolean" ? { disabled: element.disabled } : {}),
-        ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
-        ...(actions?.length ? { actions } : {}),
-        ...(typeof element.canReplaceValue === "boolean" ? { canReplaceValue: element.canReplaceValue } : {}),
-        ...(typeof element.canInsertText === "boolean" ? { canInsertText: element.canInsertText } : {}),
-        ...(typeof element.canSelectText === "boolean" ? { canSelectText: element.canSelectText } : {}),
-        ...(validRect(element.rect) ? { rect: element.rect } : {}),
-      });
-    }
-    const elementMap = new Map(elements.map((element) => [element.ref, element]));
-    const url = typeof snapshot.url === "string" ? snapshot.url.slice(0, 4096) : undefined;
-    const title = typeof snapshot.title === "string" ? snapshot.title.slice(0, 256) : undefined;
-    const fingerprint = normalizeObservationFingerprint(elements.map((element) => ({
-      ...element,
-      label: element.name,
-      ...(element.disabled !== undefined ? { enabled: !element.disabled } : {}),
-    })) as unknown as Record<string, unknown>[], browserCompleteness);
-    const record = saveObservation({
-      identity: input.identity,
-      logicalKey: input.logicalKey ?? `browser:${tabName}`,
-      kind: "browser-tab",
-      observedAt: observationStartedAt,
-      capabilities: capabilitiesForBrowser(elements, snapshot.nativeClickAvailable === true),
-      context: { kind: "browser", taskId, ...(resolvedTab ? { tab: resolvedTab } : {}), ...(url ? { url } : {}), ...(title ? { title } : {}),
-        structureStatus: browserCompleteness,
-        ...(typeof snapshot.browserInstanceId === "string" ? { browserInstanceId: snapshot.browserInstanceId } : {}),
-        ...(typeof snapshot.tabId === "string" ? { tabId: snapshot.tabId } : {}),
-        ...(typeof snapshot.text === "string" ? { text: snapshot.text.slice(0, 40_000) } : {}), elements: elementMap },
-      extra: { browserInstanceId, tabId, ...(url ? { url } : {}) },
-      fingerprint,
-      ...(mutationRevision === undefined ? {} : { mutationRevision }),
-    });
-    return {
-      record,
-      observation: {
-        url,
-        title,
-        text: typeof snapshot.text === "string" ? snapshot.text.slice(0, 40_000) : "",
-        elements,
-        change: record.change,
-      },
-    };
+    void input;
+    throw new Error(RETIRED_BROWSER_ROUTE);
   }
 
   async function refreshRecord(record: TargetRecord, token: string, identity: VerifiedIdentity) {
@@ -1346,70 +1248,6 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     return controls.some((control) =>
       (condition.role === undefined || control.role === condition.role)
       && (condition.label === undefined || control.label === condition.label)) ? "verified" : "unknown";
-  }
-
-  function webRequestForAction(record: TargetRecord, action: ComputerUseAction, identity: VerifiedIdentity): WebRequest {
-    if (record.context.kind !== "browser") throw new Error("The selected route is not a browser target.");
-    const shared = {
-      agent: identity.handle,
-      provider: identity.provider,
-      sessionId: identity.sessionId,
-      ...(record.context.tab ? { tab: record.context.tab } : {}),
-      ...(record.context.browserInstanceId ? { expectedBrowserInstanceId: record.context.browserInstanceId } : {}),
-      ...(record.context.tabId ? { expectedTabId: record.context.tabId } : {}),
-      ...(record.work ? { work: record.work } : {}),
-      ...(action.operationId ? { operationId: action.operationId } : {}),
-      targetRevision: record.target.revision,
-      ...(record.mutationRevision === undefined ? {} : { expectedMutationRevision: record.mutationRevision }),
-    };
-    if (action.kind === "navigate") return { action: "open", ...shared, url: action.url };
-    if (action.kind === "browser_tab") return { action: action.operation === "close" ? "close" : "switch", ...shared };
-    if (action.kind === "click") {
-      if (action.locator.kind === "point") {
-        return { action: "click_at", ...shared, args: { x: action.locator.x, y: action.locator.y, button: action.button } };
-      }
-      const element = webElement(record, action.locator);
-      if (action.count === 2) return { action: "double_click", ...shared, selector: `@m9r-ref:${element.ref}`, ...(element.name ? { targetLabel: element.name } : {}) };
-      if (action.button === "right") return { action: "right_click", ...shared, selector: `@m9r-ref:${element.ref}`, ...(element.name ? { targetLabel: element.name } : {}) };
-      if (action.button === "middle") {
-        if (!element.rect) throw new Error("The browser snapshot has no bounds for a middle-click target.");
-        return { action: "click_at", ...shared, args: {
-          x: element.rect.x + Math.floor(element.rect.width / 2),
-          y: element.rect.y + Math.floor(element.rect.height / 2),
-          button: "middle",
-        } };
-      }
-      return { action: "click", ...shared, selector: `@m9r-ref:${element.ref}`, ...(element.name ? { targetLabel: element.name } : {}) };
-    }
-    if (action.kind === "text") {
-      const selector = `@m9r-ref:${locatorRef(record, action.locator!)}`;
-      const targetLabel = webTargetLabel(record, action.locator!);
-      return action.mode === "insert"
-        ? { action: "paste", ...shared, selector, args: { valueText: action.text }, ...(targetLabel ? { targetLabel } : {}) }
-        : { action: "type", ...shared, selector, text: action.text, ...(targetLabel ? { targetLabel } : {}) };
-    }
-    if (action.kind === "key") {
-      const key = [...(action.modifiers ?? []), action.key].join("+");
-      return { action: "press", ...shared, args: { key } };
-    }
-    if (action.kind === "select_text") return {
-      action: "select_text", ...shared,
-      selector: `@m9r-ref:${locatorRef(record, action.locator)}`,
-      ...(webTargetLabel(record, action.locator) ? { targetLabel: webTargetLabel(record, action.locator) } : {}),
-      args: { text: action.selection.kind === "text" ? action.selection.text : "" },
-    };
-    if (action.kind === "scroll") return {
-      action: "scroll", ...shared,
-      ...(action.at ? { selector: `@m9r-ref:${locatorRef(record, action.at)}` } : {}),
-      args: { by: action.deltaY },
-    };
-    if (action.kind === "drag") return {
-      action: "drag", ...shared,
-      selector: `@m9r-ref:${locatorRef(record, action.from)}`,
-      endSelector: `@m9r-ref:${locatorRef(record, action.to)}`,
-      ...(webTargetLabel(record, action.from) ? { targetLabel: webTargetLabel(record, action.from) } : {}),
-    };
-    throw new Error(`The browser route does not support ${action.kind}.`);
   }
 
   async function dispatchDesktop(record: TargetRecord, action: ComputerUseAction, token: string): Promise<StageClientResult> {
@@ -1657,7 +1495,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   server.registerTool("m9r_computer_observe", {
-    description: "Observe one M9R-managed target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. Selected app windows default to a value-redacted UI Automation tree; desktop-wide targets default to a bounded composite of visible windows and controls with the same-capture visual fallback for taskbar, Start, and shell-owned controls. For desktop structure, status reports UIA tree completeness only; it does not prove offscreen page or document content is absent. The structure coverage field reports the observed viewport and generic scrollability evidence; unknown is not a claim that no more content exists. Re-observe and scroll when the task requires content beyond the observed viewport. Request representation=visual when pixels are needed. Browser tabs return structured DOM controls; if that route cannot expose a needed capability, explicitly select/restore the browser and observe its exact app-window rather than silently switching routes. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Internal route and latency diagnostics stay local to M9R and are never returned as provider task content.",
+    description: "Observe one M9R-managed desktop target and return an opaque target ID, fresh revision, and only the capabilities that route currently advertises. The retired extension-backed browser-tab route is unavailable; select/restore a browser with m9r_stage_app and observe it as an app-window instead. Selected app windows default to a value-redacted UI Automation tree; desktop-wide targets default to a bounded composite of visible windows and controls with the same-capture visual fallback for taskbar, Start, and shell-owned controls. For desktop structure, status reports UIA tree completeness only; it does not prove offscreen page or document content is absent. The structure coverage field reports the observed viewport and generic scrollability evidence; unknown is not a claim that no more content exists. Re-observe and scroll when the task requires content beyond the observed viewport. Request representation=visual when pixels are needed. Use m9r_stage_app before app-window; this tool never launches an app. Re-observe after visible state changes; raw HWNDs and browser-process IDs are never exposed. Internal route and latency diagnostics stay local to M9R and are never returned as provider task content.",
     inputSchema: inputSchemas.observe,
     outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry<ComputerUseObserveArgs>(async ({ token, target, taskId, mode, representation, tab, bindForeground }, timing) => {
@@ -1669,20 +1507,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (!COMPUTER_USE_OBSERVE_TARGETS.includes(target)) {
         throw new Error(`No computer-use route is registered for target ${String(target)}.`);
       }
-      if (target === "browser-tab" && taskId !== undefined) throw new Error("Browser-tab observation does not take a desktop task ID.");
-      if (target !== "browser-tab" && tab !== undefined) throw new Error("Desktop observations do not take a browser tab name.");
-      if (target === "browser-tab" && representation === "visual") {
-        throw new Error("The browser-tab route provides structured DOM observations. For a visual fallback, select or restore that exact browser window and observe it as app-window with representation 'visual'.");
-      }
+      if (target === "browser-tab") throw new Error(RETIRED_BROWSER_ROUTE);
+      if (tab !== undefined) throw new Error("Desktop observations do not take a browser tab name; select the browser with m9r_stage_app and observe it as app-window.");
       const resolvedRepresentation = representation ?? "structured";
-      const resolvedTaskId = target === "browser-tab" ? undefined : deps.resolveTaskId(identity, taskId);
-      const observed = await timing.measure("observationMs", async () => target === "browser-tab"
-        ? observeBrowser({ identity, tab })
-        : resolvedTaskId
-          ? observeDesktop({ token: authToken, identity, taskId: resolvedTaskId, mode: mode ?? "owner-preview", view: target === "app-window" ? "app" : "desktop",
-              representation: resolvedRepresentation, bindForeground: bindForeground === true })
-          : undefined);
-      if (!observed) throw new Error("Desktop and app-window observations require an active authenticated task; browser-tab observations do not.");
+      const resolvedTaskId = deps.resolveTaskId(identity, taskId);
+      const observed = await timing.measure("observationMs", () => observeDesktop({ token: authToken, identity, taskId: resolvedTaskId, mode: mode ?? "owner-preview", view: target === "app-window" ? "app" : "desktop",
+        representation: resolvedRepresentation, bindForeground: bindForeground === true }));
       return toolResponse({ target: observed.record.target, observation: observed.observation }, observed.image);
     } catch (error) {
       return toolResponse({ error: error instanceof Error ? error.message : "Target observation failed." }, undefined, true);
@@ -1731,6 +1561,9 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     const record = records.get(action.targetId);
     if (!record || record.identityKey !== identityKey(identity)) {
       return refusal(action, action.targetId, "target-not-found", "This target is unknown to the current M9R session. Observe it again in this session.", "refresh-target");
+    }
+    if (record.context.kind === "browser") {
+      return refusal(action, action.targetId, "browser-route-retired", RETIRED_BROWSER_ROUTE);
     }
     try {
       if (record.context.taskId !== deps.resolveTaskId(identity)) return refusal(action, action.targetId, "task-context-changed", "This observation belongs to a prior M9R task turn. Re-observe under the current instruction.");
@@ -1807,13 +1640,6 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
 
     // Exact identity is checked by the stage at dequeue and immediately before
     // dispatch. A second fail-open lifecycle RPC here adds no safety guarantee.
-
-    let browserRequest: WebRequest | undefined;
-    if (record.context.kind === "browser" && action.kind !== "observe") {
-      if (!deps.web) return refusal(action, action.targetId, "browser-route-unavailable", "The M9R browser broker is unavailable.");
-      try { browserRequest = webRequestForAction(record, action, identity); }
-      catch (error) { return refusal(action, action.targetId, "unsupported-target-action", error instanceof Error ? error.message : "The browser route cannot represent this action."); }
-    }
 
     if (receiptInput) {
       let claim: StageOperationClaim;
@@ -1995,122 +1821,30 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         image, Boolean(resultError), action.includeScreenshot === true || !updatedStructure);
     }
 
-    if (!deps.web || !browserRequest) {
-      if (receiptInput) {
-        try { deps.store.releaseComputerOperation(receiptInput); } catch { /* the running receipt still blocks replay */ }
-      }
-      return refusal(action, action.targetId, "browser-route-unavailable", "The M9R browser broker is unavailable.");
-    }
-    const browserTab = record.context.kind === "browser" ? record.context.tab : undefined;
-    let response: WebResponse;
-    try {
-      response = await timing.measure("actionMs", () => deps.web!.run(browserRequest!));
-    } catch (error) {
-      const receipt = receiptInput ? settleReceipt(receiptInput, "uncertain") : { state: "uncertain" as const };
-      return reconcileOperation({ action, identity, receipt, record, token: authToken, timing,
-        reason: error instanceof Error ? error.message : "The browser route outcome is unknown." });
-    }
-    if (!response.ok) {
-      // A mutation-fence refusal happens before the broker sends anything to the
-      // page. Treat it as a clean pre-dispatch refusal, not an ambiguous outcome,
-      // so the provider gets an explicit reason instead of a stuck operation.
-      const fenceCode = response.code && FENCE_REFUSAL_CODES.has(response.code) ? response.code : undefined;
-      if (fenceCode || response.dispatchState === "not-dispatched") {
-        if (receiptInput) {
-          try { deps.store.releaseComputerOperation(receiptInput); } catch { /* the running receipt still blocks replay */ }
-        }
-        const code = fenceCode ?? response.code ?? "browser-pre-dispatch-refusal";
-        return refusal(action, action.targetId, code, response.error ?? "The browser refused this action before dispatch.", preDispatchRetry(code));
-      }
-      const receipt = receiptInput ? settleReceipt(receiptInput, "uncertain") : { state: "uncertain" as const };
-      return reconcileOperation({ action, identity, receipt, record, token: authToken, timing,
-        reason: response.error ?? "The browser broker refused or lost the action." });
-    }
-    const responseMutationRevision = mutationRevisionOf(response.mutationRevision);
-    if (responseMutationRevision !== undefined) record.mutationRevision = responseMutationRevision;
-    const receipt = receiptInput ? settleReceipt(receiptInput, "applied") : undefined;
-    if (action.kind === "browser_tab" && action.operation === "close" && recordOf(response.data)?.closed === true) {
-      const evidenceRef = randomUUID();
-      removeTarget(record.target.targetId);
-      return toolResponse({ result: createComputerUseResult({ operationId: action.operationId, targetId: action.targetId,
-        routeId: record.route.routeId, dispatchStatus: "dispatched", effectStatus: "verified",
-        observation: { revision: evidenceRef, observedAt: now().getTime(), evidenceRef },
-        ...(receipt && (receipt.state === "applied" || receipt.state === "uncertain" || receipt.state === "in_progress") ? { operationReceipt: { status: receipt.state } } : {}) }),
-        nextStep: "The exact browser tab is verified closed. Observe another explicit tab before further work." });
-    }
-    let refreshed: { record: TargetRecord; observation: Record<string, unknown> } | undefined;
-    let refreshError: string | undefined;
-    try {
-      refreshed = await timing.measure("observationMs", () => observeBrowser({ identity, tab: browserTab, logicalKey: record.scopeKey }));
-    } catch (error) { refreshError = error instanceof Error ? error.message : "The post-action browser observation failed."; }
-    const effectStatus: ComputerUseResult["effectStatus"] = refreshed
-      ? action.postcondition
-        ? timing.measureSync("verificationMs", () => verifyPostcondition(refreshed.record, action.postcondition!))
-        : "observed"
-      : "unknown";
-    const result = createComputerUseResult({
-      operationId: action.operationId,
-      targetId: action.targetId,
-      routeId: selection.routeId,
-      dispatchStatus: "dispatched",
-      effectStatus,
-      ...(receipt && receipt.state !== "claimed" && receipt.state !== "conflict"
-        ? { operationReceipt: { status: receipt.state, ...(receipt.updatedAt ? { updatedAt: receipt.updatedAt } : {}) } } : {}),
-      ...(refreshed ? { observation: { revision: refreshed.record.target.revision, observedAt: refreshed.record.target.observedAt, evidenceRef: refreshed.record.target.revision } } : {}),
-      ...(action.postcondition && effectStatus !== "verified"
-        ? { error: { code: effectStatus === "mismatch" ? "postcondition-mismatch" : "postcondition-unverified",
-            message: "The fresh browser observation did not verify the requested postcondition.", retry: "refresh-target" as const } }
-        : !refreshed ? { error: { code: "post-action-observation-failed", message: (refreshError ?? "No post-action observation was available.").slice(0, 2_000), retry: "same-operation-id" as const } } : {}),
-    });
-    const nextStep = refreshError
-      ? `The action was dispatched; refresh the same target before considering another input. ${refreshError}`
-      : action.postcondition && effectStatus !== "verified"
-        ? "Inspect or refresh the target; do not report task success until the requested postcondition is verified."
-        : !action.postcondition && refreshed
-          ? "Inspect the fresh browser observation before reporting task success; the effect is observed, not verified."
-          : undefined;
-    return toolResponse({ result, ...(receipt ? { operationReceipt: { status: receipt.state, ...(receipt.updatedAt ? { updatedAt: receipt.updatedAt } : {}) } } : {}),
-      ...(refreshed ? { target: refreshed.record.target, observation: refreshed.observation } : { actionResult: response.data }),
-      ...(nextStep ? { nextStep } : {}) },
-      undefined, Boolean(action.postcondition && effectStatus !== "verified" || !refreshed));
+    return refusal(action, action.targetId, "browser-route-retired", RETIRED_BROWSER_ROUTE);
   }
 
   server.registerTool("m9r_computer_action", {
-    description: "Execute one action against an observed targetId and targetRevision with a stable operationId. Element locators carry ref and snapshotId from the same observation. Supports native controls, text, hotkeys, scroll, drag, windows, menus, system controls, navigation and exact browser-tab select/close. On a confirmed exact desktop input target, text_then_enter batches text insertion and Enter in one bounded call; durable no-submit intent blocks both steps before dispatch. Reuse the operationId to reconcile a lost response. Delivery and verification are separate receipt fields. Follow refresh-target advice before replanning; background work never takes global focus.",
+    description: "Execute one action against an observed desktop targetId and targetRevision with a stable operationId. Element locators carry ref and snapshotId from the same observation. The extension-backed browser-tab action route is retired; use m9r_stage_app plus an app-window observation for browser work. Supports native controls, text, hotkeys, scroll, drag, windows, menus, and system controls. On a confirmed exact desktop input target, text_then_enter batches text insertion and Enter in one bounded call; durable no-submit intent blocks both steps before dispatch. Reuse the operationId to reconcile a lost response. Delivery and verification are separate receipt fields. Follow refresh-target advice before replanning; background work never takes global focus.",
     inputSchema: inputSchemas.action, outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, withComputerUseTelemetry(executeComputerAction, monotonicNow));
 
   if (deps.enableIsolatedBrowser) server.registerTool("m9r_browser_open", {
-    description: "Open or navigate one explicit named tab in M9R's isolated browser and return its fresh target for m9r_computer_action. No browser extension or developer mode is required. Use a stable operationId for reconciliation; existing named tabs are selected explicitly and other tabs are preserved.",
+    description: "Retired. The extension-backed and isolated-browser routes are no longer available; use m9r_stage_app followed by m9r_computer_observe/action on the exact owner-visible browser window.",
     inputSchema: { ...(deps.authField ?? LEGACY_TOKEN_FIELD_FALLBACK), tab: z.string().regex(/^[A-Za-z0-9._-]{1,40}$/),
-      url: z.string().max(4096).url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol)), operationId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) },
+      url: z.string().max(4096).url(), operationId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) },
     outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
-  }, withComputerUseTelemetry<{ token?: unknown; tab: string; url: string; operationId: string }>(async ({ token, tab, url, operationId }, timing) => {
-    const identity = await deps.requireIdentity(token);
-    const targetId = opaqueBrowserIdentity(`${identityKey(identity)}\0browser-open\0${tab}`);
-    const taskId = deps.resolveTaskId(identity);
-    const revision = opaqueBrowserIdentity(`${tab}\0${url}`);
-    const target = parseComputerUseTarget({ kind: "browser-tab", targetId, revision, observedAt: now().getTime(),
-      capabilities: ["browser.navigate"], browserInstanceId: opaqueBrowserIdentity(identityKey(identity)), tabId: opaqueBrowserIdentity(tab) });
-    // Bootstrap is an explicit binding request, not an invented observation of
-    // page contents. Navigation enters the same action/claim/receipt loop.
-    records.set(targetId, { target, identityKey: identityKey(identity), logicalKey: `${identityKey(identity)}\0browser-open:${tab}`,
-      scopeKey: `browser:${tab}`, route: { routeId: "m9r-browser-broker", targetKinds: ["browser-tab"], capabilities: ["browser.navigate"] },
-      context: { kind: "browser", taskId, tab, elements: new Map() }, work: { taskId, ...(deps.resolveWorkIdentity?.(taskId) ?? { workId: taskId, planRevision: 0 }) }, change: { status: "unknown", fingerprintSchemaVersion: 1,
-        comparisonScope: "none", counts: { added: 0, removed: 0, updated: 0 }, summary: "No page observation is available yet.",
-        details: { added: [], removed: [], updated: [] }, geometry: { status: "unknown" } } });
-    return executeComputerAction({ token, action: parseComputerUseAction({ kind: "navigate", targetId, targetRevision: revision, operationId, url,
-      postcondition: { kind: "url-equals", url } }) }, timing);
-  }, monotonicNow));
+  }, async ({ token }) => {
+    await deps.requireIdentity(token);
+    return toolResponse({ error: RETIRED_BROWSER_ROUTE }, undefined, true);
+  });
 
   if (deps.enableIsolatedBrowser) server.registerTool("m9r_browser_tabs", {
     description: "List M9R's managed browser tabs without changing tab selection or taking foreground focus.",
     inputSchema: { ...(deps.authField ?? LEGACY_TOKEN_FIELD_FALLBACK) }, outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
   }, async ({ token }) => {
-    const identity = await deps.requireIdentity(token);
-    if (!deps.web) return toolResponse({ error: "The browser broker is unavailable." }, undefined, true);
-    const response = await deps.web.run({ agent: identity.handle, provider: identity.provider, sessionId: identity.sessionId, action: "tabs" });
-    return toolResponse(response.ok ? { tabs: response.data } : { error: response.error }, undefined, !response.ok);
+    await deps.requireIdentity(token);
+    return toolResponse({ error: RETIRED_BROWSER_ROUTE }, undefined, true);
   });
 
   server.registerTool("m9r_computer_inspect", {
