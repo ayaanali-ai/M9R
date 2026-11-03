@@ -2303,7 +2303,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
 
   async function clickDesktop(name: string, x: number, y: number, identity: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}) {
     const result = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
-      if (!validPoint(x, y, capture)) throw new Error("Click coordinates must fall inside the latest desktop screenshot.");
+      if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
       await clearNativeInputSelection(name);
       const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, undefined, true);
@@ -2370,7 +2370,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     // the same way: look up the real field at the given point and replace its
     // value directly, instead of silently reusing an unrelated remembered target.
     if (options.mode === "replace") {
-      if (options.x === undefined || options.y === undefined) throw new Error("Replace mode requires an exact field point; no text was sent.");
+      if (options.x === undefined || options.y === undefined) throw new DesktopInputNotDispatchedError("Replace mode requires an exact field point; no text was sent.");
       const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
         await inspectOwnerDesktop(name, identity);
         const point = await resolveOwnerDesktopPoint(runtime, session, options.x!, options.y!, capture, undefined, true);
@@ -2400,7 +2400,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         if (selected.field) {
           const point = await resolveOwnerWindowPoint(runtime, session, selected.field);
           if (point.target.pid !== selected.pid || point.target.windowId !== selected.windowId) {
-            throw new Error("The selected text field moved to another application window; no keyboard input was sent.");
+            throw new DesktopInputNotDispatchedError("The selected text field moved to another application window; no keyboard input was sent.");
           }
           await inspectOwnerDesktop(name, identity);
           await moveOwnerCursor(runtime, session, {
@@ -2431,7 +2431,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
 
   async function scrollDesktop(name: string, x: number, y: number, direction: "up" | "down", identity: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}) {
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
-      if (!validPoint(x, y, capture)) throw new Error("Scroll coordinates must fall inside the latest desktop screenshot.");
+      if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
       const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
       const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, screen);
@@ -2459,7 +2459,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     unit: "pixel" | "line" | "page", identity: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}) {
     const scroll = scrollDeltaAmount(deltaX, deltaY, unit);
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
-      if (!validPoint(x, y, capture)) throw new Error("Scroll coordinates must fall inside the latest desktop screenshot.");
+      if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
       const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
       const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, screen);
@@ -2485,7 +2485,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
 
   async function dragDesktop(name: string, fromX: number, fromY: number, toX: number, toY: number, identity: CuaAgentCursorIdentity, options: CuaStageDragOptions = {}) {
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
-      if (!validPoint(fromX, fromY, capture) || !validPoint(toX, toY, capture)) throw new Error("Both drag points must fall inside the latest desktop screenshot.");
+      if (!validPoint(fromX, fromY, capture) || !validPoint(toX, toY, capture)) throw new DesktopInputNotDispatchedError("Both drag points must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
       const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
       const start = await resolveOwnerDesktopPoint(runtime, session, fromX, fromY, capture, screen);
@@ -2635,7 +2635,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAtPoint }) => {
       const before = await captureWindow();
-      if (!validPoint(x, y, before)) throw new Error("Click coordinates must fall inside the current stage window snapshot.");
+      if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
       if (!options.confirmFocusForeground && options.button === undefined && options.count === undefined
@@ -2838,7 +2838,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       // the same way replaceElement() does, instead of silently appending text
       // wherever focus happens to be.
       if (options.mode === "replace") {
-        if (options.x === undefined || options.y === undefined) throw new Error("Replace mode requires an exact field point; no text was sent.");
+        if (options.x === undefined || options.y === undefined) throw new DesktopInputNotDispatchedError("Replace mode requires an exact field point; no text was sent.");
         const element = await elementAtPoint(options.x, options.y, "set_value");
         if (!element?.elementToken || element.enabled === false || !element.actions?.includes("set_value")) {
           throw new DesktopInputNotDispatchedError("No replaceable text field was found at the given point; no text was sent.");

@@ -382,7 +382,9 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
 
       const surfaceId = input.target.surfaceId;
       const surfaceRevision = currentRevision(surfaceId);
-      if (unresolvedSurfaces.has(surfaceId)) {
+      // Keep an active dispatch serialized. A finished but uncertain operation
+      // retains its own receipt and does not reserve the entire window.
+      if (unresolvedSurfaces.has(surfaceId) && [...inFlightSurfaceByOperation.values()].includes(surfaceId)) {
         return refusal("surface-unresolved", "A prior action on this surface has an unresolved outcome. Refresh the target and inspect its current state before trying another action.", "refresh-target", surfaceRevision);
       }
       const receiptKey = { runId, branchId, agentId, surfaceId, operationId: input.operationId };
