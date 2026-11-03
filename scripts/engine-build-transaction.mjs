@@ -66,6 +66,10 @@ function normalizeArtifacts(entries) {
 
 const NON_DETERMINISTIC_SEA_ARTIFACTS = new Set(["m9r-engine.exe", "m9r-web-broker.exe"]);
 
+function legacyBuildIdFor(artifacts) {
+  return createHash("sha256").update(JSON.stringify(Object.entries(artifacts))).digest("hex");
+}
+
 function buildIdFor(artifacts, source = { sourceCommit: "unknown", sourceDirty: true }) {
   // Node SEA embeds a small amount of path/build metadata in the generated
   // executable. Those bytes can differ when the same source is assembled in a
@@ -112,7 +116,12 @@ export function verifyRuntimeBuildManifest(root, { exact = false } = {}) {
     && typeof manifest.source.sourceDirty === "boolean"
     ? manifest.source
     : { sourceCommit: "unknown", sourceDirty: true };
-  if (buildIdFor(artifacts, source) !== manifest.buildId) throw new Error("Runtime build manifest digest does not match its artifact list.");
+  // Accept one-generation legacy manifests so a generated runtime can be
+  // rebuilt and atomically replaced after the identity algorithm upgrade.
+  // New manifests are always written with the stable source-derived identity.
+  if (buildIdFor(artifacts, source) !== manifest.buildId && legacyBuildIdFor(artifacts) !== manifest.buildId) {
+    throw new Error("Runtime build manifest digest does not match its artifact list.");
+  }
 
   const actualPaths = [];
   for (const [path, expectedHash] of Object.entries(artifacts)) {

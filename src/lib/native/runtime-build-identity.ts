@@ -48,6 +48,10 @@ function normalizedArtifacts(value: Record<string, string>): Record<string, stri
   return Object.fromEntries(entries);
 }
 
+function legacyRuntimeBuildId(artifacts: Record<string, string>): string {
+  return createHash("sha256").update(JSON.stringify(Object.entries(artifacts))).digest("hex");
+}
+
 export function calculateRuntimeBuildId(
   artifacts: Record<string, string>,
   source: RuntimeSourceProvenance = { sourceCommit: "unknown", sourceDirty: true },
@@ -121,7 +125,10 @@ export function readRuntimeBuildIdentity(executablePath = process.execPath): Run
     const input = Object.fromEntries(Object.entries(parsed.artifacts).map(([path, digest]) => [path, String(digest)]));
     artifacts = normalizedArtifacts(input);
     const source = parsed.source as unknown as RuntimeSourceProvenance;
-    if (calculateRuntimeBuildId(artifacts, source) !== parsed.buildId) return { status: "invalid_manifest", reason: "build_manifest_digest_mismatch" };
+    if (calculateRuntimeBuildId(artifacts, source) !== parsed.buildId
+      && legacyRuntimeBuildId(artifacts) !== parsed.buildId) {
+      return { status: "invalid_manifest", reason: "build_manifest_digest_mismatch" };
+    }
   } catch {
     return { status: "invalid_manifest", reason: "build_manifest_artifacts_invalid" };
   }
