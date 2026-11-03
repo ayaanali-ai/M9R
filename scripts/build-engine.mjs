@@ -25,6 +25,11 @@ const cliOutput = resolve(process.env.M9R_CLI_OUTPUT_DIR || join(root, "cli", "d
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
+// Keep all absolute CLI module paths embedded in the SEA bundle stable across
+// normal and candidate builds. Candidate output itself remains isolated, but
+// the temporary bundle input has one fixed path so equivalent source does not
+// produce staging-directory-specific executable bytes.
+const stableCliOutput = join(engineDir, ".m9r-engine-cli-input");
 // Node SEA records the absolute `main` path in its embedded metadata. Keep
 // that path stable across UUID-named staging directories so identical source
 // produces identical m9r-engine.exe bytes.
@@ -107,6 +112,12 @@ function isHeldLocalProvenancePath(path) {
 }
 
 if (!existsSync(join(cliOutput, "m9r.js")) || !existsSync(brokerBundle)) throw new Error(`CLI build output is missing: ${cliOutput}. Run npm run build:cli first or set M9R_CLI_OUTPUT_DIR to its completed output.`);
+rmSync(stableCliOutput, { recursive: true, force: true });
+cpSync(cliOutput, stableCliOutput, { recursive: true });
+const stableBrokerBundle = join(stableCliOutput, "m9r-web-broker.cjs");
+if (!existsSync(join(stableCliOutput, "m9r.js")) || !existsSync(stableBrokerBundle)) {
+  throw new Error("The stable CLI bundle input is incomplete; refusing to build a SEA runtime.");
+}
 rmSync(work, { recursive: true, force: true });
 for (const name of [exeName, brokerExeName, ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
   rmSync(join(out, name), { force: true });
@@ -172,9 +183,9 @@ function sourceProvenance() {
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
-const mcpJs = join(cliOutput, "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
-const devMcpJs = join(cliOutput, "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
-const cliJs = join(cliOutput, "m9r.js").split(String.fromCharCode(92)).join("/");
+const mcpJs = join(stableCliOutput, "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
+const devMcpJs = join(stableCliOutput, "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
+const cliJs = join(stableCliOutput, "m9r.js").split(String.fromCharCode(92)).join("/");
 const entry = join(work, "entry.mjs");
 try {
 writeFileSync(entry, `
@@ -222,7 +233,7 @@ writeFileSync(stableEngineBundle, bundleResult.outputFiles[0].text);
 const exe = join(out, exeName);
 buildSeaExecutable(stableEngineBundle, exe, "engine");
 const brokerExe = join(out, brokerExeName);
-buildSeaExecutable(brokerBundle, brokerExe, "web-broker");
+buildSeaExecutable(stableBrokerBundle, brokerExe, "web-broker");
 const cargoEnv = { ...process.env, PATH: `${process.env.PATH}${process.platform === "win32" ? ";" : ":"}${join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cargo", "bin")}` };
 // The visible-tab click path must use trusted OS input. Ship its Windows-only Native Messaging host beside the engine.
 if (process.platform === "win32") {
@@ -312,5 +323,6 @@ console.log(`Runtime source ${provenance.sourceCommit} (${provenance.sourceDirty
 if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the owner-accepted live pill artifact (${acceptedOverlayHash}).`);
 } finally {
   rmSync(buildRoot, { recursive: true, force: true });
-  rmSync(stableEngineBundle, { force: true });
+    rmSync(stableEngineBundle, { force: true });
+    rmSync(stableCliOutput, { recursive: true, force: true });
 }
