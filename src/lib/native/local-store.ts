@@ -387,7 +387,10 @@ export function handleForProvider(provider: string): string {
   return key.replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 39) || "agent";
 }
 
-const LOCK_WAIT_MS = 3000;
+// Windows application-container temp roots can briefly deny publication of a
+// freshly-created lock directory even when no other writer owns it. Keep the
+// lock bounded, but give that OS-level handle handoff enough time to settle.
+const LOCK_WAIT_MS = 10_000;
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 export interface LocalStoreDeps {
@@ -440,8 +443,28 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
             const code = (error as NodeJS.ErrnoException).code;
             // Windows can temporarily retain a directory handle after release.
             // Retry publication, never remove a directory or replace its owner.
-            if (!["EPERM", "EACCES", "EBUSY"].includes(code ?? "") || Date.now() > deadline) throw error;
-            sleepSync(15);
+            if (!["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) throw error;
+            if (Date.now() > deadline) {
+              // Some Windows application-container temp roots reject a
+              // directory rename even when the destination is absent. The
+              // lock protocol still has an atomic primitive available there:
+              // exclusive directory creation. Publish the owner record only
+              // after that directory is acquired; competing writers observe
+              // the directory and wait rather than stealing it.
+              try {
+                mkdirSync(lockPath);
+                writeFileSync(join(lockPath, ownerName), JSON.stringify({ pid: process.pid, nonce }), { flag: "wx" });
+                return ownerName;
+              } catch (fallbackError) {
+                try { rmSync(join(lockPath, ownerName), { force: true }); } catch { /* preserve a competing owner */ }
+                try { rmdirSync(lockPath); } catch { /* a competing owner may have published */ }
+                if ((fallbackError as NodeJS.ErrnoException).code === "EEXIST") {
+                  continue;
+                }
+                throw error;
+              }
+            }
+            sleepSync(50);
             continue;
           }
           try {
@@ -501,11 +524,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
   /** Retry transient Windows sharing errors, but never replace atomic publication with an in-place copy. */
   function renameWithRetry(from: string, to: string): void {
-    for (let attempt = 0; attempt < 10; attempt += 1) {
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (let attempt = 0; ; attempt += 1) {
       try { renameSync(from, to); return; } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw error;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
+        if (Date.now() >= deadline) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(250, 25 * (attempt + 1)));
       }
     }
     throw new Error(`M9R could not atomically publish local state at ${to}; the previous state and pending snapshot at ${from} were preserved.`);

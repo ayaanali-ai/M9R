@@ -15,7 +15,7 @@ test("screen questions bind the live desktop and preserve no-submit/no-advance b
   assert.equal(intent.surface, "desktop");
   assert.equal(intent.action, "observe");
   assert.equal(intent.mode, "explain");
-  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: false });
+  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: false, allowNavigationCommit: false });
   assert.deepEqual(intent.preferredObservation, "desktop");
   assert.deepEqual(intent.plan.map((step) => step.kind), ["bind-foreground", "observe-structure"]);
   assert.equal(intent.fallbackPolicy.currentForegroundFirst, true);
@@ -27,7 +27,7 @@ test("navigating to a URL grants the Enter keystroke that commits it, without op
   assert.equal(intent.surface, "browser");
   assert.equal(intent.action, "navigate");
   assert.equal(intent.mode, "prepare");
-  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: true });
+  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: false, allowNavigationCommit: true });
 });
 
 test("browser requests select an exact existing tab before structure and visual fallback", () => {

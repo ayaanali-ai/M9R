@@ -1,6 +1,6 @@
 # Current Cua dependency inventory
 
-Captured from `main` at `b4f45dba` on 2026-11-03. This is an inventory, not an approval to keep the dependency.
+Captured from `codex/final-polish-rebirth` at `d98c0f5c` on 2026-11-03. This is an inventory, not an approval to keep the dependency.
 
 ## Cursor presentation (retain temporarily behind one adapter)
 
@@ -9,28 +9,35 @@ Captured from `main` at `b4f45dba` on 2026-11-03. This is an inventory, not an a
 
 These calls are presentation-only and may remain temporarily. They must not be used as a permission, targeting, or dispatch dependency.
 
-## Perception still supplied by Cua (must move to native host)
+## Perception supplied by the native host in production
 
-- `getDesktopState`, `getWindowState`, `getScreenSize`, and `listWindows` in `cua-stage-driver.ts`.
-- `parseVisualRegions` for visual fallback target descriptions.
-- Cua screenshot/image extraction and Cua capture IDs.
-- Window-level accessibility element tokens and Cua element maps.
+- `windows-desktop-stage.ts` owns `desktopStructure`, `windowStructure`, `captureDesktop`,
+  `captureWindow`, `listVisibleWindows`, HWND/process-generation validation, and
+  exact foreground/window geometry.
+- `cua-stage-driver.ts` uses those native calls first for desktop and app-window
+  observations, including popup captures and point resolution.
+- The old Cua observation path remains only as an explicit `M9R_ENABLE_CUA_COMPAT=1`
+  rollback/test adapter when a native seam is unavailable. Production stages do not
+  set that flag.
 
 The native host currently supplies desktop-wide UIA structure, window metadata, HWND/process-generation validation, hit testing, popups, and window geometry, but not the complete exact-window observation/screenshot contract required to remove these calls safely.
 
-## Semantic/action calls still supplied by Cua (must move to native host)
+## Semantic/action calls supplied by the native host in production
 
-- `set_value` through `driver.callTool` for exact-field replacement and append fallback.
-- Cua semantic element click when a native screen point cannot be derived.
-- Cua foreground/background fallback inside `driverInputAction`.
-- Cua scroll for horizontal scrolling.
-- Cua drag/click/key/type/scroll function closures retained as fallback delegates.
-- Cua `setWindowFrame` for resize/snap paths.
-- Cua `bring_to_front` where the native foreground option is not selected.
+- click, key, hotkey, Unicode text, vertical/horizontal scroll, drag, foreground
+  activation, resize, and window state all route through
+  `windows-desktop-stage.ts` and `native-input-host`.
+- `driverInputAction` no longer calls Cua in production; its compatibility branch
+  is reachable only with the explicit rollback flag and only for injected fixtures.
+- `set_value` replacement uses native foreground click/select-all/text delivery;
+  it is not a Cua semantic action.
 
-## Build/runtime packaging still supplied by Cua
+## Cursor/presentation and packaging still supplied by Cua (temporary)
 
 - `@trycua/cua-driver` dependency in `package.json` and lockfile.
+- The cursor presentation adapter still uses the vendored Cua runtime for its
+  labeled overlay and motion. This is presentation-only and is not an input or
+  target-selection dependency.
 - Cua runtime download, archive extraction, and packaging in `scripts/build-engine.mjs` and `scripts/package-engine-release.ps1`.
 - Cua runtime promotion/cleanup in `scripts/accept-overlay-candidate.mjs` and `src/lib/native/native-commands.ts`.
 - Cua host metadata/version checks in `src/lib/native/cua-driver-host.ts`.
@@ -45,4 +52,8 @@ The native host currently supplies desktop-wide UIA structure, window metadata, 
 
 ## Production rule
 
-No new production caller may add a Cua perception/action dependency. Until the native replacement is complete, existing Cua calls remain explicitly tracked here and are not described as removed.
+No new production caller may add a Cua perception/action dependency. The only
+accepted runtime dependency is the temporary cursor presentation adapter and its
+packaging metadata. The compatibility branch is an explicit rollback/test seam,
+not a production route, and must be deleted once the native observation contract
+is independently packaged and live-verified.

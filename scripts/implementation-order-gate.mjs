@@ -14,7 +14,7 @@ const env = { ...process.env, TEMP: tempRoot, TMP: tempRoot, M9R_CLI_OUTPUT_DIR:
 // catalogs even when the implementation is correct.
 const nodeArgs = ["--test-concurrency=1", "--disable-warning=ExperimentalWarning", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--import", "./scripts/register-alias.mjs"];
 const checks = [
-  ["CUA driver (44 tests)", ["--test", "./scripts/cua-stage-driver.test.ts"]],
+  ["native desktop dispatch contract", ["--test", "./scripts/native-dispatch-contract.test.ts"]],
   ["desktop stage and task lifecycle", ["--test", "./scripts/task-desktop-stage.test.ts", "./scripts/windows-desktop-stage.test.ts"]],
   ["web lifecycle and redirectable pause", ["--test", "./scripts/web-live-sessions.test.ts"]],
   ["browser mutation fixtures", ["--test", "./scripts/web-press-page-change.test.ts"]],

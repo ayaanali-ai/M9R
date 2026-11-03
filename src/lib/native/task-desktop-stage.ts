@@ -1154,15 +1154,14 @@ export function createTaskDesktopStageService(input: {
         child.on("error", (error) => { launchError = error; });
         try {
           const pollStartedAt = Date.now();
-          // 60 fixed attempts assumed each iteration was fast; listVisibleWindows
-          // can itself be slow under load, so a fixed attempt count could run
-          // past the 55s mutation timeout and 70s transport ceiling while the
-          // app was actually still appearing, producing an open window plus an
-          // uncertain launch outcome instead of a clean result. Bound by actual
-          // elapsed wall time as well, so this loop always yields before those
-          // ceilings regardless of per-iteration cost.
-          const LAUNCH_POLL_BUDGET_MS = 45_000;
-          for (let attempt = 0; attempt < 60 && Date.now() - pollStartedAt < LAUNCH_POLL_BUDGET_MS; attempt++) {
+          // Window enumeration can be slow while Windows is creating a packaged
+          // ApplicationFrameHost view or delegating a browser launch. Use an
+          // elapsed-time budget rather than a fixed number of probes, and leave
+          // a small margin below the broker mutation/transport deadlines. The
+          // budget is shared by every app; no app-specific timeout is needed.
+          const LAUNCH_POLL_BUDGET_MS = 55_000;
+          const LAUNCH_POLL_ATTEMPTS = 120;
+          for (let attempt = 0; attempt < LAUNCH_POLL_ATTEMPTS && Date.now() - pollStartedAt < LAUNCH_POLL_BUDGET_MS; attempt++) {
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
             if (launchError) throw launchError;
@@ -1193,7 +1192,9 @@ export function createTaskDesktopStageService(input: {
               const capture = await presentAndFocusOwnerWindow(selected.pid, selected.windowId, coordinationKey);
               return finishLaunch({ name, taskId, appId, running: true, reused: false, view: "app", foregroundConfirmed: true, capture });
             }
-            await delay(100);
+            // Start responsive, then back off slightly under a busy desktop so
+            // polling does not starve the window-creation work it is waiting for.
+            await delay(Math.min(400, 100 + attempt * 5));
           }
           throw new Error("The requested application did not expose a new exact window. Its launcher response is not proof it opened.");
         } catch (error) {

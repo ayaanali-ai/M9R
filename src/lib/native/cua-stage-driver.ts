@@ -741,8 +741,17 @@ function actionOutcome(result: ActionResult | ToolResult, fallback: string): Cua
       refusal.foreground ? "background-unavailable" : "driver-refused");
   }
   const error = actionError(result, fallback);
-  if (error) throw new Error(error);
   const parts = actionParts(result);
+  if (error) {
+    // A transport-level error without an explicit effect is a pre-dispatch
+    // refusal: the compatibility adapter did not provide evidence that any
+    // input reached the OS. Keep the result typed so the caller can reobserve
+    // or choose a new route without fencing unrelated work.
+    if (parts.effect === undefined || parts.effect === null) {
+      throw new DesktopInputNotDispatchedError(`${error} No input was sent.`, "driver-refused");
+    }
+    throw new Error(error);
+  }
   const status = parts.effect === 0 || parts.effect === "confirmed" ? "confirmed"
     : parts.effect === 1 || parts.effect === "partial" ? "partial"
       : parts.effect === 2 || parts.effect === "unverifiable" ? "unverifiable"

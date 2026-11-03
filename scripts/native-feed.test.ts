@@ -187,8 +187,10 @@ test("dismiss hides an item from the feed and changes nothing else about the tas
   const root = mkdtempSync(join(tmpdir(), "m9r-feed-dismiss-"));
   const store = createLocalStore(root, { now: () => NOW });
   const { task: t } = store.addTask({ from: "claude", to: "codex", goal: "Review", origin: "human_typed", idempotencyKey: "d" });
+  const identity = store.issueIdentity("codex", "codex", S1);
   store.setDelivery(t.id, { state: "queued", threadId: S1 });
-  store.setResult(t.id, "Reviewed: fine.");
+  store.markDelivered([t.id], S1);
+  assert.equal(store.recordTaskResult(identity.token, t.id, "Reviewed: fine.", { status: "completed", remainingWork: [] }).ok, true);
   await feedPass(root, { now: () => NOW }, {});
   assert.equal((JSON.parse(readFileSync(join(root, "feed.json"), "utf8")) as Feed).needsYou.length, 1);
   assert.equal(store.dismiss([t.id]), 1);
