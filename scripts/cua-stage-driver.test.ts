@@ -272,7 +272,9 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
     platform: "win32",
     root,
     terminal: true,
-    env: {},
+    // The test suite injects a fake Cua runtime; production is native-only
+    // unless M9R_ENABLE_CUA_COMPAT is deliberately set by an operator.
+    env: { M9R_ENABLE_CUA_COMPAT: "1" },
     invokeNative: async (request) => {
       if (request.op === "input") return { ok: false, error: "unsupported native-control window" };
       if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId, isCurrent: true } };

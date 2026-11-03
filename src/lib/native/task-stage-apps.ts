@@ -75,6 +75,13 @@ export function stageWindowMatchesApp(candidate: BrowserWindowCandidate, app: St
   const key = (value: string) => basename(value).toLowerCase().replace(/\.exe$/, "");
   const expected = key(app.windowExecutable ?? app.executable);
   const actual = key(candidate.appName);
+  // Packaged Windows apps are launched through explorer.exe and are hosted in
+  // an ApplicationFrameHost top-level HWND. The host, not the inner XAML
+  // child, is the focusable/foreground identity the native stage can own.
+  // Accept that generic wrapper only for an explicit AppsFolder activation;
+  // normal explorer launches still require an exact process match.
+  const packagedActivation = app.args.some((arg) => /^shell:AppsFolder\\[^!]+![^!]+$/i.test(arg));
+  if (packagedActivation && actual === "applicationframehost" && candidate.title.trim().length > 0) return true;
   if (expected === actual) {
     // explorer.exe hosts both real folder windows and the shell's own permanent
     // desktop/taskbar window (title "Program Manager"), which always exists whether

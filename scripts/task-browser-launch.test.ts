@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { join } from "node:path";
 import { hasAmbiguousExistingPersonalBrowserWindow, isPackageManagerShimPath, ownedBrowserLaunch,
-  resolveStageLaunchApp, selectExistingPersonalBrowserWindow, selectPersonalBrowserWindow } from "../src/lib/native/task-stage-apps";
+  resolveStageLaunchApp, selectExistingPersonalBrowserWindow, selectPersonalBrowserWindow, stageWindowMatchesApp } from "../src/lib/native/task-stage-apps";
 
 test("personal browser launch uses the user's profile and asks Chrome for a new window", () => {
   const app = { executable: join("browser", "chrome.exe"), args: [] };
@@ -100,4 +100,10 @@ test("desktop app launch resolution prefers Windows-installed apps over package-
   assert.deepEqual(await resolveStageLaunchApp("notepad", {
     env, resolveDirect: () => { throw new Error("No direct executable on PATH"); }, discoverInstalledApp: async () => installed,
   }), installed, "Windows app discovery also resolves names that have no direct executable");
+});
+
+test("packaged Windows apps bind the ApplicationFrameHost outer window", () => {
+  const packaged = { executable: "C:\\Windows\\explorer.exe", args: ["shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"], windowExecutable: "CalculatorApp.exe" };
+  assert.equal(stageWindowMatchesApp({ pid: 42, windowId: "0x1", appName: "ApplicationFrameHost.exe", title: "Calculator", width: 800, height: 600 }, packaged), true);
+  assert.equal(stageWindowMatchesApp({ pid: 42, windowId: "0x1", appName: "explorer.exe", title: "Program Manager", width: 800, height: 600 }, packaged), false);
 });

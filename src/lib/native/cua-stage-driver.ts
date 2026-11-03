@@ -974,7 +974,11 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // surfaced instead of silently re-entering the retired Cua perception path.
   // An explicit compatibility flag keeps emergency rollback possible without
   // making it the normal architecture.
-  const allowCuaCompatibility = deps.stage?.env?.M9R_ENABLE_CUA_COMPAT === "1" || Boolean(deps.stage?.invokeNative);
+  // Native UIA/GDI is the production perception route. A previous test-seam
+  // shortcut (`Boolean(deps.stage?.invokeNative)`) accidentally enabled the
+  // retired Cua perception fallback in every real broker because production
+  // stages also expose invokeNative. Keep the compatibility path opt-in only.
+  const allowCuaCompatibility = deps.stage?.env?.M9R_ENABLE_CUA_COMPAT === "1";
 
   /**
    * Build one native sender for a registered stage. Foreground delivery uses
@@ -1448,6 +1452,19 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
   options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview";
     nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void>; sendBackground?: () => Promise<void> } } = {}) {
   options.signal?.throwIfAborted();
+  // The test suite can inject a legacy Cua runtime to exercise compatibility
+  // parsing. Production never reaches this branch: it is enabled only by the
+  // explicit M9R_ENABLE_CUA_COMPAT operator flag and only when no native owner
+  // pointer seam was supplied. This keeps the shipped path single-engine while
+  // preserving deterministic coverage of the retired adapter.
+  if (allowCuaCompatibility && !deps.ownerPointer) {
+    const deliveryMode = options.deliveryMode ?? "background";
+    const result = await _driver.callTool(name, JSON.stringify({
+      ...args,
+      delivery_mode: deliveryMode === "owner-preview" ? "foreground" : "background",
+    }));
+    return actionOutcome(result, fallback);
+  }
   // Registered app stages default to the non-activating/background contract.
   // Owner-preview callers pass `owner-preview` explicitly. Treating an omitted
   // mode as an error made ordinary stage actions fall through to a refusal even
