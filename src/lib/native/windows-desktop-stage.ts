@@ -59,6 +59,8 @@ interface NativeStageResponse {
   window?: NativeWindowStageInfo;
   desktop?: NativeDesktopStageInfo;
   desktopStructure?: NativeDesktopStructure;
+  windowStructure?: NativeWindowStructure;
+  capture?: { dataUrl: string; width: number; height: number };
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
@@ -106,6 +108,19 @@ export interface NativeDesktopStructure {
   status: "complete" | "partial";
   screen: { x: number; y: number; width: number; height: number };
   elements: NativeDesktopStructureElement[];
+  truncated: boolean;
+}
+
+export interface NativeWindowStructureElement extends NativeDesktopStructureElement {
+  ref: string;
+  actions?: { invoke: boolean; select: boolean; toggle: boolean };
+}
+
+export interface NativeWindowStructure {
+  scope: "window";
+  windowId: string;
+  status: "complete" | "partial";
+  elements: NativeWindowStructureElement[];
   truncated: boolean;
 }
 
@@ -510,6 +525,44 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       }
     }
     return structure;
+  }
+
+  async function windowStructure(pid: number, windowId: string, options: { maxElements?: number; maxDepth?: number } = {}): Promise<NativeWindowStructure> {
+    assertWindows();
+    assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const maxElements = options.maxElements ?? 256;
+    const maxDepth = options.maxDepth ?? 32;
+    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 4096
+      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 64) {
+      throw new Error("Windows window structure bounds are invalid.");
+    }
+    const inspected = await invokeNative({ op: "inspect", pid, windowId });
+    if (!inspected.ok) throw new Error(inspected.error ?? "Windows could not inspect the target window.");
+    const result = await invokeNative({ op: "inspectWindowStructure", pid, windowId, maxElements, maxDepth });
+    if (!result.ok) throw new Error(result.error ?? "Windows UI Automation could not inspect the target window.");
+    const structure = result.windowStructure;
+    if (!structure || structure.scope !== "window" || structure.windowId !== windowId
+      || !["complete", "partial"].includes(structure.status) || !Array.isArray(structure.elements)
+      || structure.elements.length > maxElements || typeof structure.truncated !== "boolean") {
+      throw new Error("Windows returned an invalid window UI Automation structure.");
+    }
+    return structure;
+  }
+
+  async function captureWindow(pid: number, windowId: string): Promise<{ dataUrl: string; width: number; height: number }> {
+    assertWindows();
+    assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const inspected = await invokeNative({ op: "inspect", pid, windowId });
+    if (!inspected.ok) throw new Error(inspected.error ?? "Windows could not inspect the target window.");
+    const result = await invokeNative({ op: "captureWindow", pid, windowId });
+    const capture = result.capture;
+    if (!result.ok || !capture || typeof capture.dataUrl !== "string" || !/^data:image\/png;base64,/.test(capture.dataUrl)
+      || !Number.isSafeInteger(capture.width) || capture.width < 1 || !Number.isSafeInteger(capture.height) || capture.height < 1) {
+      throw new Error(result.error ?? "Windows could not capture the target window.");
+    }
+    return capture;
   }
 
   async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
@@ -1160,7 +1213,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups,
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, captureWindow, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups,
     bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect, workArea };
 }
 

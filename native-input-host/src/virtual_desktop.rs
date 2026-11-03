@@ -267,6 +267,28 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
+        Some("inspectWindowStructure") => {
+            let result = parse_window_identity(value)
+                .map_err(|error| error.to_string())
+                .and_then(|(_, _)| crate::shell_accessibility::window_structure(value));
+            match result {
+                Ok(structure) => json!({"ok":true,"requestId":request_id,"windowStructure":structure}),
+                Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+            }
+        },
+        #[cfg(windows)]
+        Some("captureWindow") => {
+            let result = parse_window_identity(value)
+                .map_err(|error| error.to_string())
+                .and_then(|(_, handle)| crate::native_screenshot::capture_window(handle));
+            match result {
+                Ok(capture) => json!({"ok":true,"requestId":request_id,"capture":{
+                    "dataUrl":capture.data_url,"width":capture.width,"height":capture.height
+                }}),
+                Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+            }
+        },
+        #[cfg(windows)]
         Some("windowStatus") => match platform::window_status(value) {
             Ok(state) => json!({"ok":true,"requestId":request_id,"windowState":state}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),

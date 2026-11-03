@@ -2,7 +2,7 @@
 use serde_json::{json, Value};
 use windows::core::Interface;
 use windows::Win32::{
-    Foundation::POINT,
+    Foundation::{HWND, POINT},
     System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED, CLSCTX_INPROC_SERVER},
     UI::Accessibility::{
         CUIAutomation8, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
@@ -160,6 +160,94 @@ pub fn desktop_structure(value: &Value) -> Result<Value, String> {
         "elements": elements,
         "truncated": truncated,
     }))
+}
+
+/// Reads a control-view tree rooted at one already validated HWND.  Unlike the
+/// desktop snapshot this never walks sibling application windows, so a stage
+/// observation cannot spend its budget on unrelated surfaces.
+pub fn window_structure(value: &Value) -> Result<Value, String> {
+    let handle = value.get("windowId").and_then(Value::as_str)
+        .and_then(|raw| raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X"))
+            .and_then(|hex| usize::from_str_radix(hex, 16).ok())
+            .or_else(|| raw.parse::<u64>().ok().map(|n| n as usize)))
+        .filter(|handle| *handle != 0)
+        .ok_or_else(|| "invalid window handle".to_string())?;
+    let max_elements = value.get("maxElements").and_then(Value::as_u64)
+        .unwrap_or(MAX_DESKTOP_STRUCTURE_ELEMENTS as u64)
+        .clamp(1, MAX_DESKTOP_STRUCTURE_ELEMENTS as u64) as usize;
+    let max_depth = value.get("maxDepth").and_then(Value::as_u64)
+        .unwrap_or(MAX_DESKTOP_STRUCTURE_DEPTH as u64)
+        .clamp(0, MAX_DESKTOP_STRUCTURE_DEPTH as u64) as usize;
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().map_err(|e| e.to_string())?;
+    let _apartment = ComApartment;
+    let automation: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
+        .map_err(|e| e.to_string())?;
+    let hwnd = HWND(handle as *mut core::ffi::c_void);
+    let root = unsafe { automation.ElementFromHandle(hwnd) }.map_err(|e| e.to_string())?;
+    let walker: IUIAutomationTreeWalker = unsafe { automation.ControlViewWalker() }
+        .map_err(|e| e.to_string())?;
+    let mut elements = Vec::with_capacity(max_elements);
+    let mut truncated = false;
+    let mut next_ref = 0usize;
+    walk_window_element(&walker, &root, 0, max_depth, max_elements, &mut elements, &mut next_ref, &mut truncated);
+    Ok(json!({
+        "scope": "window",
+        "windowId": handle.to_string(),
+        "status": if truncated { "partial" } else { "complete" },
+        "elements": elements,
+        "truncated": truncated,
+    }))
+}
+
+fn walk_window_element(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+    depth: usize,
+    max_depth: usize,
+    max_elements: usize,
+    elements: &mut Vec<Value>,
+    next_ref: &mut usize,
+    truncated: &mut bool,
+) {
+    if elements.len() >= max_elements { *truncated = true; return; }
+    let control = unsafe { element.CurrentIsControlElement() }.map(|v| v.as_bool()).unwrap_or(false);
+    let offscreen = unsafe { element.CurrentIsOffscreen() }.map(|v| v.as_bool()).unwrap_or(true);
+    let rect = unsafe { element.CurrentBoundingRectangle() }.ok();
+    let visible = rect.as_ref().is_some_and(|r| r.right > r.left && r.bottom > r.top);
+    let label = unsafe { element.CurrentName() }.ok().map(|v| v.to_string()).unwrap_or_default();
+    let role = unsafe { element.CurrentControlType() }.ok().and_then(canonical_control_type_name)
+        .map(str::to_owned).or_else(|| unsafe { element.CurrentLocalizedControlType() }.ok().map(|v| v.to_string())).unwrap_or_default();
+    let class_name = unsafe { element.CurrentClassName() }.ok().map(|v| v.to_string()).unwrap_or_default();
+    let enabled = unsafe { element.CurrentIsEnabled() }.map(|v| v.as_bool()).unwrap_or(false);
+    let focused = unsafe { element.CurrentHasKeyboardFocus() }.map(|v| v.as_bool()).unwrap_or(false);
+    if control && !offscreen && visible && (!label.trim().is_empty() || !role.trim().is_empty()) {
+        *next_ref += 1;
+        let bounds = rect.expect("visible UIA element must have bounds");
+        let supports_invoke = unsafe { element.GetCurrentPattern(UIA_InvokePatternId) }.and_then(|p| p.cast::<IUIAutomationInvokePattern>()).is_ok();
+        let supports_select = unsafe { element.GetCurrentPattern(UIA_SelectionItemPatternId) }.and_then(|p| p.cast::<IUIAutomationSelectionItemPattern>()).is_ok();
+        let supports_toggle = unsafe { element.GetCurrentPattern(UIA_TogglePatternId) }.and_then(|p| p.cast::<IUIAutomationTogglePattern>()).is_ok();
+        elements.push(json!({
+            "ref": format!("window-ui-element-{}", next_ref),
+            "label": truncate_text(&label, 160),
+            "role": truncate_text(&role, 80),
+            "className": truncate_text(&class_name, 120),
+            "rect": { "x": bounds.left, "y": bounds.top, "width": bounds.right - bounds.left, "height": bounds.bottom - bounds.top },
+            "depth": depth, "enabled": enabled, "focused": focused,
+            "actions": { "invoke": supports_invoke, "select": supports_select, "toggle": supports_toggle },
+        }));
+    }
+    if depth >= max_depth {
+        if unsafe { walker.GetFirstChildElement(element) }.is_ok() { *truncated = true; }
+        return;
+    }
+    let Ok(mut child) = (unsafe { walker.GetFirstChildElement(element) }) else { return };
+    loop {
+        if elements.len() >= max_elements { *truncated = true; return; }
+        walk_window_element(walker, &child, depth + 1, max_depth, max_elements, elements, next_ref, truncated);
+        if *truncated && elements.len() >= max_elements { return; }
+        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else { return };
+        child = next;
+    }
 }
 
 fn walk_desktop_elements(

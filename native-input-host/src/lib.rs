@@ -63,6 +63,8 @@ mod virtual_desktop;
 mod system_controls;
 #[cfg(windows)]
 mod shell_accessibility;
+#[cfg(windows)]
+mod native_screenshot;
 
 #[cfg(windows)]
 pub use win32::click_visible_chrome_tab;
