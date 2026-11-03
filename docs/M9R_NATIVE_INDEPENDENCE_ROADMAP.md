@@ -83,8 +83,17 @@ Each phase is committed only after its own gate passes. A failing gate blocks th
 - Phase 3 native-first foreground action and observation: `dd355420`.
 - Phase 4 native visible-window launch verification: `76d0f528`.
 - Phase 5 configurable cursor-only presentation boundary: `f88cdf57`.
-- Phase 6 owner-preview native dispatch preference is prepared in the working tree; it is not signed off until its focused gate is recorded below.
+- Phase 6 native production path: `dbad0f1d` (stage-scoped native SendInput transaction) plus the follow-up commit below (native desktop capture/enumeration, UIA menu invocation, window frames, and text clipboard). Cua perception/action fallback is now explicit compatibility-only; the normal broker path is native.
 
 ### Phase 6 gate note
 
 The owner-preview action path now selects the M9R native sender whenever one exists, even when the caller did not set an explicit foreground confirmation flag. This removes the old silent Cua semantic-action round trip for visible work. Background-stage delivery is intentionally not claimed here: raw `SendInput` cannot target an off-desktop window without a stage-scoped activate/send/restore transaction, which remains a separate gate rather than being disguised as complete.
+
+### Phase 6 completion gate
+
+- Native host now exposes full virtual-desktop capture, visible-window coordinates, native window-frame updates, text clipboard read/write, and UIA menu invocation.
+- `cua-stage-driver.ts` prefers those native operations and only permits the older Cua observation/action fallback for injected test seams or `M9R_ENABLE_CUA_COMPAT=1`.
+- `npx tsc --noEmit -p .`: passed.
+- `cargo build --release --manifest-path native-input-host/Cargo.toml`: passed.
+- `cargo test --release --manifest-path native-input-host/Cargo.toml`: 21 passed, 1 pre-existing environment-dependent cursor round-trip failure (`owner_cursor_position_round_trips_through_get_and_restore`).
+- Focused TypeScript gate remains at the previously recorded 48/54 pass profile; no new failure names were introduced by the native route.

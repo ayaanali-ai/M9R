@@ -193,6 +193,8 @@ export interface CuaStageCapture {
   capturedAt: string;
   /** Cua's opaque ID for this exact desktop screenshot; used to bind visual coordinates. */
   captureId?: string;
+  /** Virtual-screen origin for a native full-desktop capture. */
+  origin?: { x: number; y: number };
   /** Bounded accessible targets from this same window snapshot, in screenshot pixels. */
   controls?: CuaStageTargetDescription[];
   /** True when `controls` was cut off at its element cap; the window has more controls than were returned. */
@@ -978,6 +980,11 @@ function desktopTargetAt(result: ToolResult, x: number, y: number): CuaStageTarg
  */
 export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const manager = createWindowsDesktopStageManager(deps.stage);
+  // Injected native seams are test-only. In production, a native failure is
+  // surfaced instead of silently re-entering the retired Cua perception path.
+  // An explicit compatibility flag keeps emergency rollback possible without
+  // making it the normal architecture.
+  const allowCuaCompatibility = deps.stage?.env?.M9R_ENABLE_CUA_COMPAT === "1" || Boolean(deps.stage?.invokeNative);
 
   /**
    * Build one native sender for a registered stage. Foreground delivery uses
@@ -1332,6 +1339,23 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     await inspectOwnerDesktop(name, identity);
     if (!refresh) {
       try { return stageCapture(currentDesktopCapture(name, identity), now); } catch { /* take a new capture */ }
+    }
+    // Native Win32 capture is the production observation path. It is not tied
+    // to a Cua capture token and therefore cannot lose the desktop identity
+    // when the optional presentation adapter is restarted.
+    try {
+      const native = await manager.captureDesktop();
+      const captureId = `native-desktop-${createHash("sha256").update(native.dataUrl).digest("hex").slice(0, 24)}`;
+      const capturedAt = now();
+      const cacheKey = `${name}\0${details.key}`;
+      desktopCaptures.set(cacheKey, { captureId, width: native.width, height: native.height, stageName: name, identityKey: details.key,
+        dataUrl: native.dataUrl, capturedAtMs: capturedAt.getTime(), capturedAt: capturedAt.toISOString() });
+      await inspectOwnerDesktop(name, identity);
+      return { ...native, capturedAt: capturedAt.toISOString(), captureId,
+        ...((Number.isSafeInteger(native.originX) && Number.isSafeInteger(native.originY))
+          ? { origin: { x: native.originX!, y: native.originY! } } : {}) };
+    } catch (nativeError) {
+      if (!allowCuaCompatibility) throw nativeError;
     }
     const result = await runtime.driver.getDesktopState({ session: session.session, maxImageDimension: MAX_IMAGE_DIMENSION });
     resultError(result, "Cua Driver could not capture the owner's current desktop.");
@@ -1920,10 +1944,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           const native = await captureNativeWindow();
           const { ownedPopups, popupCaptureStatus } = await captureOwnedPopups();
           return { ...native, ownedPopups, popupCaptureStatus };
-        } catch {
-          // The native route is authoritative when available. Keep the Cua
-          // screenshot as a bounded compatibility fallback while older native
-          // hosts are being replaced; it never becomes the input transport.
+        } catch (nativeError) {
+          // The native route is authoritative in production. Compatibility is
+          // explicit and limited to injected test seams or a rollback flag;
+          // otherwise do not silently turn a native perception failure into a
+          // second, conflicting observation engine.
+          if (!allowCuaCompatibility) throw nativeError;
         }
         const request = {
           pid,
@@ -2014,9 +2040,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           return { status: structure.status === "partial" ? "partial" : "complete",
             coverage: contentCoverage("window"), capturedAt: now().toISOString(), elements,
             fallbackCapture: fallback };
-        } catch {
-          // Compatibility fallback for a pre-native host; the native path is
-          // still attempted first on every observation.
+        } catch (nativeError) {
+          if (!allowCuaCompatibility) throw nativeError;
+          // Compatibility fallback for an injected pre-native host; the native
+          // path remains the only production observation route.
         }
         const request = {
           pid,
@@ -2268,7 +2295,71 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
    * one provider-neutral target model, not an app or provider route.
    */
   async function readDesktopStructure(name: string, identity: CuaAgentCursorIdentity): Promise<CuaDesktopStructure> {
-    await captureOwnerDesktop(name, identity, true);
+    const captured = await captureOwnerDesktop(name, identity, true);
+    // Native desktop enumeration and window-scoped UIA are the production
+    // structure route. A Cua inventory is available only to injected tests or
+    // an explicit compatibility opt-in; it is never silently selected after a
+    // native observation failure in the shipped broker.
+    try {
+      const visible = await manager.listVisibleWindows();
+      const origin = captured.origin ?? { x: 0, y: 0 };
+      const screen = { width: captured.width, height: captured.height };
+      const desktop = await manager.desktopStructure({ maxElements: MAX_DESKTOP_STRUCTURE_ELEMENTS, maxDepth: 64 }).catch(() => undefined);
+      const current = await manager.currentForegroundWindow().catch(() => undefined);
+      const windows: CuaDesktopStructureWindow[] = [];
+      const elements: CuaDesktopStructureElement[] = [];
+      for (let index = 0; index < visible.length && windows.length < MAX_DESKTOP_STRUCTURE_WINDOWS; index++) {
+        const item = visible[index]!;
+        if (/m9r(?:[- ]overlay)?|agent cursor overlay|cua cursor overlay/i.test(`${item.className ?? ""} ${item.title}`)) continue;
+        const x = Number.isFinite(item.x) ? item.x! : 0;
+        const y = Number.isFinite(item.y) ? item.y! : 0;
+        const rect = { x: x - origin.x, y: y - origin.y, width: item.width, height: item.height };
+        if (rect.width <= 0 || rect.height <= 0 || rect.x + rect.width <= 0 || rect.y + rect.height <= 0
+          || rect.x >= screen.width || rect.y >= screen.height) continue;
+        const ref = `desktop-window-${windows.length + 1}`;
+        let status: CuaDesktopStructureWindow["status"] = "unavailable";
+        let coverage: CuaContentCoverage = contentCoverage("window");
+        const windowElements: CuaDesktopStructureElement[] = [];
+        try {
+          const structure = await manager.windowStructure(item.pid, item.windowId, { maxElements: 512, maxDepth: 24 });
+          status = structure.status === "complete" ? "complete" : "partial";
+          coverage = structure.status === "complete"
+            ? { scope: "window", visibleViewport: "observed", scrollability: "unknown", offscreenContent: "unknown" }
+            : { scope: "window", visibleViewport: "observed", scrollability: "unknown", offscreenContent: "possible" };
+          for (const element of structure.elements) {
+            const er = element.rect;
+            const mapped = er ? { x: er.x - origin.x, y: er.y - origin.y, width: er.width, height: er.height } : undefined;
+            const elementRef = `${ref}:${element.ref}`;
+            const publicElement: CuaDesktopStructureElement = {
+              ref: elementRef, windowRef: ref,
+              ...(mapped ? { rect: mapped } : {}),
+              depth: element.depth, role: element.role || undefined, label: element.label || undefined,
+              enabled: element.enabled, ...(element.focused ? { selected: true } : {}),
+              ...(element.actions ? { actions: Object.entries(element.actions).filter(([, enabled]) => enabled).map(([action]) => action) } : {}),
+            };
+            windowElements.push(publicElement);
+            if (elements.length < MAX_DESKTOP_STRUCTURE_ELEMENTS) elements.push(publicElement);
+          }
+        } catch {
+          // Preserve the visible window even if one app's UIA provider fails.
+          // Its exact screenshot remains available in the returned fallback.
+        }
+        windows.push({ ref, appName: (item.className ?? "").slice(0, 120), title: item.title.slice(0, 240), rect,
+          ...(current && current.pid === item.pid && current.windowId === item.windowId ? { frontmost: true } : {}),
+          minimized: false, onCurrentSpace: true, status, coverage, elements: windowElements });
+      }
+      const shellElements = desktop?.elements.map((element) => ({
+        ref: `desktop-shell:${element.ref}`, windowRef: "desktop-shell", rect: { x: element.rect.x - origin.x, y: element.rect.y - origin.y, width: element.rect.width, height: element.rect.height },
+        depth: element.depth, role: element.role, label: element.label, enabled: element.enabled,
+      } as CuaDesktopStructureElement)) ?? [];
+      const allElements = [...shellElements, ...elements].slice(0, MAX_DESKTOP_STRUCTURE_ELEMENTS);
+      return { scope: "desktop", status: desktop?.status === "partial" || windows.some((window) => window.status !== "complete") ? "partial" : "complete",
+        coverage: aggregateDesktopCoverage(windows), capturedAt: captured.capturedAt, windows, elements: allElements,
+        shell: desktop ? { status: desktop.status, reason: desktop.truncated ? "Native desktop UIA tree was bounded and marked partial." : "Native desktop UIA tree captured." } : { status: "unavailable", reason: "Native desktop shell UIA was unavailable." },
+        fallbackCapture: captured };
+    } catch (nativeError) {
+      if (!allowCuaCompatibility) throw nativeError;
+    }
     return withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
       const fallbackCapture = stageCapture(capture, now);
@@ -3314,8 +3405,8 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, session, pid, windowId, capture: captureWindow }) => {
       options.signal?.throwIfAborted();
-      const outcome = actionOutcome(await driver.setWindowFrame({ pid, windowId, x, y, width, height, session },
-        options.signal ? { signal: options.signal } : undefined), "Cua Driver could not set the selected window frame.");
+      await manager.setWindowFrame(pid, windowId.toString(), { x, y, width, height });
+      const outcome: CuaStageActionOutcome = { status: "unverified", summary: "Native window frame was applied; the refreshed capture is the semantic verification." };
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -3341,8 +3432,8 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           : position === "right" ? { x: work.x + work.width - half(work.width), y: work.y, width: half(work.width), height: work.height }
             : position === "top" ? { x: work.x, y: work.y, width: work.width, height: half(work.height) }
               : { x: work.x, y: work.y + work.height - half(work.height), width: work.width, height: half(work.height) };
-      const outcome = actionOutcome(await driver.setWindowFrame({ pid, windowId, ...frame, session },
-        options.signal ? { signal: options.signal } : undefined), "Cua Driver could not dock the selected window.");
+      await manager.setWindowFrame(pid, windowId.toString(), frame);
+      const outcome: CuaStageActionOutcome = { status: "unverified", summary: "Native window frame was applied; the refreshed capture is the semantic verification." };
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -3380,6 +3471,31 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, session, pid, windowId, capture: captureWindow }) => {
       options.signal?.throwIfAborted();
+      if (!Array.isArray(path) || path.length === 0 || path.some((part) => typeof part !== "string" || !part.trim())) {
+        throw new DesktopInputNotDispatchedError("The menu path is empty or invalid; no menu action was sent.", "target-identity");
+      }
+      try {
+        // UIA menu invocation is resolved afresh at each level. This avoids
+        // holding a stale COM element across a menu opening and works for
+        // classic Win32, WinUI, and Electron menu providers alike.
+        for (const segment of path) {
+          const structure = await manager.windowStructure(pid, windowId.toString(), { maxElements: 4096, maxDepth: 64 });
+          const match = structure.elements.find((element) => element.enabled !== false
+            && element.label.trim().localeCompare(segment.trim(), undefined, { sensitivity: "accent" }) === 0
+            && (!element.actions || element.actions.invoke || element.actions.select || element.actions.toggle));
+          if (!match?.rect) throw new DesktopInputNotDispatchedError(`No enabled menu control named “${segment}” was found in the exact window; no menu action was sent.`, "target-identity");
+          const x = Math.floor(match.rect.x + match.rect.width / 2);
+          const y = Math.floor(match.rect.y + match.rect.height / 2);
+          await manager.pointControl(x, y, { label: match.label, pid, windowId: windowId.toString(), windowPid: pid,
+            rect: match.rect, invoked: false });
+          await manager.pointControl(x, y, { label: match.label, pid, windowId: windowId.toString(), windowPid: pid,
+            rect: match.rect, invoked: true });
+        }
+        const outcome: CuaStageActionOutcome = { status: "unverified", summary: "Native UI Automation invoked each menu path segment; the refreshed capture is the semantic verification." };
+        return { capture: stageCapture(await captureWindow(), now), outcome };
+      } catch (error) {
+        if (!allowCuaCompatibility) throw error;
+      }
       const outcome = actionOutcome(await driver.invokeMenu({ pid, windowId, path, session },
         options.signal ? { signal: options.signal } : undefined), "Cua Driver could not invoke the selected application menu.");
       return { capture: stageCapture(await captureWindow(), now), outcome };
@@ -3396,6 +3512,15 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     options: CuaStageInputOptions = {}) {
     return withRegisteredWindow(name, async ({ driver, session, capture: captureWindow }) => {
       options.signal?.throwIfAborted();
+      try {
+        const text = await manager.clipboardRead();
+        if (includeText) {
+          return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const, summary: "Native clipboard text was read." }, clipboard: { text } };
+        }
+        return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const, summary: "Native clipboard availability was read." }, clipboard: { available: true } };
+      } catch (nativeError) {
+        if (!allowCuaCompatibility) throw nativeError;
+      }
       const result = await driver.clipboardRead({ includeText, session }, options.signal ? { signal: options.signal } : undefined);
       const outcome = actionOutcome(result, "Cua Driver could not read the shared clipboard.");
       return { capture: stageCapture(await captureWindow(), now), outcome, clipboard: clipboardValue(result) };
@@ -3406,6 +3531,16 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     payload?: { imagePath?: string; filePath?: string }, options: CuaStageInputOptions = {}) {
     return withRegisteredWindow(name, async ({ driver, session, capture: captureWindow }) => {
       options.signal?.throwIfAborted();
+      if (!payload?.imagePath && !payload?.filePath) {
+        try {
+          await manager.clipboardWrite(text);
+          return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const, summary: "Native clipboard text was written." } };
+        } catch (nativeError) {
+          if (!allowCuaCompatibility) throw nativeError;
+        }
+      } else if (!allowCuaCompatibility) {
+        throw new DesktopInputNotDispatchedError("Native clipboard supports text only; no clipboard payload was written.", "driver-refused");
+      }
       const result = await driver.clipboardWrite({ ...(payload?.imagePath ? { imagePath: payload.imagePath }
         : payload?.filePath ? { filePath: payload.filePath } : { text }), session },
       options.signal ? { signal: options.signal } : undefined);

@@ -288,10 +288,19 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
                 .and_then(|(_, handle)| crate::native_screenshot::capture_window(handle));
             match result {
                 Ok(capture) => json!({"ok":true,"requestId":request_id,"capture":{
-                    "dataUrl":capture.data_url,"width":capture.width,"height":capture.height
+                    "dataUrl":capture.data_url,"width":capture.width,"height":capture.height,
+                    "originX":capture.origin_x,"originY":capture.origin_y
                 }}),
                 Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
             }
+        },
+        #[cfg(windows)]
+        Some("captureDesktop") => match crate::native_screenshot::capture_desktop() {
+            Ok(capture) => json!({"ok":true,"requestId":request_id,"capture":{
+                "dataUrl":capture.data_url,"width":capture.width,"height":capture.height,
+                "originX":capture.origin_x,"originY":capture.origin_y
+            }}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
         Some("windowStatus") => match platform::window_status(value) {
@@ -300,6 +309,16 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
         },
         Some("systemControl") => match crate::system_controls::handle(value) {
             Ok(result) => json!({"ok":true,"requestId":request_id,"result":result}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("clipboardRead") => match platform::clipboard_read() {
+            Ok(text) => json!({"ok":true,"requestId":request_id,"result":{"text":text,"available":true}}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("clipboardWrite") => match value.get("text").and_then(Value::as_str).ok_or("clipboard text is required".to_string()).and_then(platform::clipboard_write) {
+            Ok(()) => json!({"ok":true,"requestId":request_id,"result":{"written":true}}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
@@ -316,6 +335,11 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
         #[cfg(windows)]
         Some("setWindowState") => match platform::set_window_state(value) {
             Ok(state) => json!({"ok":true,"requestId":request_id,"state":state}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("setWindowFrame") => match platform::set_window_frame(value) {
+            Ok(rect) => json!({"ok":true,"requestId":request_id,"rect":rect}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
@@ -525,6 +549,10 @@ mod platform {
         fn GetProcessTimes(process: *mut std::ffi::c_void, created: *mut ProcessFileTime, exited: *mut ProcessFileTime,
             kernel: *mut ProcessFileTime, user: *mut ProcessFileTime) -> i32;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut std::ffi::c_void;
+        fn GlobalLock(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn GlobalUnlock(memory: *mut std::ffi::c_void) -> i32;
+        fn GlobalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
     }
 
     pub(super) fn process_generation(pid: u32) -> Result<String, &'static str> {
@@ -756,6 +784,11 @@ mod platform {
             timeout_ms: u32,
             result: *mut usize,
         ) -> isize;
+        fn OpenClipboard(window: Hwnd) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(format: u32) -> Hwnd;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, memory: Hwnd) -> Hwnd;
     }
 
     #[repr(C)]
@@ -788,6 +821,39 @@ mod platform {
         Ok(search.windows)
     }
 
+    pub(super) fn clipboard_read() -> Result<String, String> {
+        const CF_UNICODETEXT: u32 = 13;
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == 0 { return Err("Windows could not open the shared clipboard".into()); }
+        let handle = unsafe { GetClipboardData(CF_UNICODETEXT) };
+        if handle.is_null() { unsafe { CloseClipboard(); } return Ok(String::new()); }
+        let pointer = unsafe { GlobalLock(handle) } as *const u16;
+        if pointer.is_null() { unsafe { CloseClipboard(); } return Err("Windows could not read the shared clipboard".into()); }
+        let mut length = 0usize;
+        while length < 1_048_576 && unsafe { *pointer.add(length) } != 0 { length += 1; }
+        let text = unsafe { std::slice::from_raw_parts(pointer, length) };
+        let value = String::from_utf16_lossy(text);
+        unsafe { GlobalUnlock(handle); CloseClipboard(); }
+        Ok(value)
+    }
+
+    pub(super) fn clipboard_write(text: &str) -> Result<(), String> {
+        const CF_UNICODETEXT: u32 = 13;
+        const GMEM_MOVEABLE: u32 = 0x0002;
+        let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, units.len() * std::mem::size_of::<u16>()) };
+        if memory.is_null() { return Err("Windows could not allocate clipboard storage".into()); }
+        let pointer = unsafe { GlobalLock(memory) } as *mut u16;
+        if pointer.is_null() { unsafe { GlobalFree(memory); } return Err("Windows could not lock clipboard storage".into()); }
+        unsafe { std::ptr::copy_nonoverlapping(units.as_ptr(), pointer, units.len()); GlobalUnlock(memory); }
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == 0 { unsafe { GlobalFree(memory); } return Err("Windows could not open the shared clipboard".into()); }
+        if unsafe { EmptyClipboard() } == 0 || unsafe { SetClipboardData(CF_UNICODETEXT, memory).is_null() } {
+            unsafe { CloseClipboard(); GlobalFree(memory); }
+            return Err("Windows could not write the shared clipboard".into());
+        }
+        unsafe { CloseClipboard(); }
+        Ok(())
+    }
+
     pub(super) fn set_window_state(value: &serde_json::Value) -> Result<&'static str, &'static str> {
         let (pid, handle) = super::parse_window_identity(value)?;
         let window = validate_window(pid, handle)?;
@@ -803,6 +869,26 @@ mod platform {
         };
         if !verified { return Err("requested window state was not verified"); }
         Ok(state)
+    }
+
+    pub(super) fn set_window_frame(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let (pid, handle) = super::parse_window_identity(value).map_err(str::to_owned)?;
+        let window = validate_window(pid, handle).map_err(str::to_owned)?;
+        let integer = |key: &str| value.get(key).and_then(serde_json::Value::as_i64)
+            .filter(|n| *n >= -32_768 && *n <= 32_768).map(|n| n as i32)
+            .ok_or_else(|| format!("invalid window frame {key}"));
+        let x = integer("x")?; let y = integer("y")?;
+        let width = integer("width")?.max(80); let height = integer("height")?.max(60);
+        const SWP_NOACTIVATE: u32 = 0x0010;
+        const SWP_SHOWWINDOW: u32 = 0x0040;
+        if unsafe { SetWindowPos(window, std::ptr::null_mut(), x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW) } == 0 {
+            return Err("Windows declined to set the requested window frame".into());
+        }
+        let mut rect = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetWindowRect(window, &mut rect) } == 0 {
+            return Err("Windows did not return the updated window frame".into());
+        }
+        Ok(serde_json::json!({"x":rect.left,"y":rect.top,"width":rect.right-rect.left,"height":rect.bottom-rect.top}))
     }
 
     pub(super) fn window_status(value: &serde_json::Value) -> Result<&'static str, &'static str> {
@@ -971,6 +1057,8 @@ mod platform {
                 "windowId": (window as usize).to_string(),
                 "title": String::from_utf16_lossy(&title[..title_len]),
                 "className": String::from_utf16_lossy(&class_name[..class_len]),
+                "x": rect.left,
+                "y": rect.top,
                 "width": width,
                 "height": height,
                 "visible": true,

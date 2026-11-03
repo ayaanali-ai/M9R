@@ -60,11 +60,11 @@ interface NativeStageResponse {
   desktop?: NativeDesktopStageInfo;
   desktopStructure?: NativeDesktopStructure;
   windowStructure?: NativeWindowStructure;
-  capture?: { dataUrl: string; width: number; height: number };
+  capture?: { dataUrl: string; width: number; height: number; originX?: number; originY?: number };
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
-  windows?: { pid: number; windowId: string; title: string; width: number; height: number; className?: string }[];
+  windows?: { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; className?: string }[];
   position?: { x: number; y: number };
   windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
   foregroundWindow?: { pid: number; windowId: string; desktopId?: string; onCurrentDesktop?: boolean; title?: string; className?: string; visible?: boolean; minimized?: boolean };
@@ -565,6 +565,19 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return capture;
   }
 
+  /** Capture the owner-visible virtual desktop directly with Win32 GDI. */
+  async function captureDesktop(): Promise<{ dataUrl: string; width: number; height: number; originX?: number; originY?: number }> {
+    assertWindows();
+    assertOwner();
+    const result = await invokeNative({ op: "captureDesktop" });
+    const capture = result.capture;
+    if (!result.ok || !capture || typeof capture.dataUrl !== "string" || !/^data:image\/png;base64,/.test(capture.dataUrl)
+      || !Number.isSafeInteger(capture.width) || capture.width < 1 || !Number.isSafeInteger(capture.height) || capture.height < 1) {
+      throw new Error(result.error ?? "Windows could not capture the owner desktop.");
+    }
+    return capture;
+  }
+
   async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
@@ -954,7 +967,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertOwner();
     const result = await invokeNative({ op: "listVisibleWindows" });
     if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Windows could not enumerate visible application windows.");
-    return result.windows.filter((window): window is { pid: number; windowId: string; title: string; width: number; height: number; className?: string } =>
+    return result.windows.filter((window): window is { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; className?: string } =>
       Number.isSafeInteger(window.pid) && window.pid > 0 && typeof window.windowId === "string" && WINDOW_ID_RE.test(window.windowId)
       && typeof window.title === "string" && Number.isSafeInteger(window.width) && window.width > 0
       && Number.isSafeInteger(window.height) && window.height > 0);
@@ -1171,6 +1184,35 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return state;
   }
 
+  async function setWindowFrame(pid: number, windowId: string, frame: { x: number; y: number; width: number; height: number }) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    if (![frame.x, frame.y, frame.width, frame.height].every(Number.isFinite) || frame.width < 80 || frame.height < 60) {
+      throw new Error("Invalid native window frame.");
+    }
+    const result = await invokeNative({ op: "setWindowFrame", pid, windowId, ...frame });
+    const rect = result.rect as { x?: number; y?: number; width?: number; height?: number } | undefined;
+    if (!result.ok || !rect || ![rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === "number" && Number.isFinite(n))) {
+      throw new Error(result.error ?? "Windows did not confirm the requested window frame.");
+    }
+    return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
+  }
+
+  async function clipboardRead() {
+    assertWindows(); assertOwner();
+    const result = await invokeNative({ op: "clipboardRead" });
+    const value = result.result as { text?: unknown } | undefined;
+    if (!result.ok || typeof value?.text !== "string") throw new Error(result.error ?? "Windows could not read the shared clipboard.");
+    return value.text;
+  }
+
+  async function clipboardWrite(text: string) {
+    assertWindows(); assertOwner();
+    if (typeof text !== "string" || text.length > 1_000_000) throw new Error("Clipboard text is invalid or too large.");
+    const result = await invokeNative({ op: "clipboardWrite", text });
+    if (!result.ok) throw new Error(result.error ?? "Windows could not write the shared clipboard.");
+  }
+
   async function showOwnedWindow(name: string) {
     const inspected = await inspectStage(name);
     if (!inspected.anchor) throw new Error("Stage has no registered owned app.");
@@ -1224,7 +1266,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, captureWindow, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups,
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, captureWindow, captureDesktop, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups,
     bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect, workArea };
 }
 
