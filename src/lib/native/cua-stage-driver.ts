@@ -975,6 +975,14 @@ function desktopTargetAt(result: ToolResult, x: number, y: number): CuaStageTarg
  */
 export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const manager = createWindowsDesktopStageManager(deps.stage);
+
+  async function nativeReplaceTextAtScreenPoint(pid: number, windowId: string | bigint, x: number, y: number, text: string): Promise<CuaStageActionOutcome> {
+    await manager.bringToForeground(pid, windowId.toString());
+    await manager.sendClick(pid, windowId.toString(), x, y, {});
+    await manager.sendKeyCombo(pid, windowId.toString(), ["CTRL", "A"]);
+    await manager.sendText(pid, windowId.toString(), text);
+    return { status: "unverified", summary: "Native text replacement was delivered; the refreshed UI state is the semantic verification." };
+  }
   const loadSdk = deps.loadSdk ?? loadCuaSdk;
   const now = deps.now ?? (() => new Date());
   const cursorVisiblePoll = validCursorVisiblePoll(deps.cursorVisiblePoll);
@@ -1477,6 +1485,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     throw error;
     });
   };
+  // Native foreground dispatch is the canonical production path. Cua Driver
+  // remains available only for the synthetic cursor/presentation and for
+  // legacy callers that have no native sender at all. Never probe the Cua
+  // action endpoint first: a refusal there used to turn a valid native action
+  // into a false "uncertain" result and added a full round trip of latency.
+  if (options.nativeForeground && options.preferForeground) return runForeground();
   if (options.deliveryMode === "background" && options.preferForeground) {
     throw new DesktopInputNotDispatchedError("A background stage cannot request foreground input; no input was sent. Use an owner-preview stage for an explicitly visible action.", "background-unavailable");
   }
@@ -1812,7 +1826,41 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         } catch { popupCaptureStatus = "unavailable"; }
         return { ownedPopups, popupCaptureStatus };
       };
+      const captureNativeWindow = async (): Promise<CuaStageWindowFrame> => {
+        const [image, bounds, structure] = await Promise.all([
+          manager.captureWindow(pid, windowId.toString()),
+          manager.windowRect(pid, windowId.toString()),
+          manager.windowStructure(pid, windowId.toString(), { maxElements: 1024, maxDepth: 48 }),
+        ]);
+        const controls: CuaStageTargetDescription[] = [];
+        let controlsTruncated = structure.truncated;
+        for (const element of structure.elements) {
+          const left = Math.max(0, (element.rect.x - bounds.x) * image.width / bounds.width);
+          const top = Math.max(0, (element.rect.y - bounds.y) * image.height / bounds.height);
+          const right = Math.min(image.width, (element.rect.x + element.rect.width - bounds.x) * image.width / bounds.width);
+          const bottom = Math.min(image.height, (element.rect.y + element.rect.height - bounds.y) * image.height / bounds.height);
+          if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) continue;
+          if (controls.length >= 512) { controlsTruncated = true; break; }
+          controls.push({
+            ...(element.label ? { label: element.label } : {}),
+            ...(element.role ? { role: element.role } : {}),
+            rect: { x: left, y: top, width: right - left, height: bottom - top },
+          });
+        }
+        return { dataUrl: image.dataUrl, width: image.width, height: image.height,
+          controls, ...(controlsTruncated ? { controlsTruncated: true as const } : {}),
+          windowBounds: bounds };
+      };
       const capture = async () => {
+        try {
+          const native = await captureNativeWindow();
+          const { ownedPopups, popupCaptureStatus } = await captureOwnedPopups();
+          return { ...native, ownedPopups, popupCaptureStatus };
+        } catch {
+          // The native route is authoritative when available. Keep the Cua
+          // screenshot as a bounded compatibility fallback while older native
+          // hosts are being replaced; it never becomes the input transport.
+        }
         const request = {
           pid,
           windowId,
@@ -1875,6 +1923,37 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         };
       };
       const readStructure = async (): Promise<CuaStageStructure> => {
+        try {
+          const native = await captureNativeWindow();
+          const structure = await manager.windowStructure(pid, windowId.toString(), { maxElements: 1024, maxDepth: 48 });
+          const bounds = native.windowBounds!;
+          const elements = structure.elements.map((element) => ({
+            ref: element.ref,
+            depth: element.depth,
+            role: element.role,
+            label: element.label,
+            enabled: element.enabled,
+            actions: [
+              ...(element.actions?.invoke ? ["click"] : []),
+              ...(element.actions?.select ? ["select"] : []),
+              ...(element.actions?.toggle ? ["toggle"] : []),
+              ...(element.role === "edit" ? ["set_value"] : []),
+            ],
+            ...(element.rect ? { rect: {
+              x: (element.rect.x - bounds.x) * native.width / bounds.width,
+              y: (element.rect.y - bounds.y) * native.height / bounds.height,
+              width: element.rect.width * native.width / bounds.width,
+              height: element.rect.height * native.height / bounds.height,
+            } } : {}),
+          }));
+          const fallback = stageCapture({ ...native, capturedAt: now().toISOString() }, now);
+          return { status: structure.status === "partial" ? "partial" : "complete",
+            coverage: contentCoverage("window"), capturedAt: now().toISOString(), elements,
+            fallbackCapture: fallback };
+        } catch {
+          // Compatibility fallback for a pre-native host; the native path is
+          // still attempted first on every observation.
+        }
         const request = {
           pid,
           windowId,
@@ -2360,8 +2439,11 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         // whether the app opened. Never bind keyboard input to the taskbar.
         return { status: "unverified" as const, summary: "Windows acknowledged exact shell control invocation; verify the returned capture." };
       }
-      const semanticClick = (options.button ?? "left") === "left" && (options.count ?? 1) === 1
-        && point.element?.elementToken && runtime.sdk.ClickPosition.Element;
+      // Element tokens are observation metadata, not an input transport. The
+      // native sender owns the actual click and uses the already verified
+      // window-local point; this keeps semantic clicks from silently falling
+      // back into the vendored Cua action endpoint.
+      const semanticClick = false;
       const outcome = await driverInputAction(runtime.driver, "click", {
         pid: point.target.pid,
         window_id: Number(point.target.windowId),
@@ -2440,9 +2522,12 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         await moveOwnerCursor(runtime, session, point);
         await inspectOwnerDesktop(name, identity);
         forgetDesktopInputTarget(name, identity);
-        return actionOutcome(await runtime.driver.callTool("set_value", JSON.stringify({
-          pid: point.target.pid, window_id: Number(point.target.windowId), element_token: element.elementToken, value: text, session: session.session,
-        }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the field's value.");
+        if (!options.confirmFocusForeground) {
+          return actionOutcome(await runtime.driver.callTool("set_value", JSON.stringify({
+            pid: point.target.pid, window_id: Number(point.target.windowId), element_token: element.elementToken, value: text, session: session.session,
+          }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the field's value.");
+        }
+        return nativeReplaceTextAtScreenPoint(point.target.pid, point.target.windowId, point.screenPoint.x, point.screenPoint.y, text);
       });
       invalidateDesktopCaptures();
       return { capture: await captureOwnerDesktop(name, identity, true), outcome };
@@ -2733,8 +2818,13 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
    * no notion of "a point inside this app's screenshot."
    */
   async function localToScreenPoint(pid: number, windowId: bigint, localX: number, localY: number,
-    captureWidth: number, captureHeight: number): Promise<{ x: number; y: number }> {
-    const rect = await manager.windowRect(pid, windowId.toString());
+    captureWidth: number, captureHeight: number, fallbackBounds?: CuaStageWindowBounds): Promise<{ x: number; y: number }> {
+    let rect: CuaStageWindowBounds;
+    try { rect = await manager.windowRect(pid, windowId.toString()); }
+    catch (error) {
+      if (!fallbackBounds) throw error;
+      rect = fallbackBounds;
+    }
     return {
       x: rect.x + Math.floor((localX + 0.5) * rect.width / captureWidth),
       y: rect.y + Math.floor((localY + 0.5) * rect.height / captureHeight),
@@ -2779,7 +2869,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         ...(useNative ? { nativeForeground: {
           bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
           send: async () => {
-            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
+            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
             await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
               ...(options.count ? { count: options.count } : {}),
@@ -3001,9 +3091,8 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           throw new DesktopInputNotDispatchedError("The field at the given point could not be confirmed as the same one you observed; no text was sent.");
         }
         if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, options.x, options.y, before);
-        const outcome = actionOutcome(await driver.callTool("set_value", JSON.stringify({
-          pid, window_id: Number(windowId), element_token: element.elementToken, value: text, session,
-        }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the field's value.");
+        const screen = await localToScreenPoint(pid, windowId, options.x, options.y, before.width, before.height, before.windowBounds);
+        const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text);
         return { capture: stageCapture(await captureWindow(), now), outcome };
       }
       // A remembered field from a window that is no longer this one (e.g. the
@@ -3055,7 +3144,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         nativeForeground: {
           bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
           send: async () => {
-            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
+            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
             await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
           },
         },
@@ -3081,8 +3170,8 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         nativeForeground: {
           bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
           send: async () => {
-            const fromScreen = await localToScreenPoint(pid, windowId, fromX, fromY, before.width, before.height);
-            const toScreen = await localToScreenPoint(pid, windowId, toX, toY, before.width, before.height);
+            const fromScreen = await localToScreenPoint(pid, windowId, fromX, fromY, before.width, before.height, before.windowBounds);
+            const toScreen = await localToScreenPoint(pid, windowId, toX, toY, before.width, before.height, before.windowBounds);
             await manager.sendDrag(pid, windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
           },
         },
@@ -3133,7 +3222,7 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         ...(point ? { nativeForeground: {
           bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
           send: async () => {
-            const screen = await localToScreenPoint(pid, windowId, point.x, point.y, selected.frame.width, selected.frame.height);
+            const screen = await localToScreenPoint(pid, windowId, point.x, point.y, selected.frame.width, selected.frame.height, selected.frame.windowBounds);
             await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {});
           },
         } } : {}),
@@ -3157,9 +3246,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       }
       const point = elementCursorPoint(selected.element, selected.frame);
       if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
-      const outcome = actionOutcome(await driver.callTool("set_value", JSON.stringify({
-        pid, window_id: Number(windowId), element_token: selected.element.elementToken, value: text, session,
-      }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the selected accessibility value.");
+      if (!point) throw new DesktopInputNotDispatchedError("The selected accessibility field has no usable point; no text was sent.");
+      const before = await captureWindow();
+      const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
+      const outcome = options.confirmFocusForeground
+        ? await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text)
+        : actionOutcome(await driver.callTool("set_value", JSON.stringify({
+          pid, window_id: Number(windowId), element_token: selected.element.elementToken, value: text, session,
+        }), options.signal ? { signal: options.signal } : undefined), "Cua Driver could not replace the selected accessibility value.");
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
