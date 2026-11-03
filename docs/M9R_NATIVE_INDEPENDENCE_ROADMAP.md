@@ -103,3 +103,9 @@ The owner-preview action path now selects the M9R native sender whenever one exi
 - `managed-provider-owner.ts` now states and passes `allowProviderContinuation: false` explicitly at the production supervisor boundary.
 - Added a lifecycle invariant test: normal turns reuse one M9R-owned connection; a failed provider process starts a new generation on that same logical connection with no provider continuation argument.
 - M9R task-context continuation remains separate from provider-native session/thread identifiers.
+
+### Phase 8 completion gate
+
+- Existing task-context, A2A sidecar, scheduler, mutation-fence, and run-coordinator contracts are retained as the single multiplayer path.
+- Added an acceptance test covering pause → release one assignment → redirect → reassign while an unaffected participant keeps its claimed work.
+- Progress witnesses continue to reset the no-progress streak only on observable state change; duplicate witnesses enter `waiting-agent` instead of creating an unbounded message loop.

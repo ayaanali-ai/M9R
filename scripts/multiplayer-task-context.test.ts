@@ -45,6 +45,22 @@ test("dynamic assignments are idempotent and prevent silent double ownership", (
   assert.equal(task.snapshot().assignments.length, 1);
 });
 
+test("owner redirection releases one assignment without resetting unaffected work", () => {
+  const task = createTaskContext({ taskId: "task-reassign", conversationId: "conversation-reassign", runId: "run-reassign", participants, now: 100 });
+  assert.equal(task.claimAssignment({ assignmentId: "assignment-research", workKey: "research", agentId: "agent-1", planRevision: 0, status: "claimed", summary: "Research source material", updatedAt: 101 }).ok, true);
+  assert.equal(task.claimAssignment({ assignmentId: "assignment-build", workKey: "build", agentId: "agent-2", planRevision: 0, status: "claimed", summary: "Build the draft", updatedAt: 102 }).ok, true);
+  assert.equal(task.applyControl({ controlId: "control-pause-reassign", taskId: "task-reassign", kind: "pause", summary: "Owner is changing the split", requestedAt: 103 }).ok, true);
+  task.releaseAssignment("assignment-research", 104);
+  assert.equal(task.applyControl({ controlId: "control-redirect-reassign", taskId: "task-reassign", kind: "redirect", summary: "Agent 2 keeps building while agent 1 researches the new source", requestedAt: 105 }).ok, true);
+  const reassigned = task.claimAssignment({ assignmentId: "assignment-research-2", workKey: "research-v2", agentId: "agent-1", planRevision: 1, status: "claimed", summary: "Research the redirected source", updatedAt: 106 });
+  assert.equal(reassigned.ok, true);
+  const snapshot = task.snapshot();
+  assert.equal(snapshot.planRevision, 1);
+  assert.equal(snapshot.assignments.find((item) => item.assignmentId === "assignment-build")?.status, "claimed");
+  assert.equal(snapshot.assignments.find((item) => item.assignmentId === "assignment-research")?.status, "released");
+  assert.equal(snapshot.assignments.find((item) => item.assignmentId === "assignment-research-2")?.agentId, "agent-1");
+});
+
 test("task snapshots are strict and never retain arbitrary prompt or credential fields", () => {
   const task = createTaskContext({ taskId: "task-4", conversationId: "conversation-4", runId: "run-4", participants, now: 100 });
   const snapshot = task.snapshot();
