@@ -616,3 +616,25 @@ The first implementation slice is now concrete and broker-owned:
 This ledger is not a release claim. Remaining items in XIV must be completed and
 verified before candidate acceptance or installation.
 
+### Verified implementation ledger (2026-11-03)
+
+- `43e28425` adds the broker-owned `m9r_computer_program` composition surface
+  and removes the silent desktop-structure wrapper truncation.
+- `28e8f77` makes the retired Cua action/perception compatibility path opt-in;
+  production native dispatch no longer enables it accidentally, and packaged
+  Windows apps bind the `ApplicationFrameHost` outer window.
+- `faba542c` routes horizontal wheel input through the native host using an
+  explicit `HWHEEL` axis; left/right scroll no longer falls back to a semantic
+  driver refusal.
+- `5fae5471` removes isolated-browser registration and launch modes from the
+  production route. Browser work uses the owner's real profile through the
+  native app-window stage; retired extension targets fail explicitly.
+- `1f2d99ab` adds a bounded durable browser-space ledger keyed by exact
+  owner-profile HWND identity and process/window stage binding. It is a
+  coordination ledger only; it is not a second browser engine or a retargeting
+  heuristic.
+
+These commits are source changes only. Runtime promotion remains gated on the
+full build, candidate provenance, acceptance, install, and live verification
+matrix in XIV.14–15.
+

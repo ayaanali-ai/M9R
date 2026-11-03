@@ -412,9 +412,27 @@ function Write-ManagedWebBrokerManifest($Paths, [string]$Hash) {
     try {
         $json = ConvertTo-Json -InputObject $document
         [IO.File]::WriteAllText($temporary, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
-        Move-Item -LiteralPath $temporary -Destination $Paths.Manifest -Force
+        Move-FileWithRetry $temporary $Paths.Manifest
     } finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
+function Move-FileWithRetry([string]$Source, [string]$Destination) {
+    # Windows Defender, the broker shutdown boundary, and Task Scheduler can
+    # all hold a just-written executable for a short interval.  The installer
+    # already disables M9R's task before this point; this bounded retry closes
+    # the remaining antivirus/handle race without ever overwriting an unknown
+    # path or falling back to a non-atomic copy.
+    $delays = @(25, 50, 100, 200, 400, 800, 1200, 1600)
+    for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -ge $delays.Count) { throw }
+            Start-Sleep -Milliseconds $delays[$attempt]
+        }
     }
 }
 
@@ -438,7 +456,9 @@ function Install-ManagedWebBroker([string]$SourcePath) {
         Copy-Item -LiteralPath $SourcePath -Destination $temporary
         $stagedHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($stagedHash -ne $sourceHash) { throw 'The staged standalone web broker failed its SHA-256 check.' }
-        Move-Item -LiteralPath $temporary -Destination $paths.Target -Force
+        Move-FileWithRetry $temporary $paths.Target
+        $installedHash = (Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($installedHash -ne $sourceHash) { throw 'The installed standalone web broker failed its post-replace SHA-256 check.' }
         Write-ManagedWebBrokerManifest $paths $sourceHash
     } finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force }
