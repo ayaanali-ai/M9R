@@ -522,7 +522,6 @@ function build() {
   //    then prepend the shebang so it runs as a bin.
   const entryTs = readFileSync(resolve(repoRoot, "scripts/m9r-cli.ts"), "utf8");
   let entryJs = transpile(entryTs)
-    .replace(/['"]\.\.\/src\/lib\/native\/agent-chrome-cli['"]/g, '"./agent-chrome-cli.js"')
     .replace(/['"]\.\.\/src\/lib\/native\/windows-desktop-stage['"]/g, '"./windows-desktop-stage.js"')
     .replace(/['"]\.\.\/src\/lib\/native\/cua-stage-driver['"]/g, '"./cua-stage-driver.js"')
     .replace(/['"]\.\.\/src\/lib\/native\/task-desktop-stage['"]/g, '"./task-desktop-stage.js"')

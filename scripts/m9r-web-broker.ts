@@ -3,11 +3,9 @@
  * owner pipe and native desktop/browser routes; the legacy browser-extension
  * transport is intentionally not enabled by this production entry point.
  *
- * The isolated agent-chrome CDP daemon follows the same rule: the owner has
- * explicitly refused it as a default route for any user, so it is built only
- * when M9R_ENABLE_ISOLATED_BROWSER is set. Without it, Chrome automation goes
- * through the native desktop/UIA route (nativeDesktopRoute) against the
- * owner's own signed-in window, never a separate profile.
+ * The former isolated agent-chrome CDP daemon is not started or exposed by
+ * this entry point. Chrome automation goes through the native desktop/UIA
+ * route (nativeDesktopRoute) against the owner's own signed-in window.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";

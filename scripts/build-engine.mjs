@@ -1,7 +1,7 @@
 // Build the self-contained M9R runtime: one executable for CLI/MCP and one
 // separately supervised broker executable. Provider lifecycle hooks are not
 // packaged; the broker owns provider processes directly.
-// Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe (or no extension off Windows).
+// Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe.
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
