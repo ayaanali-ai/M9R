@@ -29,6 +29,9 @@ const MAX_WINDOW_OPTIONS = 256;
 const MAX_DESKTOP_STRUCTURE_WINDOWS = 64;
 const MAX_DESKTOP_STRUCTURE_ELEMENTS = 4096;
 const SESSION_PREFIX = "m9r-stage-";
+const CURSOR_THEME_ID = /^[A-Za-z0-9._:-]{1,64}$/.test(process.env.M9R_CURSOR_THEME ?? "")
+  ? process.env.M9R_CURSOR_THEME!
+  : "cua.default";
 
 type WindowTargetFactory = {
   Window: new (input: { pid: number; windowId: bigint }) => ActionTarget;
@@ -1159,7 +1162,10 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       await timed("session-start", () => runtime.driver.startSession({
         session: details.session,
         cursorTheme: {
-          themeId: "cua.default",
+          // Presentation is deliberately configurable without changing the
+          // native targeting/action contract. The default remains the current
+          // Cua overlay until M9R's own cursor artwork is shipped.
+          themeId: CURSOR_THEME_ID,
           reducedMotion: runtime.sdk.CursorReducedMotion.Auto as import("@trycua/cua-driver").CursorReducedMotion,
         },
       }), { stageName, cached: alreadyTracked });
