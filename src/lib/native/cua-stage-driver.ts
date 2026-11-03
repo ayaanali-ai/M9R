@@ -335,7 +335,10 @@ export type CuaStageInputOptions = {
 };
 export type CuaDesktopClickOptions = CuaStageInputOptions & { button?: "left" | "middle" | "right"; count?: 1 | 2 };
 export type CuaStageTextOptions = CuaStageInputOptions & { mode?: "insert" | "replace"; x?: number; y?: number; expectedRole?: string; expectedLabel?: string; delayMs?: number };
-export type CuaStageScrollOptions = CuaStageInputOptions;
+export type CuaStageScrollOptions = CuaStageInputOptions & {
+  /** Wheel notches to scroll; omitted defaults to 3 (one typical mouse-wheel click). */
+  amount?: number;
+};
 export type CuaStageDragOptions = CuaStageInputOptions & { durationMs?: number };
 
 export interface CuaStageDriverDependencies {
@@ -2493,21 +2496,22 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, point);
       await inspectOwnerDesktop(name, identity);
+      const amount = Math.min(50, Math.max(1, Math.round(options.amount ?? 3)));
       const outcome = await driverInputAction(runtime.driver, "scroll", {
         pid: point.target.pid, window_id: Number(point.target.windowId), x: point.localPoint.x, y: point.localPoint.y,
-        direction, by: "line", amount: 3, session: session.session,
+        direction, by: "line", amount, session: session.session,
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         dispatch: () => runtime.driver.scroll({
           target: new runtime.sdk.ActionTarget.Window(point.target), x: point.localPoint.x, y: point.localPoint.y,
           direction: direction === "up" ? runtime.sdk.ScrollDirection.Up : runtime.sdk.ScrollDirection.Down,
-          by: runtime.sdk.ScrollBy.Line, amount: BigInt(3), session: session.session,
+          by: runtime.sdk.ScrollBy.Line, amount: BigInt(amount), session: session.session,
         }, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: {
           bringToFront: () => manager.bringToForeground(point.target.pid, point.target.windowId.toString()),
           send: async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
-            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, direction === "up" ? 3 : -3);
+            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
           },
         },
       });
@@ -3027,26 +3031,32 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }, cursorIdentity);
   }
 
-  async function scroll(name: string, x: number, y: number, direction: "up" | "down", cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}): Promise<CuaStageActionProof> {
+  async function scroll(name: string, xInput: number | undefined, yInput: number | undefined, direction: "up" | "down", cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       const before = await captureWindow();
+      // A scroll targets one already-exact window; unlike a click or a drag,
+      // there is nothing ambiguous about defaulting to its center when no
+      // point was given -- scrolling the window itself is what was meant.
+      const x = xInput ?? Math.floor(before.width / 2);
+      const y = yInput ?? Math.floor(before.height / 2);
+      const amount = Math.min(50, Math.max(1, Math.round(options.amount ?? 3)));
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
       if (!options.confirmFocusForeground && await nativeControl(name, "scroll", { x, y, imageWidth: before.width, imageHeight: before.height }, { direction })) return { capture: stageCapture(await captureWindow(), now),
         outcome: { status: "unverifiable", summary: "Posted wheel input to the exact native child control; application effect requires verification." } };
       const outcome = await driverInputAction(driver, "scroll", {
         pid, window_id: Number(windowId), x, y,
-        direction, by: "line", amount: 3, session,
+        direction, by: "line", amount, session,
       }, "Cua Driver could not scroll the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         dispatch: () => driver.scroll({ target: new sdk.ActionTarget.Window({ pid, windowId }), x, y,
           direction: direction === "up" ? sdk.ScrollDirection.Up : sdk.ScrollDirection.Down,
-          by: sdk.ScrollBy.Line, amount: BigInt(3), session }, options.signal ? { signal: options.signal } : undefined),
+          by: sdk.ScrollBy.Line, amount: BigInt(amount), session }, options.signal ? { signal: options.signal } : undefined),
         nativeForeground: {
           bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
           send: async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
-            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? 3 : -3);
+            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
           },
         },
       });
@@ -3168,10 +3178,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     return { direction: deltaX !== 0 ? (deltaX < 0 ? "left" : "right") : (delta < 0 ? "up" : "down"), amount, by };
   }
 
-  async function scrollDelta(name: string, x: number, y: number, deltaX: number, deltaY: number, unit: "pixel" | "line" | "page", cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}): Promise<CuaStageActionProof> {
+  async function scrollDelta(name: string, xInput: number | undefined, yInput: number | undefined, deltaX: number, deltaY: number, unit: "pixel" | "line" | "page", cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}): Promise<CuaStageActionProof> {
     const scroll = scrollDeltaAmount(deltaX, deltaY, unit);
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       const before = await captureWindow();
+      // Same reasoning as scroll(): this targets one already-exact window,
+      // so an omitted point defaults to its center rather than being required.
+      const x = xInput ?? Math.floor(before.width / 2);
+      const y = yInput ?? Math.floor(before.height / 2);
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
       const outcome = await driverInputAction(driver, "scroll", {

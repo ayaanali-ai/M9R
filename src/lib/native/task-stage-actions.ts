@@ -15,13 +15,13 @@ type TaskStageActionBody =
   | { kind: "double_click" | "middle_click" | "right_click"; x: number; y: number; confirmFocusForeground?: boolean }
   | { kind: "type"; text: string; mode?: "insert" | "replace"; x?: number; y?: number; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
   | { kind: "type_then_enter"; text: string; confirmFocusForeground?: boolean }
-  | { kind: "scroll"; x: number; y: number; direction: "up" | "down"; confirmFocusForeground?: boolean }
+  | { kind: "scroll"; x?: number; y?: number; direction: "up" | "down"; amount?: number; confirmFocusForeground?: boolean }
   | { kind: "drag"; fromX: number; fromY: number; toX: number; toY: number; durationMs?: number; confirmFocusForeground?: boolean }
   | { kind: "press_key"; key: string; confirmFocusForeground?: boolean }
   | { kind: "hotkey"; keys: string[]; confirmFocusForeground?: boolean }
   | { kind: "click_element"; ref: string; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
   | { kind: "replace_element"; ref: string; text: string; expectedRole?: string; expectedLabel?: string }
-  | { kind: "scroll_delta"; x: number; y: number; deltaX: number; deltaY: number; unit: "pixel" | "line" | "page"; confirmFocusForeground?: boolean }
+  | { kind: "scroll_delta"; x?: number; y?: number; deltaX: number; deltaY: number; unit: "pixel" | "line" | "page"; confirmFocusForeground?: boolean }
   | { kind: "window_frame"; x: number; y: number; width: number; height: number }
   | { kind: "focus"; confirmFocusForeground?: boolean }
   | { kind: "invoke_menu"; path: string[] }
@@ -53,14 +53,20 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid stage action.");
   const action = value as Record<string, unknown>;
   const fields: Record<string, string[]> = { capture: [], stop: [], read_structure: [], window_status: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
-    type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], type_then_enter: ["text"], scroll: ["x", "y", "direction"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
+    type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], type_then_enter: ["text"], scroll: ["x", "y", "direction", "amount"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
     click_element: ["ref", "expectedRole", "expectedLabel"], replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
     window_frame: ["x", "y", "width", "height"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
     system_control: ["control", "action", "value", "step"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const allowedFields = fields[action.kind]!;
   const requiredFields = action.kind === "system_control" ? ["control", "action"] : action.kind === "type" ? ["text"] : action.kind === "read_structure" ? ["view"]
-    : action.kind === "scroll_delta" ? ["x", "y", "deltaX", "deltaY", "unit"] : action.kind === "window_frame" ? allowedFields
+    // A scroll targets one already-exact window (or, on the desktop, the
+    // point that picks which window) -- x/y are a convenience for the
+    // common "scroll wherever this already-selected window is" case, not
+    // a requirement; only direction is.
+    : action.kind === "scroll" ? ["direction"]
+    // Same reasoning as scroll: x/y are a convenience, not a requirement.
+    : action.kind === "scroll_delta" ? ["deltaX", "deltaY", "unit"] : action.kind === "window_frame" ? allowedFields
       : action.kind === "clipboard_read" ? ["includeText"] : action.kind === "clipboard_write" ? ["confirmSharedClipboard"] : action.kind === "click_element" ? ["ref"]
         : action.kind === "replace_element" ? ["ref", "text"] : allowedFields;
   const commonOptionalFields = ["view", "confirmFocusForeground"];
@@ -228,10 +234,21 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
           stoppedAt: "enter", message: error.message.slice(0, 500) } };
       }
     }
-    case "scroll": return desktopWide ? driver.scrollDesktop(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground }))
-      : driver.scroll(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground }));
-    case "scroll_delta": return desktopWide ? driver.scrollDeltaDesktop(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }))
-      : driver.scrollDelta(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }));
+    case "scroll":
+      // Multiple windows can be open on the desktop, so there is no single
+      // exact target to default to there the way there is for one already-
+      // selected app window -- a desktop-wide scroll still needs a point.
+      if (desktopWide && (action.x === undefined || action.y === undefined)) {
+        throw new Error("A desktop-wide scroll needs an exact point; omitting x/y is only supported for the selected app's own window.");
+      }
+      return desktopWide ? driver.scrollDesktop(name, action.x!, action.y!, action.direction, identity, stageOptions({ confirmFocusForeground, amount: action.amount }))
+        : driver.scroll(name, action.x, action.y, action.direction, identity, stageOptions({ confirmFocusForeground, amount: action.amount }));
+    case "scroll_delta":
+      if (desktopWide && (action.x === undefined || action.y === undefined)) {
+        throw new Error("A desktop-wide scroll needs an exact point; omitting x/y is only supported for the selected app's own window.");
+      }
+      return desktopWide ? driver.scrollDeltaDesktop(name, action.x!, action.y!, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }))
+        : driver.scrollDelta(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }));
     case "drag": return desktopWide ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }))
       : driver.drag(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }));
     case "press_key": return popupTargeted ? driver.pressKeyPopup(name, action.key, { confirmFocusForeground, deliveryMode: mode, ...(signal ? { signal } : {}) })
