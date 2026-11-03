@@ -321,6 +321,29 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
     return scheduler.snapshot().surfaceRevisions[surfaceId] ?? 0;
   }
 
+  // A terminated-but-uncertain operation leaves a durable "unresolved" marker
+  // on its surface so a stray failure doesn't get silently replayed. That
+  // marker used to clear only when the caller separately issued a capture or
+  // read_structure; a caller that instead retried the same kind of mutating
+  // action stayed wedged forever even though nothing was actually still in
+  // flight. Once the operation is no longer in-flight (fully released), the
+  // marker is pure history -- clear it eagerly, from any mutation attempt as
+  // well as from an explicit observation, instead of requiring the caller to
+  // know which action type unsticks it.
+  function reconcileIfSettled(surfaceId: string): void {
+    if (!unresolvedSurfaces.has(surfaceId)) return;
+    if ([...inFlightSurfaceByOperation.values()].includes(surfaceId)) return;
+    inFlightUncertainSince.delete(surfaceId);
+    const next = scheduler.advanceSurfaceRevision(surfaceId);
+    if (next === undefined) return; // A genuinely active scheduler transaction remains; not actually settled.
+    try {
+      store.reconcileMutationSurface(surfaceId, next);
+      unresolvedSurfaces.delete(surfaceId);
+    } catch (error) {
+      storeError = error instanceof Error ? error.message : "The mutation receipt could not be reconciled.";
+    }
+  }
+
   function persist(input: {
     branchId: string;
     agentId: string;
@@ -381,6 +404,11 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
       }
 
       const surfaceId = input.target.surfaceId;
+      // A prior operation on this surface may have finished uncertain and then
+      // fully released (no longer in flight); reconcile that stale marker now
+      // instead of refusing every later mutation until an unrelated capture
+      // happens to clear it.
+      reconcileIfSettled(surfaceId);
       const surfaceRevision = currentRevision(surfaceId);
       // Keep an active dispatch serialized. A finished but uncertain operation
       // retains its own receipt and does not reserve the entire window.
