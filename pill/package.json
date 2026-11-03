@@ -7,8 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "build:desktop": "tsc --noEmit && vite build --outDir ../overlay/dist/pill-next --emptyOutDir",
-    "build:ext": "tsc --noEmit && vite build --outDir ../extensions/browser/pill-next --emptyOutDir"
+    "build:desktop": "tsc --noEmit && vite build --outDir ../overlay/dist/pill-next --emptyOutDir"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"

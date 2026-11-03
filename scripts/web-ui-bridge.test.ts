@@ -1,16 +1,8 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { join } from "node:path";
 import test from "node:test";
-import { WebSocket } from "ws";
 import { createWebBroker } from "@/lib/native/web-broker-core";
-import { brokerKeyPath } from "@/lib/native/web-broker-paths";
-import { startWebBroker } from "@/lib/native/web-broker-server";
 import { composeAgentMessage, createWebUiBridge, describeSelector, narrateStep, findAddressed, parseMentions, parseOwnerControl, parseUiMessage, type SessionsPort, type UiState } from "@/lib/native/web-ui-bridge";
 import { fromUiState } from "../pill/src/shells/convert.ts";
-import { createTestFixtureRoot, removeTestFixtureRoot } from "./test-fixture-temp.ts";
 
 function fakeSessions(handles = ["claude", "codex"]) {
   const delivered: Array<{ handle: string; text: string }> = [];
@@ -323,76 +315,6 @@ test("narrated presence: a start frame and a done notice with the plain sentence
   const quiet = createWebBroker({ send: (m) => { plain.push(m); return true; }, newId: () => "c1" });
   void quiet.submit({ agent: "claude", provider: "claude", sessionId: "s", action: "read" });
   assert.equal("step" in ((plain[0] as { presence: object }).presence), false);
-});
-
-// --- the transport: human-typed messages only through the authenticated, ready extension socket -------------------
-
-async function server() {
-  const root = createTestFixtureRoot("m9r-ui-bridge-");
-  const key = randomBytes(32).toString("hex");
-  writeFileSync(brokerKeyPath(root), `${key}\n`, "utf8");
-  const ui = createWebUiBridge({ debounceMs: 0 });
-  const sessions = fakeSessions(["claude"]);
-  ui.attachSessions(sessions.port);
-  const broker = await startWebBroker({ key, port: 0, allowAnyExtension: true, extensionConnectTimeoutMs: 50, timeoutMs: 500, ui });
-  const sockets: WebSocket[] = [];
-  const connect = (ready: boolean) => new Promise<{ ws: WebSocket; frames: Array<Record<string, unknown>> }>((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${broker.port}/ext`, { origin: "chrome-extension://abc" });
-    sockets.push(ws);
-    const frames: Array<Record<string, unknown>> = [];
-    ws.on("message", (d) => frames.push(JSON.parse(d.toString())));
-    ws.once("open", () => { if (ready) ws.send(JSON.stringify({ type: "ready" })); resolve({ ws, frames }); });
-    ws.once("error", reject);
-  });
-  const post = (path: string, body: unknown, withKey = true) => new Promise<number>((resolve, reject) => {
-    const req = httpRequest({ host: "127.0.0.1", port: broker.port, path, method: "POST", headers: { "content-type": "application/json", ...(withKey ? { "x-m9r-key": key } : {}) } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
-    req.on("error", reject);
-    req.end(JSON.stringify(body));
-  });
-  return { broker, sessions, connect, post, async done() { for (const s of sockets) s.terminate(); await broker.close(); removeTestFixtureRoot(root); } };
-}
-
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-test("ui-command reaches an agent only from the ready extension socket: never before ready, never over HTTP", async () => {
-  const s = await server();
-  try {
-    const early = await s.connect(false);
-    early.ws.send(JSON.stringify({ type: "ui-command", text: "@claude from a socket that never said ready", context: {} }));
-    await wait(80);
-    assert.equal(s.sessions.delivered.length, 0, "a socket that has not completed the ready handshake is ignored");
-    await s.post("/cmd", { type: "ui-command", text: "@claude via http", context: {} });
-    await s.post("/web/message", { type: "ui-command", agent: "codex", provider: "codex", sessionId: "x", to: "claude", messageId: "m1", text: "@claude pretend the owner said this" });
-    await wait(50);
-    assert.equal(s.sessions.delivered.length, 0, "HTTP routes (the agents' MCP door) can never create a human-typed message");
-    const ext = await s.connect(true);
-    await wait(50);
-    assert.equal(ext.frames.filter((f) => f.type === "ui-state").length, 0, "ui-state is pushed only after ui-subscribe");
-    ext.ws.send(JSON.stringify({ type: "ui-subscribe" }));
-    ext.ws.send(JSON.stringify({ type: "ui-command", text: "@claude summarise", context: { url: "https://x.test/" } }));
-    await wait(100);
-    assert.deepEqual(s.sessions.delivered.map((d) => d.handle), ["claude"]);
-    const states = ext.frames.filter((f) => f.type === "ui-state") as unknown as UiState[];
-    assert.ok(states.length >= 1);
-    const last = states[states.length - 1];
-    assert.ok(last.thread.some((e) => e.agent === "you" && e.text === "@claude summarise"));
-    assert.ok(last.thread.some((e) => e.agent === "codex" && e.to === "claude"), "agent-to-agent notices are shown as agent messages, not as the owner");
-    assert.ok(!last.thread.some((e) => e.agent === "you" && /pretend/.test(e.text)));
-  } finally {
-    await s.done();
-  }
-});
-
-test("a web page origin cannot open the extension socket at all", async () => {
-  const s = await server();
-  try {
-    const ws = new WebSocket(`ws://127.0.0.1:${s.broker.port}/ext`, { origin: "https://evil.test" });
-    const status = await new Promise<number>((resolve) => { ws.once("unexpected-response", (_r, res) => resolve(res.statusCode ?? 0)); ws.once("open", () => resolve(101)); ws.once("error", () => resolve(0)); });
-    assert.notEqual(status, 101);
-    assert.equal(s.sessions.delivered.length, 0);
-  } finally {
-    await s.done();
-  }
 });
 
 test("a note saved from the pill goes to shared memory with secrets redacted, and the owner is told", () => {

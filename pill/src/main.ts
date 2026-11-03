@@ -3,8 +3,6 @@
 import "./style.css";
 import { listen } from "@tauri-apps/api/event";
 import { getTransport } from "./core/transport";
-import { chromeRuntime, createExtensionTransport } from "./shells/extension";
-import { createFrameHost } from "./shells/frame-host";
 import { createDesktopTransport, tauriInvoke } from "./shells/desktop";
 import { Island } from "./island/island";
 import { State } from "./core/state";
@@ -12,14 +10,12 @@ import { State } from "./core/state";
 async function main() {
   const root = document.getElementById("root");
   if (!root) return;
-  // The host decides how the pill reaches its data: an extension frame, the desktop window, or (developer) the mock.
-  const runtime = chromeRuntime();
   const invoke = tauriInvoke();
-  const base = window.__M9R_PILL_TRANSPORT__
-    ?? (runtime ? createExtensionTransport(runtime) : invoke ? createDesktopTransport(invoke) : getTransport());
-  // In a page frame the window hooks talk to the embedding content script; the desktop window handles its own.
-  const frame = runtime && window.parent !== window ? createFrameHost(base) : null;
-  const transport = frame ? frame.transport : base;
+  // The pill is a broker-owned desktop surface. Browser-extension/frame transports
+  // were retired with the extension route; a mock transport is kept only for
+  // local component development outside the Tauri shell.
+  const transport = window.__M9R_PILL_TRANSPORT__
+    ?? (invoke ? createDesktopTransport(invoke) : getTransport());
   const island = new Island(root, transport);
   if (invoke) {
     try {
@@ -37,10 +33,6 @@ async function main() {
     // No Tauri invoke at this point means no way to log_debug either -- but this itself is
     // the single most important fact if the desktop shell is somehow not being detected.
   }
-  frame?.onHostCommand((kind, data) => {
-    if (kind === "open-message") island.openMessage();
-    else if (kind === "talk") island.talk(data.active === true);
-  });
   // A host that can persist settings (today: the desktop pill) hands back what it saved
   // last; a host with no such transport, or one with nothing saved yet, leaves defaults.
   try {

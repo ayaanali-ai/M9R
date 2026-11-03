@@ -4,11 +4,11 @@
  *   carry an Origin header are refused, so a web page cannot drive the browser through this port.
  * - a local named pipe/Unix socket for read-only status plus narrowly scoped, session-token-authorized agent task
  *   mutations; owner approvals, authority changes, and arbitrary store writes are never accepted on this pipe.
- * - a WebSocket at /ext for the browser extension, allowed only from a chrome-extension:// origin and either a
- *   listed extension id or an explicit development-only opt-in when no ids are configured. One extension at a time:
- *   an authorized new connection replaces the old one.
+ * - the broker-owned desktop/owner-pipe routes. The former browser-extension
+ *   websocket and isolated-browser transports are retired and are not started
+ *   by production code.
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { taskCompletionReportSchema } from "./task-completion-contract";
@@ -20,22 +20,19 @@ import type { LocalStore } from "./local-store";
 import { readManagedWebBrokerIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { dirname } from "node:path";
 import { platform } from "node:os";
-import { WebSocket, WebSocketServer } from "ws";
-import { findChrome, type BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
 import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
 import type { MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
-import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
+import type { WebUiBridge } from "./web-ui-bridge";
 import { canQueue } from "./codex-delivery-core";
 import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
 import type { MultiplayerA2ASendInput, MultiplayerRuntime } from "./multiplayer-runtime";
 
 const MAX_BODY_BYTES = 16 * 1024;
-const MAX_EXTENSION_MESSAGE_BYTES = 256 * 1024;
 const LOCAL_AWARE_ROOM_ID = "room-local";
 
 // Capture at process start. Re-reading process.execPath on each health request
@@ -181,17 +178,19 @@ export interface WebBrokerServerOptions {
     primeCursorForOwner?(taskId: string): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
   agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">;
-  /** Dedicated browser transport. Extension connections are disabled on this broker. */
-  browserTransport?: BrowserTransport;
-  /** Production owner broker has a native desktop/browser route; no extension handshake is required. */
+  /** @deprecated Retained only so stale callers fail closed; production never starts a browser transport. */
+  browserTransport?: unknown;
+  /** Production owner broker has a native desktop route; no extension handshake is required. */
   nativeDesktopRoute?: boolean;
   key: string;
   port?: number;
   host?: string;
+  /** @deprecated Extension sockets are no longer accepted. */
   allowedExtensionIds?: string[];
+  /** @deprecated Extension sockets are no longer accepted. */
   allowAnyExtension?: boolean;
   timeoutMs?: number;
-  /** Maximum wait for the extension's ready handshake when a browser command arrives during startup. */
+  /** @deprecated There is no extension readiness wait anymore. */
   extensionConnectTimeoutMs?: number;
   claimTtlMs?: number;
   loopGuard?: { repeat: number; budget: number; windowMs: number };
@@ -204,7 +203,7 @@ export interface WebBrokerServerOptions {
     loadProtocolFrames?(): unknown[];
     saveProtocolFrames?(frames: readonly unknown[]): void;
   };
-  /** The in-page pill bridge (web-ui-bridge.ts). Its frames are accepted only on the ready extension socket. */
+  /** The broker-owned desktop pill bridge (web-ui-bridge.ts). */
   ui?: WebUiBridge;
   /** Where the room mode (watch / ask / hands-off) is kept between runs. Defaults to watch. */
   modeFile?: string;
@@ -381,17 +380,12 @@ export function applyAgentMcpStoreMutation(
 
 export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void>; requestStageApproval: (request: StageApprovalRequest) => Promise<boolean> }> {
   const host = options.host ?? "127.0.0.1";
-  const allowed = (options.allowedExtensionIds ?? []).filter(Boolean);
-  const allowAnyExtension = allowed.length === 0 && (options.allowAnyExtension === true || process.env.M9R_ALLOW_ANY_EXTENSION === "1");
   const authority = options.authority;
   if (authority && options.authorityStore) authority.restore(options.authorityStore.load());
   const persistAuthority = () => {
     if (authority && options.authorityStore) options.authorityStore.save(authority.snapshot());
   };
-  let extension: WebSocket | null = null;
-  let readyExtension: WebSocket | null = null;
   let closeServer: () => Promise<void> = async () => undefined;
-  const readyWaiters = new Set<(ready: boolean) => void>();
   const ownerId = options.ownerId ?? "local-machine";
   // Bind semantic protocol decisions to the same owner identity used by the
   // authenticated local transport. Without this, the ledger only validated
@@ -443,88 +437,16 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     const principalId = `agent:${memberOwner}/${request.agent}`;
     return principalId.length <= 128 ? principalId : null;
   }
-  function settleReadyWaiters(ready: boolean): void {
-    for (const settle of [...readyWaiters]) settle(ready);
-  }
-
-  // No open-tab/site-specific knowledge here -- this only notices "nothing is answering as
-  // the browser extension yet" and starts the one browser that extension lives in, the same
-  // way a person would double-click its icon. One attempt per cooldown window regardless of
-  // how many requests pile up waiting on it, so a burst of calls never opens several windows.
-  //
-  // Launching chrome.exe with no arguments while Chrome is ALREADY running does not open a
-  // fresh, quiet window -- a running Chrome forwards that launch to its existing instance,
-  // which (depending on the owner's own "on startup" setting) can restore their entire last
-  // session, including whatever stale/broken tabs were sitting open. That would repeat on
-  // every single call that finds the extension not ready, hijacking the owner's browser over
-  // and over with no way for them to get ahead of it. Launching is only ever safe, and only
-  // ever useful, when Chrome has no running process at all -- if it is already running and the
-  // extension still is not connecting, another launch cannot fix that (the extension itself is
-  // the problem, not whether the browser is open), so skip it rather than risk harm for nothing.
-  let lastBrowserLaunchAttemptAt = 0;
-  const browserLaunchCooldownMs = 10_000;
-  function chromeAlreadyRunning(): boolean {
-    try {
-      if (process.platform === "win32") {
-        const out = execFileSync("tasklist", ["/FI", "IMAGENAME eq chrome.exe", "/NH"], { encoding: "utf8", timeout: 2000 });
-        return /chrome\.exe/i.test(out);
-      }
-      const out = execFileSync("pgrep", ["-f", "[Gg]oogle Chrome"], { encoding: "utf8", timeout: 2000 });
-      return out.trim().length > 0;
-    } catch {
-      // If the running-process check itself cannot be trusted, assume Chrome is already
-      // running rather than risk a session-restore hijack on a false "not running" read.
-      return true;
-    }
-  }
-  function ensureBrowserLaunchedForExtension(): void {
-    const now = Date.now();
-    if (now - lastBrowserLaunchAttemptAt < browserLaunchCooldownMs) return;
-    lastBrowserLaunchAttemptAt = now;
-    if (chromeAlreadyRunning()) return;
-    try {
-      const child = spawn(findChrome(), [], { detached: true, stdio: "ignore" });
-      child.unref();
-    } catch {
-      // No installed Chrome found, or the spawn itself failed -- the normal
-      // "extension did not become ready" timeout below still reports it.
-    }
-  }
-
-  function waitForExtensionReady(timeoutMs: number): Promise<boolean> {
-    if (options.browserTransport) return options.browserTransport.ensureReady?.() ?? Promise.resolve(options.browserTransport.ready());
-    if (extension && extension === readyExtension && extension.readyState === WebSocket.OPEN) return Promise.resolve(true);
-    ensureBrowserLaunchedForExtension();
-    return new Promise((resolve) => {
-      const settle = (ready: boolean) => {
-        clearTimeout(timer);
-        readyWaiters.delete(settle);
-        resolve(ready);
-      };
-      readyWaiters.add(settle);
-      const timer = setTimeout(() => settle(false), Math.max(0, timeoutMs));
-    });
-  }
-
-  const sendApprovedGrant = (grant: WebAuthoritySnapshot["grants"][number]) => {
-    if (!extension || extension !== readyExtension || extension.readyState !== WebSocket.OPEN) return;
-    extension.send(JSON.stringify({ type: "grant-approved", grant: {
-      grantId: grant.id, origin: grant.origin, pathPrefix: grant.pathPrefix ?? "/", actions: grant.actions,
-    } }));
-  };
-
   let roomMode: RoomMode = "watch";
   try { if (options.modeFile) { const saved = readFileSync(options.modeFile, "utf8").trim() as RoomMode; if (ROOM_MODES.includes(saved)) roomMode = saved; } } catch { /* no saved mode yet */ }
   const broker = createWebBroker({
-    oneWriterPerTab: !!options.browserTransport,
-    trustDeliveryReceipts: !!options.browserTransport,
+    oneWriterPerTab: false,
+    trustDeliveryReceipts: false,
     roomMode: () => roomMode,
-    send: (message) => {
-      if (options.browserTransport) return options.browserTransport.send(message);
-      if (!extension || extension !== readyExtension || extension.readyState !== WebSocket.OPEN) return false;
-      extension.send(JSON.stringify(message));
-      return true;
-    },
+    // Browser command delivery is retired. The core remains as the local
+    // activity/approval ledger used by the desktop broker, but it has no
+    // socket or isolated-browser transport to send to.
+    send: () => false,
     timeoutMs: options.timeoutMs,
     claimTtlMs: options.claimTtlMs,
     loopGuard: options.loopGuard,
@@ -537,9 +459,6 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     ...(options.mutationFence ? { mutationFence: options.mutationFence } : {}),
   });
   options.ui?.attachBroker(broker);
-  const unsubscribeBrowser = options.browserTransport?.subscribe(
-    (message) => broker.onExtensionMessage(message), () => broker.onExtensionClosed(),
-  );
 
   const ownerOnlyPaths = new Set([
     "/web/mode", "/web/shutdown", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
@@ -693,7 +612,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         ...(typeof body.maxUses === "number" ? { maxUses: body.maxUses } : {}),
       });
       if (!persist()) return ownerReply(false, { error: "could not persist web authority state" });
-      if (result.ok) { sendApprovedGrant(result.grant); return result; }
+      if (result.ok) return result;
       return ownerReply(false, { error: result.error });
     }
     if (request.path === "/web/deny" || request.path === "/web/revoke") {
@@ -827,15 +746,11 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
         const nativeDesktopRoute = options.nativeDesktopRoute === true;
-        const extensionConnected = !!extension && extension.readyState === WebSocket.OPEN;
-        const extensionReady = !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN;
         return reply(res, 200, {
           ok: true,
           broker: "ready",
-          browserTransport: options.browserTransport ? "agent-chrome" : nativeDesktopRoute ? "native-desktop" : "extension",
-          browserReady: options.browserTransport?.ready() ?? (nativeDesktopRoute || extensionReady),
-          extensionConnected,
-          extensionReady,
+          browserTransport: nativeDesktopRoute ? "native-desktop" : "unavailable",
+          browserReady: nativeDesktopRoute,
         });
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/agents") {
@@ -1004,7 +919,6 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           ...(typeof body.maxUses === "number" ? { maxUses: body.maxUses } : {}),
         });
         if (!persist()) return;
-        if (result.ok) sendApprovedGrant(result.grant);
         return result.ok ? reply(res, 200, result) : reply(res, 404, { ok: false, error: result.error });
       }
       if (requestUrl.pathname === "/web/deny" || requestUrl.pathname === "/web/revoke") {
@@ -1048,79 +962,6 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     });
   });
 
-  const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_EXTENSION_MESSAGE_BYTES });
-  const uiSinks = new Map<WebSocket, (state: UiState) => boolean>();
-
-  server.on("upgrade", (req, socket, head) => {
-    const origin = String(req.headers.origin ?? "");
-    const candidateId = origin.startsWith("chrome-extension://") ? origin.slice("chrome-extension://".length).replace(/\/$/, "") : "";
-    const id = candidateId && !/[/?#]/.test(candidateId) ? candidateId : "";
-    const permitted = !options.browserTransport && req.url === "/ext" && id !== "" && (allowed.length > 0 ? allowed.includes(id) : allowAnyExtension);
-    if (!permitted) {
-      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    sockets.handleUpgrade(req, socket, head, (ws) => {
-      if (extension && extension.readyState === WebSocket.OPEN) extension.close(4000, "replaced by a newer extension connection");
-      extension = ws;
-      readyExtension = null;
-      ws.on("message", (data) => {
-        try {
-          const message: unknown = JSON.parse(data.toString());
-          if (typeof message === "object" && message !== null && "type" in message && message.type === "ready") {
-            if (extension !== ws) return;
-            readyExtension = ws;
-            settleReadyWaiters(true);
-            for (const grant of authority?.grants() ?? []) if (!grant.revokedAt && grant.expiresAt > Date.now()) sendApprovedGrant(grant);
-            ws.send(JSON.stringify({ type: "broker-state", stopped: broker.feedSnapshot().stop.state === "stopped" }));
-            return;
-          }
-          if (extension !== ws || readyExtension !== ws) return;
-          // The only door for human-typed web messages: the ready, origin-checked extension socket.
-          if (isUiMessage(message)) {
-            if (!uiSinks.has(ws)) uiSinks.set(ws, (state: UiState) => { if (extension !== ws || ws.readyState !== WebSocket.OPEN) return false; ws.send(JSON.stringify(state)); return true; });
-            options.ui?.handleExtensionMessage(message, uiSinks.get(ws));
-            return;
-          }
-          if (typeof message === "object" && message !== null && "type" in message && message.type === "stop-all") {
-            broker.stopAll("you");
-            return;
-          }
-          if (typeof message === "object" && message !== null && "type" in message && message.type === "message-visibility") {
-            const visibility = message as { sessionId?: unknown; show?: unknown };
-            if (typeof visibility.sessionId === "string" && visibility.sessionId.length <= 128 && typeof visibility.show === "boolean") {
-              const accepted = broker.setMessageTextVisibility(visibility.sessionId, visibility.show);
-              ws.send(JSON.stringify({ type: "message-visibility-result", sessionId: visibility.sessionId, show: visibility.show, accepted }));
-            }
-            return;
-          }
-            if (typeof message === "object" && message !== null && "type" in message && message.type === "permission-result") {
-            const permission = message as { grantId?: unknown; origin?: unknown; granted?: unknown };
-            if (typeof permission.grantId !== "string" || typeof permission.origin !== "string" || typeof permission.granted !== "boolean" || !authority) return;
-            const grant = authority.grants().find((item) => item.id === permission.grantId && item.origin === permission.origin && !item.revokedAt);
-            if (!grant) return;
-            if (!permission.granted) authority.revoke(grant.id);
-            try { persistAuthority(); } catch { /* enforcement remains fail-closed in the broker core */ }
-            return;
-          }
-          broker.onExtensionMessage(message);
-        } catch {
-          // ignore malformed frames
-        }
-      });
-      ws.on("close", () => {
-        options.ui?.unsubscribe(uiSinks.get(ws));
-        uiSinks.delete(ws);
-        if (extension === ws) {
-          extension = null;
-          readyExtension = null;
-          broker.onExtensionClosed();
-        }
-      });
-    });
-  });
-
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(options.port ?? DEFAULT_BROKER_PORT, host, () => resolve());
@@ -1132,15 +973,11 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = new Promise<void>((resolve) => {
-      settleReadyWaiters(false);
-      unsubscribeBrowser?.();
-      extension?.close();
-      sockets.close();
       const ownerClosed = ownerServer
         ? new Promise<void>((done) => ownerServer.close(() => done()))
         : Promise.resolve();
       const httpClosed = new Promise<void>((done) => server.close(() => done()));
-      void Promise.allSettled([ownerClosed, httpClosed, options.browserTransport?.close()]).then(() => resolve());
+      void Promise.allSettled([ownerClosed, httpClosed]).then(() => resolve());
       (ownerServer as (typeof ownerServer) & { closeAllConnections?: () => void } | null)?.closeAllConnections?.();
       server.closeAllConnections();
     });

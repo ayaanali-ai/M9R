@@ -292,7 +292,7 @@ function build() {
 
   // Native front door (setup, uninstall, send). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "stage-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "multiplayer-action-policy", "multiplayer-task-context", "multiplayer-runtime", "universal-intent-resolver", "workflow-preferences", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "claude-delivery", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "logical-task-context", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "provider-session-reconciliation", "multiplayer-contract", "multiplayer-presence", "multiplayer-run-coordinator", "multiplayer-a2a", "multiplayer-surface", "multiplayer-target-identity", "multiplayer-mutation-scheduler", "multiplayer-dispatch-fence", "runtime-readiness", "latency-telemetry", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-state", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "opencode-executable", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
+  for (const name of ["atomic-file", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "stage-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "multiplayer-action-policy", "multiplayer-task-context", "multiplayer-runtime", "universal-intent-resolver", "workflow-preferences", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "claude-delivery", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "logical-task-context", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "provider-session-reconciliation", "multiplayer-contract", "multiplayer-presence", "multiplayer-run-coordinator", "multiplayer-a2a", "multiplayer-surface", "multiplayer-target-identity", "multiplayer-mutation-scheduler", "multiplayer-dispatch-fence", "runtime-readiness", "latency-telemetry", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-state", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "opencode-executable", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
       .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
@@ -303,7 +303,7 @@ function build() {
       .replace(/["']\.\.\/agent-detection-core["']/g, '"./agent-detection-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
   }
-  for (const name of ["browser-daemon", "computer-use-recovery", "computer-use-latency", "task-completion-contract"]) {
+  for (const name of ["computer-use-recovery", "computer-use-latency", "task-completion-contract"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"'));
   }
@@ -320,17 +320,10 @@ function build() {
     platform: "node",
     format: "cjs",
     target: "node22",
-  define: { "import.meta.url": "__m9rBrokerUrl", "__M9R_BROWSER_PAGE_SOURCE__": JSON.stringify(readFileSync(resolve(repoRoot, "extensions/browser/src/page-actions.js"), "utf8")) },
+    define: { "import.meta.url": "__m9rBrokerUrl" },
   banner: { js: 'const __m9rBrokerUrl = require("node:url").pathToFileURL(__filename).href;' },
     tsconfig: resolve(repoRoot, "tsconfig.json"),
     logLevel: "silent",
-  });
-  cpSync(resolve(repoRoot, "extensions/browser"), resolve(outDir, "extension"), {
-    recursive: true,
-    filter(source) {
-      const relative = source.slice(resolve(repoRoot, "extensions/browser").length).replaceAll("\\", "/");
-      return !/(^|\/)(store-assets|test-page|node_modules|\.git)(\/|$)/.test(relative);
-    },
   });
 
   const missionParticipantIdsTs = readFileSync(resolve(repoRoot, "src/lib/mission/mission-participant-ids.ts"), "utf8");

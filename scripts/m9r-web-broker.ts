@@ -29,9 +29,6 @@ import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
 import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
-import { createBrowserDaemon } from "@/lib/native/browser-daemon";
-import { launchAgentChrome } from "@/lib/native/agent-chrome";
-import { agentChromePageSource } from "@/lib/native/agent-chrome-cli";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -122,10 +119,7 @@ async function main(): Promise<void> {
   // is the only place a shared lease can arbitrate same-target contention.
   const mutationFence = createMultiplayerDispatchFence({ store });
   const taskStages = createTaskDesktopStageService({ store, mutationFence, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
-  const browserTransport = process.env.M9R_ENABLE_ISOLATED_BROWSER === "1"
-    ? createBrowserDaemon(() => launchAgentChrome({ root: join(root, "agent-chrome"), pageActionsSource: agentChromePageSource() }))
-    : undefined;
-  const broker = await startWebBroker({ key, port, taskStages, nativeDesktopRoute: true, browserTransport, agentMcpStore: store, mutationFence, multiplayerRuntime: multiplayer,
+  const broker = await startWebBroker({ key, port, taskStages, nativeDesktopRoute: true, agentMcpStore: store, mutationFence, multiplayerRuntime: multiplayer,
     onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
     deliverOwnerTask: (taskId) => sessionOwner.current
       ? sessionOwner.current.deliverOwnerTask(taskId)
