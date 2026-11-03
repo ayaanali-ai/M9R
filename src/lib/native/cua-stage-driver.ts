@@ -2378,6 +2378,18 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           count: options.count ?? 1,
           session: session.session,
         }, options.signal ? { signal: options.signal } : undefined),
+        // Native dispatch can only target an absolute screen point, not Cua's
+        // semantic element-token click; fall through to Cua for that case.
+        ...(!semanticClick ? { nativeForeground: {
+          bringToFront: () => manager.bringToForeground(point.target.pid, point.target.windowId.toString()),
+          send: async () => {
+            const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
+            await manager.sendClick(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, {
+              ...(options.button ? { button: options.button } : {}),
+              ...(options.count ? { count: options.count } : {}),
+            });
+          },
+        } } : {}),
       });
       // Only a driver-confirmed click can establish where later keyboard input
       // should go. Returning an unverified click is truthful; remembering its
@@ -2458,6 +2470,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
             session: session.session,
             ...(delayMs !== undefined ? { delayMs } : {}),
           } as never, options.signal ? { signal: options.signal } : undefined),
+          nativeForeground: {
+            bringToFront: () => manager.bringToForeground(selected.pid, selected.windowId.toString()),
+            send: () => manager.sendText(selected.pid, selected.windowId.toString(), text),
+          },
           signal: options.signal });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
@@ -2487,6 +2503,13 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           direction: direction === "up" ? runtime.sdk.ScrollDirection.Up : runtime.sdk.ScrollDirection.Down,
           by: runtime.sdk.ScrollBy.Line, amount: BigInt(3), session: session.session,
         }, options.signal ? { signal: options.signal } : undefined),
+        nativeForeground: {
+          bringToFront: () => manager.bringToForeground(point.target.pid, point.target.windowId.toString()),
+          send: async () => {
+            const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
+            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, direction === "up" ? 3 : -3);
+          },
+        },
       });
       return outcome;
     });
@@ -2516,6 +2539,16 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           by: scroll.by === "page" ? (runtime.sdk.ScrollBy.Page ?? runtime.sdk.ScrollBy.Line) : runtime.sdk.ScrollBy.Line,
           amount: BigInt(scroll.amount), session: session.session,
         }, options.signal ? { signal: options.signal } : undefined),
+        // Native dispatch only implements the vertical mouse wheel; a
+        // horizontal scroll (left/right) still has no native primitive and
+        // keeps using Cua Driver.
+        ...((scroll.direction === "up" || scroll.direction === "down") ? { nativeForeground: {
+          bringToFront: () => manager.bringToForeground(point.target.pid, point.target.windowId.toString()),
+          send: async () => {
+            const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
+            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, scroll.direction === "up" ? scroll.amount : -scroll.amount);
+          },
+        } } : {}),
       });
     });
     invalidateDesktopCaptures();
@@ -2547,6 +2580,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           fromX: start.localPoint.x, fromY: start.localPoint.y, toX: end.localPoint.x, toY: end.localPoint.y,
           durationMs: BigInt(options.durationMs ?? 500), steps: BigInt(10), session: session.session,
         }, options.signal ? { signal: options.signal } : undefined),
+        nativeForeground: {
+          bringToFront: () => manager.bringToForeground(start.target.pid, start.target.windowId.toString()),
+          send: async () => {
+            const fromScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), start.localPoint.x, start.localPoint.y, capture.width, capture.height);
+            const toScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), end.localPoint.x, end.localPoint.y, capture.width, capture.height);
+            await manager.sendDrag(start.target.pid, start.target.windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
+          },
+        },
       });
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, end);
@@ -2566,6 +2607,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         }, "Cua Driver could not press the requested key in the selected window.", {
           preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
           dispatch: () => runtime.driver.pressKey({ key, target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }), session: session.session }, options.signal ? { signal: options.signal } : undefined),
+          nativeForeground: {
+            bringToFront: () => manager.bringToForeground(selected.pid, selected.windowId.toString()),
+            send: () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), [key]),
+          },
         });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
@@ -2586,6 +2631,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         }, "Cua Driver could not send the key combination to the selected window.", {
           preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
           dispatch: () => runtime.driver.hotkey({ keys, target: new runtime.sdk.ActionTarget.Window({ pid: selected.pid, windowId: selected.windowId }), session: session.session }, options.signal ? { signal: options.signal } : undefined),
+          nativeForeground: {
+            bringToFront: () => manager.bringToForeground(selected.pid, selected.windowId.toString()),
+            send: () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), keys),
+          },
         });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
@@ -2874,6 +2923,16 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         session,
       }, "Cua Driver could not click the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeForeground: {
+          bringToFront: () => manager.bringToForeground(pid, popupWindowId.toString()),
+          send: async () => {
+            const screen = await localToScreenPoint(pid, popupWindowId, x, y, before.width, before.height);
+            await manager.sendClick(pid, popupWindowId.toString(), screen.x, screen.y, {
+              ...(options.button ? { button: options.button } : {}),
+              ...(options.count ? { count: options.count } : {}),
+            });
+          },
+        },
       });
       return { capture: await capture(), outcome };
     });
@@ -2885,6 +2944,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         pid, window_id: Number(popupWindowId), key, session,
       }, "Cua Driver could not press the requested key in the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeForeground: {
+          bringToFront: () => manager.bringToForeground(pid, popupWindowId.toString()),
+          send: () => manager.sendKeyCombo(pid, popupWindowId.toString(), [key]),
+        },
       });
       return { capture: await capture(), outcome };
     });
@@ -2896,6 +2959,10 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         pid, window_id: Number(popupWindowId), keys, session,
       }, "Cua Driver could not send the requested key combination to the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeForeground: {
+          bringToFront: () => manager.bringToForeground(pid, popupWindowId.toString()),
+          send: () => manager.sendKeyCombo(pid, popupWindowId.toString(), keys),
+        },
       });
       return { capture: await capture(), outcome };
     });
@@ -2975,6 +3042,13 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         dispatch: () => driver.scroll({ target: new sdk.ActionTarget.Window({ pid, windowId }), x, y,
           direction: direction === "up" ? sdk.ScrollDirection.Up : sdk.ScrollDirection.Down,
           by: sdk.ScrollBy.Line, amount: BigInt(3), session }, options.signal ? { signal: options.signal } : undefined),
+        nativeForeground: {
+          bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
+          send: async () => {
+            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
+            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? 3 : -3);
+          },
+        },
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
@@ -2994,6 +3068,14 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         dispatch: () => driver.drag({ target: new sdk.ActionTarget.Window({ pid, windowId }), fromX, fromY, toX, toY,
           durationMs: BigInt(options.durationMs ?? 500), steps: BigInt(10), session }, options.signal ? { signal: options.signal } : undefined),
+        nativeForeground: {
+          bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
+          send: async () => {
+            const fromScreen = await localToScreenPoint(pid, windowId, fromX, fromY, before.width, before.height);
+            const toScreen = await localToScreenPoint(pid, windowId, toX, toY, before.width, before.height);
+            await manager.sendDrag(pid, windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
+          },
+        },
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
@@ -3035,6 +3117,16 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
           position: sdk.ClickPosition.Element ? new sdk.ClickPosition.Element({ elementToken: selectedElementToken }) : new sdk.ClickPosition.Coordinates({ x: point?.x ?? 0, y: point?.y ?? 0 }),
           deliveryMode: delivery === "foreground" ? sdk.InputDeliveryMode.Foreground : sdk.InputDeliveryMode.Background,
           button: sdk.ClickButton.Left, count: 1, session }, options.signal ? { signal: options.signal } : undefined),
+        // Native dispatch needs a concrete screen point; when the element's
+        // on-screen position couldn't be computed, there is nothing for it
+        // to click and this stays on Cua's semantic element-token click.
+        ...(point ? { nativeForeground: {
+          bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
+          send: async () => {
+            const screen = await localToScreenPoint(pid, windowId, point.x, point.y, selected.frame.width, selected.frame.height);
+            await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {});
+          },
+        } } : {}),
       });
       if (cursorIdentity && point && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
         && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(selected.element.role ?? "")) {
@@ -3084,7 +3176,18 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
       const outcome = await driverInputAction(driver, "scroll", {
         pid, window_id: Number(windowId), x, y, direction: scroll.direction, by: scroll.by, amount: scroll.amount, session,
-      }, "Cua Driver could not scroll the registered stage window.", { preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal });
+      }, "Cua Driver could not scroll the registered stage window.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        // Native dispatch only implements the vertical mouse wheel; a
+        // horizontal scroll (left/right) still has no native primitive.
+        ...((scroll.direction === "up" || scroll.direction === "down") ? { nativeForeground: {
+          bringToFront: () => manager.bringToForeground(pid, windowId.toString()),
+          send: async () => {
+            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
+            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, scroll.direction === "up" ? scroll.amount : -scroll.amount);
+          },
+        } } : {}),
+      });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -3105,8 +3208,13 @@ async function driverInputAction(driver: CuaDriverLike, name: string, args: Reco
     }
     return withRegisteredWindow(name, async ({ driver, session, pid, windowId, capture: captureWindow }) =>
       foregroundLease.run(name, options.signal, async () => {
-        const outcome = actionOutcome(await driver.callTool("bring_to_front", JSON.stringify({ pid, window_id: Number(windowId), session }),
-          options.signal ? { signal: options.signal } : undefined), "Cua Driver could not bring the selected window to the foreground.");
+        let outcome: CuaStageActionOutcome;
+        try {
+          await manager.bringToForeground(pid, windowId.toString());
+          outcome = { status: "unverified" };
+        } catch (error) {
+          throw new DesktopInputNotDispatchedError(error instanceof Error ? error.message : String(error), "foreground-lease");
+        }
         options.signal?.throwIfAborted();
         const foreground = await manager.foregroundWindow(pid, windowId.toString(), 500);
         if (foreground.pid !== pid || BigInt(foreground.windowId) !== windowId) {
