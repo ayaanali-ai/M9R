@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
 export const RUNTIME_BUILD_INFO_FILE = "m9r-build-info.json";
+const NON_DETERMINISTIC_SEA_ARTIFACTS = new Set(["m9r-engine.exe", "m9r-web-broker.exe"]);
 
 export interface RuntimeSourceProvenance {
   sourceCommit: string;
@@ -47,9 +48,13 @@ function normalizedArtifacts(value: Record<string, string>): Record<string, stri
   return Object.fromEntries(entries);
 }
 
-export function calculateRuntimeBuildId(artifacts: Record<string, string>): string {
+export function calculateRuntimeBuildId(
+  artifacts: Record<string, string>,
+  source: RuntimeSourceProvenance = { sourceCommit: "unknown", sourceDirty: true },
+): string {
   const canonical = normalizedArtifacts(artifacts);
-  return createHash("sha256").update(JSON.stringify(Object.entries(canonical))).digest("hex");
+  const stableArtifacts = Object.entries(canonical).filter(([path]) => !NON_DETERMINISTIC_SEA_ARTIFACTS.has(path));
+  return createHash("sha256").update(JSON.stringify({ source, artifacts: stableArtifacts })).digest("hex");
 }
 
 export function createRuntimeBuildInfo(
@@ -58,7 +63,7 @@ export function createRuntimeBuildInfo(
   source: RuntimeSourceProvenance = { sourceCommit: "unknown", sourceDirty: true },
 ): RuntimeBuildInfo {
   const normalized = normalizedArtifacts(artifacts);
-  return { schemaVersion: 1, buildId: calculateRuntimeBuildId(normalized), builtAt, artifacts: normalized, source };
+  return { schemaVersion: 1, buildId: calculateRuntimeBuildId(normalized, source), builtAt, artifacts: normalized, source };
 }
 
 /**
@@ -115,7 +120,8 @@ export function readRuntimeBuildIdentity(executablePath = process.execPath): Run
   try {
     const input = Object.fromEntries(Object.entries(parsed.artifacts).map(([path, digest]) => [path, String(digest)]));
     artifacts = normalizedArtifacts(input);
-    if (calculateRuntimeBuildId(artifacts) !== parsed.buildId) return { status: "invalid_manifest", reason: "build_manifest_digest_mismatch" };
+    const source = parsed.source as unknown as RuntimeSourceProvenance;
+    if (calculateRuntimeBuildId(artifacts, source) !== parsed.buildId) return { status: "invalid_manifest", reason: "build_manifest_digest_mismatch" };
   } catch {
     return { status: "invalid_manifest", reason: "build_manifest_artifacts_invalid" };
   }
