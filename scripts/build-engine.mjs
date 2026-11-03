@@ -96,6 +96,7 @@ const heldLocalProvenancePatterns = [
   // release source; they must not make a committed runtime fingerprint dirty.
   /^diagnostics(?:\/|$)/i,
   /^\.artifact-scratch(?:\/|$)/i,
+  /^baseline-input-test\.log$/i,
   /^docs\/Convenience_Store_Replacement_Plan\.docx$/i,
   /^public\/reference-innerwebs\/m9r-logo-transparent\.png$/i,
 ];
