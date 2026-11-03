@@ -60,7 +60,7 @@ function fixture() {
   };
   registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
     { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => activeTaskId,
-      resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }), enableIsolatedBrowser: true,
+      resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }),
       now: () => new Date(clockMs ?? Date.now()) });
   return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     setCoverage: (value: Record<string, unknown>) => { structureCoverage = value; },
@@ -91,35 +91,6 @@ function click(target: ComputerUseTarget, operationId = "click-one", elementRef 
     locator: { kind: "element", ref: elementRef, snapshotId: target.revision },
     postcondition: { kind: "accessible-control-present", label: "Action" }, includeScreenshot: undefined as boolean | undefined };
 }
-
-test("canonical browser loop dispatches once, verifies, and reconciles the same operation without replay", async () => {
-  const f = fixture(); try {
-    const observed = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "one" });
-    const action = click(observed.target);
-    const first = await f.call("m9r_computer_action", { action });
-    assert.deepEqual(first.result.deliveryReceipt, { delivery: "delivered", verification: "verified", retry: "new-operation-id" });
-    const replay = await f.call("m9r_computer_action", { action });
-    assert.equal(replay.result.dispatchStatus, "dispatched");
-    assert.equal(f.calls.filter((call) => call.kind === "click").length, 1);
-    assert.equal("telemetry" in first, false);
-  } finally { f.close(); }
-});
-
-test("first-tab bootstrap uses the canonical loop and exact tab close returns verified evidence", async () => {
-  const f = fixture(); try {
-    const input = { tab: "new-tab", url: "https://fixture.test/new", operationId: "browser-bootstrap" };
-    const opened = await f.call("m9r_browser_open", input);
-    assert.equal(opened.result.deliveryReceipt?.verification, "verified");
-    assert.equal(opened.target.kind, "browser-tab");
-    await f.call("m9r_browser_open", input);
-    assert.equal(f.calls.filter((call) => call.kind === "open").length, 1);
-    const fresh = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "new-tab" });
-    const closed = await f.call("m9r_computer_action", { action: { kind: "browser_tab", operation: "close", operationId: "close-tab",
-      targetId: fresh.target.targetId, targetRevision: fresh.target.revision } });
-    assert.equal(closed.result.effectStatus, "verified");
-    assert.equal(f.calls.filter((call) => call.kind === "close").length, 1);
-  } finally { f.close(); }
-});
 
 test("subtree inspection remains revision-qualified and missing partial evidence stays unknown", async () => {
   const f = fixture(); try {
@@ -155,34 +126,10 @@ test("desktop observation exposes only the bounded scroll-coverage contract", as
   } finally { f.close(); }
 });
 
-test("redirected work fences the old observation and carries the new task revision to browser dispatch", async () => {
+test("retired browser targets fail explicitly instead of waiting for an extension", async () => {
   const f = fixture(); try {
-    const observed = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "one" });
-    f.setTask("T2");
-    const stale = await f.call("m9r_computer_action", { action: click(observed.target) });
-    assert.equal(stale.result.error?.code, "task-context-changed");
-    assert.equal(f.calls.filter((call) => call.kind === "click").length, 0);
-    const current = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "one" });
-    await f.call("m9r_computer_action", { action: click(current.target, "redirected-click") });
-    assert.deepEqual(f.workRequests.at(-1), { taskId: "T2", workId: "work-original", planRevision: 1 });
-  } finally { f.close(); }
-});
-
-test("stale refs refresh evidence before any input and an uncertain response never replays", async () => {
-  const f = fixture(); try {
-    const observed = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "one" });
-    const stale = { ...click(observed.target), targetRevision: "old-revision" };
-    const refused = await f.call("m9r_computer_action", { action: stale });
-    assert.equal(refused.result.error?.retry, "refresh-target");
-    assert.equal(f.calls.filter((call) => call.kind === "click").length, 0);
-    const fresh = await f.call("m9r_computer_observe", { target: "browser-tab", tab: "one" });
-    const action = click(fresh.target, "uncertain-click");
-    f.setFailure("uncertain");
-    const uncertain = await f.call("m9r_computer_action", { action });
-    assert.equal(uncertain.result.deliveryReceipt?.delivery, "uncertain");
-    assert.equal(uncertain.result.error?.retry, "same-operation-id");
-    await f.call("m9r_computer_action", { action });
-    assert.equal(f.calls.filter((call) => call.kind === "click").length, 1);
+    const result = await f.callRaw("m9r_computer_observe", { target: "browser-tab", tab: "one" });
+    assert.match(JSON.stringify(result), /extension-backed browser route is retired|stage_app/i);
   } finally { f.close(); }
 });
 

@@ -16,13 +16,6 @@ test("personal browser launch uses the user's profile and asks Chrome for a new 
   assert.throws(() => ownedBrowserLaunch("root", "../escape", app), /Invalid browser stage/);
 });
 
-test("isolated browser mode remains an explicit opt-in", () => {
-  const app = { executable: join("browser", "chrome.exe"), args: [] };
-  const isolated = ownedBrowserLaunch("root", "agent-0123456789abcdef01234567", app, { mode: "isolated" });
-  assert.match(isolated.args[0]!, /stage-browser-profiles/);
-  assert.equal(isolated.args.at(-1), "about:blank");
-});
-
 test("personal browser adoption chooses only a newly-created Chrome window", () => {
   const before = new Set(["100:0x10"]);
   const candidate = { pid: 100, windowId: "0x11", appName: "chrome.exe", title: "New Tab" };

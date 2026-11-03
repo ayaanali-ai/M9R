@@ -207,15 +207,6 @@ interface ComputerUseMcpDeps {
    */
   authField?: { token?: z.ZodString | z.ZodOptional<z.ZodString> };
   workflowPreferences?: WorkflowPreferenceLedger;
-  /**
-   * m9r_browser_open always launches M9R's own isolated Chrome profile, never
-   * the owner's real signed-in browser -- there is no "personal" option for
-   * this tool, unlike the desktop stage's ownedBrowserLaunch(). The owner has
-   * explicitly refused the isolated browser as a default for any user, so
-   * this tool is not registered (the agent cannot see or call it) unless the
-   * owner opts in here.
-   */
-  enableIsolatedBrowser?: boolean;
 }
 
 type TextBlock = { type: "text"; text: string };
@@ -1871,24 +1862,6 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       return toolResponse({ error: error instanceof Error ? error.message : "The computer-use program failed." }, undefined, true);
     }
   }, monotonicNow));
-
-  if (deps.enableIsolatedBrowser) server.registerTool("m9r_browser_open", {
-    description: "Retired. The extension-backed and isolated-browser routes are no longer available; use m9r_stage_app followed by m9r_computer_observe/action on the exact owner-visible browser window.",
-    inputSchema: { ...(deps.authField ?? LEGACY_TOKEN_FIELD_FALLBACK), tab: z.string().regex(/^[A-Za-z0-9._-]{1,40}$/),
-      url: z.string().max(4096).url(), operationId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) },
-    outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
-  }, async ({ token }) => {
-    await deps.requireIdentity(token);
-    return toolResponse({ error: RETIRED_BROWSER_ROUTE }, undefined, true);
-  });
-
-  if (deps.enableIsolatedBrowser) server.registerTool("m9r_browser_tabs", {
-    description: "List M9R's managed browser tabs without changing tab selection or taking foreground focus.",
-    inputSchema: { ...(deps.authField ?? LEGACY_TOKEN_FIELD_FALLBACK) }, outputSchema: COMPUTER_USE_OUTPUT_SCHEMA,
-  }, async ({ token }) => {
-    await deps.requireIdentity(token);
-    return toolResponse({ error: RETIRED_BROWSER_ROUTE }, undefined, true);
-  });
 
   server.registerTool("m9r_computer_inspect", {
     description: "Drill into a bounded subtree of one qualified observation without extra runtime probes. Supply its exact targetId and targetRevision, optionally a rootRef or label/role query. Partial or filtered evidence never proves a control is absent. Re-observe when the revision is stale or a deeper/visual view is needed.",

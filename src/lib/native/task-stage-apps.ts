@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface StageAppLaunchSpec { executable: string; args: string[]; windowExecutable?: string }
-export type BrowserLaunchMode = "personal" | "isolated";
 
 /** The browser executable family that the stage broker knows how to attach. */
 export type StageBrowserKind = "chrome" | "msedge";
@@ -32,31 +31,20 @@ export interface ForegroundBrowserWindowIdentity {
 }
 
 /**
- * Keep browser launch policy explicit. Personal is the default: it uses the
- * user's normal profile and cookies. Isolated remains available as an owner
- * selected mode for tests or a deliberately separate profile.
+ * Browser stages always use the owner's normal profile and cookies. There is
+ * deliberately no isolated-profile branch: the retired extension/isolated
+ * browser was a second routing architecture and could silently split the
+ * agent's work away from the browser the owner actually sees.
  */
 export function ownedBrowserLaunch(
   root: string,
   stageName: string,
   app: StageAppLaunchSpec,
-  options: { mode?: BrowserLaunchMode; startUrl?: string } = {},
+  options: { startUrl?: string } = {},
 ): StageAppLaunchSpec {
   if (!/^(?:preview-)?agent-[a-f0-9]{24}$/.test(stageName)) throw new Error("Invalid browser stage name.");
   if (app.args.length || !/^(?:chrome|msedge)\.exe$/i.test(basename(app.executable))) return app;
-  const mode = options.mode ?? "personal";
-  if (mode === "isolated") {
-    return {
-      ...app,
-      args: [
-        `--user-data-dir=${join(root, "stage-browser-profiles", stageName)}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--new-window",
-        options.startUrl ?? "about:blank",
-      ],
-    };
-  }
+  void root;
   // Chrome hands a personal launch to its existing browser process. Always
   // request a new window so the broker can identify the window created for the
   // task without stealing an already-open window the owner is using.

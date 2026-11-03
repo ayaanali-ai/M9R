@@ -29,7 +29,6 @@ import {
   stageBrowserKind,
   stageWindowMatchesApp,
   type StageAppLaunchSpec,
-  type BrowserLaunchMode,
 } from "./task-stage-apps";
 import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -220,8 +219,6 @@ export function createTaskDesktopStageService(input: {
   resolveStageAppForTest?: (appId: string) => StageAppLaunchSpec;
   /** Read-only OS identity evidence for launcher/renderer delegation. */
   resolveWindowExecutable?: (executable: string) => Promise<string | undefined>;
-  /** Owner-selected browser policy. Personal profile is the safe product default. */
-  browserLaunchMode?: BrowserLaunchMode;
   /**
    * Owner-approval route for the money carve-out, resolved lazily because the broker that owns the
    * approval list is constructed after this service. Absent in tests and in brokers without one.
@@ -361,7 +358,6 @@ export function createTaskDesktopStageService(input: {
   // it must never queue behind (or make another agent's action queue behind) a stage
   // it has nothing to do with.
   let reaperPending: Promise<unknown> = Promise.resolve();
-  const browserLaunchMode = input.browserLaunchMode ?? "personal";
   type OwnedStageApp = {
     taskId: string;
     appId: string;
@@ -1140,7 +1136,7 @@ export function createTaskDesktopStageService(input: {
         // personal windows are adopted above and are never replaced by this fallback.
         const beforeKeys = new Set(before.map((window) => `${window.pid}:${window.windowId}`));
         const launchSpec = kind
-          ? ownedBrowserLaunch(root, name, approved, { mode: "personal" })
+          ? ownedBrowserLaunch(root, name, approved)
           : approved;
         const child = launchStageApp(launchSpec, { windowsHide: false, cwd: stageAppLaunchCwd(task.cwd) });
         let launchError: Error | undefined;
@@ -1221,7 +1217,7 @@ export function createTaskDesktopStageService(input: {
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       const browserKind = stageBrowserKind(approved.executable);
-      const personalBrowser = browserKind !== undefined && browserLaunchMode === "personal";
+      const personalBrowser = browserKind !== undefined;
       // Snapshot every visible window before launch. Packaged Windows apps and
       // launcher-style apps (Explorer, Notepad, Calculator, etc.) are allowed
       // to hand the request to another process and exit immediately; the new
@@ -1229,7 +1225,7 @@ export function createTaskDesktopStageService(input: {
       const beforeLaunchWindows = await listVisibleWindows();
       const beforeLaunchWindowKeys = new Set(beforeLaunchWindows.map((window) => `${window.pid}:${window.windowId}`));
       const beforeBrowserWindows = personalBrowser ? beforeLaunchWindowKeys : undefined;
-      const child = launchStageApp(ownedBrowserLaunch(root, name, approved, { mode: browserLaunchMode }), { windowsHide: true, cwd: stageAppLaunchCwd(task.cwd) });
+      const child = launchStageApp(ownedBrowserLaunch(root, name, approved), { windowsHide: true, cwd: stageAppLaunchCwd(task.cwd) });
       let spawnError: Error | undefined;
       child?.on("error", (error) => { spawnError = error; });
       try {
