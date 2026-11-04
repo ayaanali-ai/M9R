@@ -28,7 +28,7 @@ async function main() {
   const root = defaultStoreRoot(homedir(), process.env);
   const stage = { root, terminal: true, nativeHostPath: join(repo, "engine", "dist", "m9r-native-input-host.exe") };
   const manager = createWindowsDesktopStageManager(stage);
-  const driver = createCuaStageDriver({ stage });
+  const driver = createCuaStageDriver({ stage, manager });
   const name = "m9r-step3-proof";
   const children: ChildProcess[] = [];
   const report: { at: string; lifecycle: string[]; phases: { phase: string; status: string; detail?: string }[]; stage?: unknown; cursor?: unknown; actions: unknown[]; snapshots: unknown[]; desktopTransitions: unknown[]; failedPhase?: string; error?: string; cleanupError?: string; passed?: boolean } = { at: new Date().toISOString(), lifecycle: [], phases: [], actions: [], snapshots: [], desktopTransitions: [] };
@@ -198,12 +198,13 @@ async function main() {
     const { task: proofTask } = taskStore.addTask({ from: "you", to: "proof-agent", goal: "Exercise the owned desktop app", origin: "human_typed", idempotencyKey: "stage-proof", targetSession: "step3-proof-session" });
     const appStatePath = join(folder, "task-app.json");
     setTaskStagePermission(taskRoot, "proof-agent", true, { terminal: true, env: process.env }, true);
+    taskManager = createWindowsDesktopStageManager({ ...stage, root: taskRoot });
     const taskService = createTaskDesktopStageService({ store: taskStore, stage: { ...stage, root: taskRoot },
+      manager: taskManager,
       resolveStageAppForTest: (appId) => {
         if (appId !== "fixture") throw new Error(`Unexpected proof app: ${appId}`);
         return { executable, args: [appStatePath, "M9R broker-owned task app"] };
       } });
-    taskManager = createWindowsDesktopStageManager({ ...stage, root: taskRoot });
     const activeTaskManager = taskManager;
     const checkTaskDesktop = async (phase: string) => {
       if (!taskStageName) throw new Error("The task stage name was not recorded for desktop isolation checks.");

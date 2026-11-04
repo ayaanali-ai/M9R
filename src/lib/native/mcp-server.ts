@@ -555,7 +555,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   function resolveResultTaskId(identity: VerifiedIdentity, requestedTaskId?: string): string {
     if (requestedTaskId) return requestedTaskId;
     const handle = roomHandle(identity, identity.handle);
-    const candidates = (inRoom(identity) ? deps.store.tasksFor(handle) : deps.store.tasksForSession(identity.handle, identity.sessionId))
+    const roomScoped = inRoom(identity);
+    const candidates = (roomScoped ? deps.store.tasksFor(handle) : deps.store.tasksForSession(identity.handle, identity.sessionId))
       .filter((task) => taskIsFreshForIdentity(identity, task)
         && (task.approval === "approved" || task.approval === "not_needed")
         && !task.resultSummary
@@ -563,7 +564,17 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         && task.deliveredAt
         && (inRoom(identity) || (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === identity.sessionId));
     if (candidates.length === 0) throw new Error("No single open M9R work item is currently delivered to this session.");
-    if (candidates.length > 1) throw new Error("This session has multiple open M9R work items; finish the current item before reporting another result.");
+    if (candidates.length > 1) {
+      // A provider-bound session is serial even when the owner sends a new
+      // instruction before an earlier turn reports its result. Resolve the
+      // same active/newest work item policy used by the action tools instead
+      // of making every later result fail behind an abandoned turn. Room-wide
+      // delivery is genuinely multi-agent, so it remains explicit-only.
+      if (roomScoped) throw new Error("This room has multiple open M9R work items; report the exact taskId for the result.");
+      const active = deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, candidates.map((task) => task.id));
+      if (active) return active;
+      candidates.sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+    }
     return candidates[0]!.id;
   }
 

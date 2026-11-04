@@ -546,6 +546,7 @@ mod platform {
     #[link(name = "kernel32")]
     extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn QueryFullProcessImageNameW(handle: *mut std::ffi::c_void, flags: u32, image_name: *mut u16, size: *mut u32) -> i32;
         fn GetProcessTimes(process: *mut std::ffi::c_void, created: *mut ProcessFileTime, exited: *mut ProcessFileTime,
             kernel: *mut ProcessFileTime, user: *mut ProcessFileTime) -> i32;
         fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
@@ -566,6 +567,18 @@ mod platform {
         unsafe { CloseHandle(handle); }
         if ok == 0 || (created.high == 0 && created.low == 0) { return Err("process generation is unavailable"); }
         Ok(format!("{:08x}{:08x}", created.high, created.low))
+    }
+
+    fn process_image_name(pid: u32) -> Option<String> {
+        let handle = unsafe { OpenProcess(0x1000, 0, pid) }; // PROCESS_QUERY_LIMITED_INFORMATION
+        if handle.is_null() { return None; }
+        let mut image = vec![0u16; 32_768];
+        let mut size = image.len() as u32;
+        let ok = unsafe { QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut size) } != 0;
+        unsafe { CloseHandle(handle); }
+        if !ok || size == 0 { return None; }
+        std::path::Path::new(&String::from_utf16_lossy(&image[..size as usize]))
+            .file_name().map(|name| name.to_string_lossy().into_owned())
     }
     use super::{DesktopInfo, Guid, WindowDesktop};
     use std::ffi::c_void;
@@ -1057,6 +1070,7 @@ mod platform {
                 "windowId": (window as usize).to_string(),
                 "title": String::from_utf16_lossy(&title[..title_len]),
                 "className": String::from_utf16_lossy(&class_name[..class_len]),
+                "processName": process_image_name(pid),
                 "x": rect.left,
                 "y": rect.top,
                 "width": width,

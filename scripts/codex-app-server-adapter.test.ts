@@ -135,6 +135,25 @@ test("cancelTurn uses the native interrupt and the turn ends as cancelled", asyn
   } finally { await stop(); }
 });
 
+test("a completed interrupt cannot close the next persistent turn's event queue", async () => {
+  const { adapter, session, stop } = await start();
+  try {
+    const first = collect(adapter, session, "slow");
+    await sleep(300);
+    await adapter.cancelTurn({ session });
+    await first;
+
+    // Keep the next turn open beyond the force-close budget. Before the fix,
+    // the timer from the already-acknowledged interrupt remained armed and
+    // closed this new queue ten seconds later.
+    const second = collect(adapter, session, "slow");
+    await sleep(10_200);
+    await adapter.steer({ session, text: "continue" });
+    const events = await second;
+    assert.equal(replyText(events), "steered:continue");
+  } finally { await stop(); }
+});
+
 test("steer adds input to the running turn through turn/steer", async () => {
   const { adapter, session, stop } = await start();
   try {

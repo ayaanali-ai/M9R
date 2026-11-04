@@ -497,15 +497,24 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
         })
       : Promise.resolve();
     // A hung server never acknowledges the interrupt; free the session anyway so the next turn is not blocked.
+    let forceTimer: NodeJS.Timeout | undefined;
     const forceUnblock = new Promise<void>((resolveUnblock) => {
-      const timer = setTimeout(() => {
+      forceTimer = setTimeout(() => {
         if (session.queue && !session.queue.isClosed) console.error(`[codex-app-server] ${session.handle.sessionId} did not acknowledge the interrupt within ${CANCEL_FORCE_CLOSE_MS / 1000}s; force-closing its event queue.`);
         session.queue?.close();
         resolveUnblock();
       }, CANCEL_FORCE_CLOSE_MS);
-      timer.unref?.();
+      forceTimer.unref?.();
     });
-    await Promise.race([interrupt, forceUnblock]);
+    try {
+      await Promise.race([interrupt, forceUnblock]);
+    } finally {
+      // The normal interrupt acknowledgement wins almost immediately. The
+      // fallback timer must not remain armed: if it fires during the next
+      // prompt on this persistent session it would close that new turn's
+      // queue and surface as a false "ended without a completion event".
+      if (forceTimer) clearTimeout(forceTimer);
+    }
   }
 
   async respondToPermission(input: { session: AgentSessionHandle; requestId: string; approved: boolean }): Promise<void> {

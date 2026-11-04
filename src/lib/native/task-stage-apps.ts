@@ -12,6 +12,8 @@ export interface BrowserWindowCandidate {
   pid: number;
   windowId: string;
   appName: string;
+  /** Native process image when available; appName remains the compatibility fallback. */
+  processName?: string;
   title: string;
   /** Native window eligibility metadata. Older test/adaptor callers may omit it. */
   isOnScreen?: boolean;
@@ -69,7 +71,14 @@ export function stageWindowMatchesApp(candidate: BrowserWindowCandidate, app: St
   // Accept that generic wrapper only for an explicit AppsFolder activation;
   // normal explorer launches still require an exact process match.
   const packagedActivation = app.args.some((arg) => /^shell:AppsFolder\\[^!]+![^!]+$/i.test(arg));
-  if (packagedActivation && actual === "applicationframehost" && candidate.title.trim().length > 0) return true;
+  // Depending on the Windows build and which inventory path supplied the
+  // candidate, the same packaged view is reported either by its owning image
+  // (ApplicationFrameHost.exe) or by the top-level class
+  // (ApplicationFrameWindow). Both identify the generic UWP host; the
+  // before/after HWND identity checks still prevent adopting an unrelated
+  // pre-existing window during a new launch.
+  if (packagedActivation && ["applicationframehost", "applicationframewindow"].includes(actual)
+    && candidate.title.trim().length > 0) return true;
   if (expected === actual) {
     // explorer.exe hosts both real folder windows and the shell's own permanent
     // desktop/taskbar window (title "Program Manager"), which always exists whether

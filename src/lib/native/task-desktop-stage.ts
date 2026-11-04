@@ -213,6 +213,12 @@ export function resolveLaunchTarget(policy: { handles: string[]; modes?: Record<
 export function createTaskDesktopStageService(input: {
   store: LocalStore;
   stage?: WindowsStageDependencies;
+  /**
+   * Reuse an already-created broker stage manager when a caller owns one
+   * (for example the owner-proof harness). Production creates the manager
+   * here and therefore owns its native helper lifecycle.
+   */
+  manager?: ReturnType<typeof createWindowsDesktopStageManager>;
   readPolicy?: () => { handles: string[]; controlHandles?: string[]; modes?: Record<string, TaskStageAccessMode> };
   /** Test seam: replaces the Cua driver (production always constructs the real one). */
   driver?: ReturnType<typeof createCuaStageDriver>;
@@ -252,10 +258,12 @@ export function createTaskDesktopStageService(input: {
       && task!.lifecycle?.state !== "completed" && task!.lifecycle?.state !== "failed";
   };
   const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, taskActive, ...input.stage, root, terminal: true };
-  const manager = createWindowsDesktopStageManager(stageDeps);
+  const ownsManager = !input.manager;
+  const manager = input.manager ?? createWindowsDesktopStageManager(stageDeps);
   const activeTimingTasks = new Map<string, string>();
   const driver = input.driver ?? createCuaStageDriver({
     stage: stageDeps,
+    manager,
     // Keep the next live latency trace phase-correlated without logging
     // provider tokens, task text, or session identifiers. This is diagnostic
     // only; it must never affect stage control or recovery.
@@ -281,7 +289,10 @@ export function createTaskDesktopStageService(input: {
       return native.map((window) => ({
         pid: window.pid,
         windowId: window.windowId,
-        appName: window.className ?? "",
+        // Match the owning process image, not only the Win32 class. UWP
+        // views are commonly hosted by ApplicationFrameHost.exe while their
+        // top-level class is only ApplicationFrameWindow.
+        appName: window.processName ?? window.className ?? "",
         title: window.title,
         width: window.width,
         height: window.height,
@@ -1396,7 +1407,14 @@ export function createTaskDesktopStageService(input: {
     for (const active of activeInputs.values()) active.controller.abort(new Error("Stage service closing."));
     await Promise.all([...stageQueues.values(), reaperPending]);
     activeAgentCursors.clear();
-    await driver.shutdown();
+    try {
+      await driver.shutdown();
+    } finally {
+      // The task service owns the shared Windows stage manager.  Closing it
+      // here prevents the persistent native helper from surviving a broker
+      // restart and guarantees the next service starts with one clean host.
+      if (ownsManager) manager.close?.();
+    }
   }
 
   return { prepare, primeCursor, primeCursorForOwner, act, launch, closeApp, close };

@@ -64,7 +64,7 @@ interface NativeStageResponse {
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
-  windows?: { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; className?: string }[];
+  windows?: { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; className?: string; processName?: string }[];
   position?: { x: number; y: number };
   windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
   foregroundWindow?: { pid: number; windowId: string; desktopId?: string; onCurrentDesktop?: boolean; title?: string; className?: string; visible?: boolean; minimized?: boolean };
@@ -972,7 +972,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertOwner();
     const result = await invokeNative({ op: "listVisibleWindows" });
     if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Windows could not enumerate visible application windows.");
-    return result.windows.filter((window): window is { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; className?: string } =>
+    return result.windows.filter((window): window is { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; className?: string; processName?: string } =>
       Number.isSafeInteger(window.pid) && window.pid > 0 && typeof window.windowId === "string" && WINDOW_ID_RE.test(window.windowId)
       && typeof window.title === "string" && Number.isSafeInteger(window.width) && window.width > 0
       && Number.isSafeInteger(window.height) && window.height > 0);
@@ -1272,6 +1272,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   }
 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, captureWindow, captureDesktop, register, create, adoptCurrentDesktop, inspectStage, resolveWindowReplacement, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups,
+    close: () => persistentHost?.close(),
     bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect, workArea };
 }
 
@@ -1304,8 +1305,15 @@ interface PendingNativeStageRequest {
  */
 function createPersistentWindowsStageHost(executable: string) {
   let child: ChildProcessWithoutNullStreams | undefined;
+  let closed = false;
   let buffer = Buffer.alloc(0);
+  let stderrTail = "";
   const pending = new Map<string, PendingNativeStageRequest>();
+
+  const diagnosticError = (message: string): Error => {
+    const detail = stderrTail.trim().replace(/\s+/g, " ").slice(-2_000);
+    return new Error(detail ? `${message} Native helper stderr: ${detail}` : message);
+  };
 
   const failAll = (error: Error): void => {
     const active = [...pending.values()];
@@ -1316,6 +1324,7 @@ function createPersistentWindowsStageHost(executable: string) {
     }
     child = undefined;
     buffer = Buffer.alloc(0);
+    stderrTail = "";
   };
 
   const parseFrames = (): void => {
@@ -1350,6 +1359,7 @@ function createPersistentWindowsStageHost(executable: string) {
   };
 
   const ensureChild = (): ChildProcessWithoutNullStreams => {
+    if (closed) throw new Error("Native Windows stage helper is closed.");
     if (child) return child;
     if (!existsSync(executable)) throw new Error(`The native Windows stage helper is missing at ${executable}. Reinstall or rebuild the M9R Windows runtime first.`);
     const spawned = spawn(executable, ["--desktop-stage-server"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
@@ -1358,10 +1368,12 @@ function createPersistentWindowsStageHost(executable: string) {
       buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
       parseFrames();
     });
-    spawned.stderr.resume();
+    spawned.stderr.on("data", (chunk: Buffer | string) => {
+      stderrTail = `${stderrTail}${Buffer.from(chunk).toString("utf8")}`.slice(-8_192);
+    });
     spawned.once("error", (error) => failAll(error));
     spawned.once("close", (code) => {
-      if (child === spawned) failAll(new Error(`Native Windows stage helper exited (${code ?? "unknown"}) before completing its request.`));
+      if (child === spawned) failAll(diagnosticError(`Native Windows stage helper exited (${code ?? "unknown"}) before completing its request.`));
     });
     return spawned;
   };
@@ -1393,9 +1405,11 @@ function createPersistentWindowsStageHost(executable: string) {
   };
 
   const close = (): void => {
+    if (closed) return;
+    closed = true;
     if (!child) return;
     child.kill();
-    failAll(new Error("Native Windows stage helper was closed."));
+    failAll(diagnosticError("Native Windows stage helper was closed."));
   };
   process.once("exit", close);
   return { invoke, close };

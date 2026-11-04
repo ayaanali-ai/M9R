@@ -348,6 +348,13 @@ export type CuaStageDragOptions = CuaStageInputOptions & { durationMs?: number }
 
 export interface CuaStageDriverDependencies {
   stage?: WindowsStageDependencies;
+  /**
+   * The broker-owned desktop-stage manager.  Production task stages pass the
+   * manager they already created so the driver shares one native helper and
+   * one stage/IPC lifecycle instead of spawning a second host for the same
+   * broker process.  Tests and the standalone CLI may omit it.
+   */
+  manager?: ReturnType<typeof createWindowsDesktopStageManager>;
   loadSdk?: () => Promise<CuaSdk>;
   connectRuntime?: CuaStageRuntimeConnector;
   now?: () => Date;
@@ -978,7 +985,7 @@ function desktopTargetAt(result: ToolResult, x: number, y: number): CuaStageTarg
  * PID/HWND pair; frames and window labels remain local to the native pill.
  */
 export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
-  const manager = createWindowsDesktopStageManager(deps.stage);
+  const manager = deps.manager ?? createWindowsDesktopStageManager(deps.stage);
   // Injected native seams are test-only. In production, a native failure is
   // surfaced instead of silently re-entering the retired Cua perception path.
   // An explicit compatibility flag keeps emergency rollback possible without
