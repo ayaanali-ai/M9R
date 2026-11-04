@@ -85,6 +85,19 @@ test("an agent naming a task the owner's new message paused acts under the owner
   } finally { t.done(); }
 });
 
+test("a serial provider session reports the newest delivered result when an older turn was abandoned", async () => {
+  const t = setup();
+  try {
+    const first = t.store.addTask({ from: "you", to: "codex", goal: "Old turn", origin: "human_typed", idempotencyKey: "abandoned-turn", targetSession: "x1" }).task;
+    t.store.markDelivered([first.id], "x1");
+    const latest = t.store.addTask({ from: "you", to: "codex", goal: "Current turn", origin: "human_typed", idempotencyKey: "current-turn", targetSession: "x1" }).task;
+    t.store.markDelivered([latest.id], "x1");
+    assert.match(await t.call("m9r_result", { token: t.codex, summary: "Current work is complete", completion: { status: "completed", remainingWork: [] } }), /Recorded result/);
+    assert.equal(t.store.getTask(latest.id)?.resultSummary, "Current work is complete");
+    assert.equal(t.store.getTask(first.id)?.resultSummary, undefined);
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
