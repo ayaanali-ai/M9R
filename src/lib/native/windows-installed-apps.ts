@@ -5,6 +5,10 @@ export interface InstalledWindowsApp {
   executable: string;
   args: string[];
   windowExecutable?: string;
+  /** Exact process image path for packaged apps that own their HWND directly. */
+  windowExecutablePath?: string;
+  /** Exact AppsFolder identity used to distinguish generic frame-host HWNDs. */
+  appUserModelId?: string;
 }
 
 const APP_ALIASES: Record<string, readonly string[]> = {
@@ -52,7 +56,7 @@ foreach ($app in @(Get-StartApps | Where-Object { ($keys -contains (Key $_.Name)
   foreach ($package in @(Get-AppxPackage -Name $packageName | Where-Object PackageFamilyName -eq $family)) {
     $manifest = $package | Get-AppxPackageManifest
     foreach ($entry in @($manifest.Package.Applications.Application | Where-Object Id -eq $id)) {
-      if ($entry.Executable) { $found += [IO.Path]::GetFileName([string] $entry.Executable) }
+      if ($entry.Executable) { $found += [IO.Path]::GetFullPath((Join-Path $package.InstallLocation ([string] $entry.Executable))) }
     }
   }
 }
@@ -69,9 +73,9 @@ export async function discoverInstalledWindowExecutable(executable: string,
       (error, stdout) => error ? reject(new Error("Windows renderer identity lookup failed; no mismatched window was adopted.")) : resolve(stdout));
   }));
   const parsed: unknown = JSON.parse((await run(WINDOWS_RENDERER_DISCOVERY_SCRIPT, { M9R_APP_LAUNCHER: executable })).replace(/^\uFEFF/, ""));
-  if (!Array.isArray(parsed) || parsed.some((name) => typeof name !== "string" || !/^[^\\/\u0000-\u001f]+\.exe$/i.test(name))) return undefined;
-  const names = [...new Map((parsed as string[]).map((name) => [name.toLowerCase(), name])).values()];
-  return names.length === 1 ? names[0] : undefined;
+  if (!Array.isArray(parsed) || parsed.some((path) => typeof path !== "string" || !isAbsolute(path) || !/\.exe$/i.test(path))) return undefined;
+  const paths = [...new Map((parsed as string[]).map((path) => [path.toLowerCase(), path])).values()];
+  return paths.length === 1 ? paths[0] : undefined;
 }
 
 function appNameKey(value: string): string {
@@ -119,7 +123,7 @@ foreach ($app in @(Get-StartApps | Where-Object { Matches $_.Name })) {
   $manifest = $package | Get-AppxPackageManifest
   $entry = $manifest.Package.Applications.Application | Where-Object Id -eq $id | Select-Object -First 1
   if (-not $entry.Executable) { continue }
-  $found += @{ executable = (Join-Path $env:SystemRoot 'explorer.exe'); args = @('shell:AppsFolder\' + $app.AppID); windowExecutable = [IO.Path]::GetFileName($entry.Executable) }
+  $found += @{ executable = (Join-Path $env:SystemRoot 'explorer.exe'); args = @('shell:AppsFolder\' + $app.AppID); windowExecutable = [IO.Path]::GetFileName($entry.Executable); windowExecutablePath = [IO.Path]::GetFullPath((Join-Path $package.InstallLocation ([string] $entry.Executable))); appUserModelId = [string] $app.AppID }
 }
 if ($found.Count -gt 0) {
   ConvertTo-Json -InputObject @($found) -Compress -Depth 3
@@ -165,13 +169,16 @@ export async function discoverInstalledWindowsApp(
     && isAbsolute(app.executable) && /\.exe$/i.test(app.executable) && Array.isArray(app.args)
     && (app.args.length === 0 || (app.args.length === 1 && typeof app.args[0] === "string"
       && (/^shell:AppsFolder\\[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(app.args[0]) || (isAbsolute(app.args[0]) && /\.lnk$/i.test(app.args[0]) && !/[\u0000-\u001f]/.test(app.args[0])))))
-    && (app.windowExecutable === undefined || /^[^\\/]+\.exe$/i.test(app.windowExecutable)));
+    && (app.windowExecutable === undefined || /^[^\\/]+\.exe$/i.test(app.windowExecutable))
+    && (app.windowExecutablePath === undefined || (isAbsolute(app.windowExecutablePath) && /\.exe$/i.test(app.windowExecutablePath)))
+    && (app.appUserModelId === undefined || /^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(app.appUserModelId)));
   const unique = [...new Map(apps.map((app) => [`${app.executable.toLowerCase()}\0${app.args.join("\0")}`, app])).values()];
   const packaged = unique.filter((app) => app.args[0]?.startsWith("shell:AppsFolder\\"));
   // Windows ships compatibility stubs beside the registered packaged app
   // (Notepad is one example). These are two launch routes for the same app.
   if (packaged.length === 1 && unique.every((app) => app === packaged[0]
-    || (typeof packaged[0].windowExecutable === "string" && app.executable.split(/[\\/]/).at(-1)?.toLowerCase() === packaged[0].windowExecutable.toLowerCase()))) return packaged[0];
+    || [packaged[0].windowExecutablePath?.split(/[\\/]/).at(-1), packaged[0].windowExecutable]
+      .some((name) => typeof name === "string" && app.executable.split(/[\\/]/).at(-1)?.toLowerCase() === name.toLowerCase()))) return packaged[0];
   if (unique.length > 1) {
     const candidates = unique.slice(0, 10).map((app) => app.executable).join("; ");
     throw new Error(`Windows found multiple installed apps named "${name}" (${candidates}); select the intended app.`);

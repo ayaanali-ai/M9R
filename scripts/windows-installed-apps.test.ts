@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { discoverInstalledWindowsApp, WINDOWS_APP_DISCOVERY_SCRIPT, windowsAppSearchNames } from "../src/lib/native/windows-installed-apps";
+import { discoverInstalledWindowExecutable, discoverInstalledWindowsApp, WINDOWS_APP_DISCOVERY_SCRIPT, WINDOWS_RENDERER_DISCOVERY_SCRIPT, windowsAppSearchNames } from "../src/lib/native/windows-installed-apps";
 
 const LEGACY_NOTEPAD = { executable: "C:\\Windows\\System32\\notepad.exe", args: [] as string[] };
 const PACKAGED_NOTEPAD = {
   executable: "C:\\Windows\\explorer.exe",
   args: ["shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"],
   windowExecutable: "Notepad.exe",
+  windowExecutablePath: "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe",
+  appUserModelId: "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
 };
 
 test("prefers the packaged app over a legacy App Paths compatibility stub when both are found", async () => {
@@ -39,6 +41,19 @@ test("the discovery script collects App Paths matches without exiting before the
   assert.ok(appPathsLoopEnd > 0, "the script must still query Get-StartApps for the packaged app");
   assert.equal(/\bexit\s+0\b/.test(textBeforePackagedLookup), false,
     "the script must not exit before the packaged-app (Get-StartApps) lookup runs");
+  assert.match(WINDOWS_APP_DISCOVERY_SCRIPT, /appUserModelId\s*=\s*\[string\]\s+\$app\.AppID/,
+    "packaged launch results must carry the exact Windows app identity into window matching");
+  assert.match(WINDOWS_APP_DISCOVERY_SCRIPT, /windowExecutablePath\s*=\s*\[IO\.Path\]::GetFullPath/,
+    "packaged launch results must carry an exact executable path for self-hosted packaged windows");
+});
+
+test("renderer identity lookup returns the exact packaged image path, not only a basename", async () => {
+  const expected = "C:\\Program Files\\WindowsApps\\Example_1.0.0.0_x64__publisher\\App.exe";
+  const actual = await discoverInstalledWindowExecutable("C:\\Windows\\System32\\example.exe", async (script) => {
+    assert.equal(script, WINDOWS_RENDERER_DISCOVERY_SCRIPT);
+    return JSON.stringify([expected]);
+  });
+  assert.equal(actual, expected);
 });
 
 test("throws when the same query genuinely matches two unrelated, non-dedupable apps", async () => {

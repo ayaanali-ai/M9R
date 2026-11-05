@@ -3,10 +3,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { createWindowsDesktopStageManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
+import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "../src/lib/native/desktop-input-errors";
 
-const stageDesktop = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
-const createdDesktop = "4fc4701b-6c3e-46d1-bba1-e99d993a28a2";
-const ownerDesktop = "c0999999-87d4-4f8b-9fd1-48bc9d8c14ae";
+const roomId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
+
+test("visible window inventory keeps ordinary windows whose optional shell identities are null", async () => withRoot(async (root) => {
+  const window = { pid: 456, windowId: "0x123", title: "Notepad", width: 900, height: 700,
+    className: "Notepad", processName: "Notepad.exe", processPath: null, appUserModelId: null };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => request.op === "listVisibleWindows" ? { ok: true, windows: [window] } : { ok: false } });
+  assert.deepEqual(await manager.listVisibleWindows(), [window],
+    "native JSON nulls mean identity metadata is unavailable, not that the real app window is invalid");
+}));
 
 test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
@@ -23,7 +31,24 @@ test("shell point inspection and invocation preserve exact control identity with
   await assert.rejects(manager.windowAtPoint(NaN, 10), /Invalid/);
   await assert.rejects(manager.pointControl(0.5, 10), /Invalid/);
 }));
-const anchor = { pid: 4_321, windowId: "9223372036854775807", desktopId: stageDesktop, onCurrentDesktop: false };
+const anchor = { pid: 4_321, windowId: "9223372036854775807" };
+
+test("native input errors preserve whether SendInput dispatched any events", async () => withRoot(async (root) => {
+  let response: Record<string, unknown> = { ok: false, dispatchState: "not-dispatched", error: "target was not foreground" };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async () => response as never });
+  await assert.rejects(() => manager.sendClick(anchor.pid, anchor.windowId, 30, 40),
+    (error: unknown) => error instanceof DesktopInputNotDispatchedError && error.dispatchState === "not-dispatched");
+
+  response = { ok: false, dispatchState: "uncertain", error: "release failed after down" };
+  await assert.rejects(() => manager.sendClick(anchor.pid, anchor.windowId, 30, 40),
+    (error: unknown) => error instanceof DesktopInputOutcomeUnknownError && error.dispatchState === "uncertain");
+
+  response = { ok: false, error: "old helper omitted the dispatch state" };
+  await assert.rejects(() => manager.sendClick(anchor.pid, anchor.windowId, 30, 40),
+    (error: unknown) => error instanceof DesktopInputOutcomeUnknownError,
+    "an old or malformed helper response cannot be misreported as proof that no input was sent");
+}));
 
 test("reused PIDs and HWNDs cannot satisfy a persisted process-generation binding", async () => withRoot(async (root) => {
   let generation = "0000000000000001";
@@ -67,13 +92,12 @@ test("one replacement resolver requires the same creation time and one exact can
   assert.equal(await manager.resolveWindowReplacement("generation-test"), undefined);
 }));
 
-test("owned launch discovery accepts hidden windows only from the exact child process", async () => withRoot(async (root) => {
+test("owned launch discovery accepts windows only from the exact child process", async () => withRoot(async (root) => {
   let wrongProcess = false;
   const requests: Record<string, unknown>[] = [];
   const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
     invokeNative: async (request) => {
       requests.push(request);
-      if (request.op === "createDesktop" || request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: createdDesktop, isCurrent: false, returnDesktopId: ownerDesktop } };
       if (request.op === "listOwnedWindows") return { ok: true, windows: [{ pid: wrongProcess ? 9999 : 4321, windowId: "1234", title: "Hidden owned app", width: 656, height: 519 }] };
       throw new Error("Unexpected native request");
     } });
@@ -85,23 +109,6 @@ test("owned launch discovery accepts hidden windows only from the exact child pr
   await assert.rejects(manager.listOwnedWindows("launch-test", 0), /Invalid owned process/);
 }));
 
-test("moves only the exact broker-owned child to its background stage without activation", async () => withRoot(async (root) => {
-  const requests: Record<string, unknown>[] = [];
-  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
-    invokeNative: async (request) => {
-      requests.push(request);
-      if (request.op === "createDesktop" || request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: createdDesktop, isCurrent: false, returnDesktopId: ownerDesktop } };
-      if (request.op === "showAndMoveOwnedWindow") return { ok: true, window: { pid: 4321, windowId: "1234", desktopId: createdDesktop, onCurrentDesktop: false } };
-      throw new Error("Unexpected native request");
-    } });
-  await manager.create("launch-test");
-  const result = await manager.moveOwnedWindow("launch-test", 4321, "1234");
-  assert.equal(result.window.desktopId, createdDesktop);
-  assert.equal(result.window.onCurrentDesktop, false);
-  assert.deepEqual(requests.at(-1), { op: "showAndMoveOwnedWindow", pid: 4321, windowId: "1234", desktopId: createdDesktop });
-  await assert.rejects(manager.moveOwnedWindow("launch-test", 4322, "1234"), /did not confirm/);
-}));
-
 function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
   const fixtureRoot = resolve(process.cwd(), ".workcache", "native-test-fixtures");
   mkdirSync(fixtureRoot, { recursive: true });
@@ -109,17 +116,16 @@ function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
   return Promise.resolve(run(root)).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
-test("registers a machine-local stage from an exact window and persists opaque room identities", async () => withRoot(async (root) => {
+test("registers a machine-local stage from an exact HWND and persists opaque coordination identities", async () => withRoot(async (root) => {
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {}, now: () => new Date("2026-10-04T12:00:00Z"),
     invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
   });
   const registered = await manager.register("My Stage", "4321", anchor.windowId);
   assert.equal(registered.name, "my-stage");
-  assert.equal(registered.desktopId, stageDesktop);
   assert.deepEqual(registered.anchor, { pid: 4_321, windowId: anchor.windowId });
   assert.deepEqual(manager.list(), [registered]);
-  assert.match(readFileSync(join(root, "windows-stages.json"), "utf8"), /"version": 3/);
+  assert.match(readFileSync(join(root, "windows-stages.json"), "utf8"), /"version": 6/);
   assert.match(registered.roomDesktopId, /^[0-9a-f-]{36}$/i);
   assert.match(registered.roomWindowId ?? "", /^[0-9a-f-]{36}$/i);
 }));
@@ -127,13 +133,13 @@ test("registers a machine-local stage from an exact window and persists opaque r
 test("a full registry drops only owner-preview stages whose window process has exited", async () => withRoot(async (root) => {
   const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const stages = [
-    ...Array.from({ length: 13 }, (_, i) => ({ name: `preview-agent-dead${i}`, desktopId: stageDesktop, roomDesktopId: uuid(i), returnToDesktopId: null,
+    ...Array.from({ length: 13 }, (_, i) => ({ name: `preview-agent-dead${i}`, desktopId: roomId, roomDesktopId: uuid(i), returnToDesktopId: null,
       anchor: { pid: 9_000 + i, windowId: String(100 + i) }, roomWindowId: uuid(100 + i), registeredAt: "2026-10-26T08:00:00.000Z" })),
-    { name: "preview-agent-live", desktopId: stageDesktop, roomDesktopId: uuid(50), returnToDesktopId: null,
+    { name: "preview-agent-live", desktopId: roomId, roomDesktopId: uuid(50), returnToDesktopId: null,
       anchor: { pid: 7_777, windowId: "777" }, roomWindowId: uuid(150), registeredAt: "2026-10-27T08:00:00.000Z" },
-    { name: "agent-owned-desktop", desktopId: createdDesktop, roomDesktopId: uuid(51), returnToDesktopId: ownerDesktop,
+    { name: "agent-legacy-desktop-fields", desktopId: "4fc4701b-6c3e-46d1-bba1-e99d993a28a2", roomDesktopId: uuid(51), returnToDesktopId: "c0999999-87d4-4f8b-9fd1-48bc9d8c14ae",
       anchor: { pid: 9_500, windowId: "950" }, roomWindowId: uuid(151), registeredAt: "2026-10-27T08:00:00.000Z" },
-    { name: "agent-no-anchor", desktopId: stageDesktop, roomDesktopId: uuid(52), returnToDesktopId: null,
+    { name: "agent-no-anchor", desktopId: roomId, roomDesktopId: uuid(52), returnToDesktopId: null,
       anchor: null, roomWindowId: null, registeredAt: "2026-10-27T08:00:00.000Z" },
   ];
   assert.equal(stages.length, 16);
@@ -145,111 +151,81 @@ test("a full registry drops only owner-preview stages whose window process has e
   });
   await manager.register("preview-agent-new", "4321", anchor.windowId);
   assert.deepEqual(manager.list().map((stage) => stage.name).sort(),
-    ["agent-no-anchor", "agent-owned-desktop", "preview-agent-live", "preview-agent-new"]);
+    ["agent-legacy-desktop-fields", "agent-no-anchor", "preview-agent-live", "preview-agent-new"]);
+  assert.doesNotMatch(readFileSync(join(root, "windows-stages.json"), "utf8"), /returnToDesktopId/,
+    "legacy Windows desktop routing metadata is discarded when the registry is rewritten");
 }));
 
-test("creates a local stage without switching desktops and later activates it explicitly", async () => withRoot(async (root) => {
+test("creates an owner-visible stage as local metadata without issuing native window operations", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {}, now: () => new Date("2026-10-04T12:00:00Z"),
-    invokeNative: async (request) => {
-      requests.push(request);
-      if (request.op === "createDesktop") return { ok: true, desktop: { desktopId: createdDesktop, isCurrent: false, returnDesktopId: ownerDesktop } };
-      if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: createdDesktop, isCurrent: false } };
-      if (request.op === "activateDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: true } };
-      throw new Error(`Unexpected native operation: ${String(request.op)}`);
-    },
+    invokeNative: async (request) => { requests.push(request); return { ok: false, error: "No native operation is expected for a local stage mapping." }; },
   });
 
   const created = await manager.create("Agent Stage");
   assert.equal(created.name, "agent-stage");
-  assert.equal(created.desktopId, createdDesktop);
   assert.equal(created.anchor, null);
-  assert.deepEqual(await manager.inspectStage("agent-stage"), {
-    stage: created,
-    desktop: { desktopId: createdDesktop, isCurrent: false },
-  });
-  const activated = await manager.activate("agent-stage");
-  assert.equal(activated.desktop.isCurrent, true);
-  assert.deepEqual(requests.map((request) => request.op), ["createDesktop", "inspectDesktop", "activateDesktop"]);
+  assert.deepEqual(await manager.inspectStage("agent-stage"), { stage: created });
+  assert.deepEqual(requests, []);
   assert.match(readFileSync(join(root, "windows-stages.json"), "utf8"), /"anchor": null/);
 }));
 
-test("owner-preview rebind detaches a stale window and follows the desktop the owner is viewing", async () => withRoot(async (root) => {
-  let currentDesktop = stageDesktop;
+test("legacy Windows desktop metadata is ignored when validating an exact live HWND", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {},
     invokeNative: async (request) => {
       requests.push(request);
-      if (request.op === "inspect") return { ok: true, window: { ...anchor, desktopId: stageDesktop, onCurrentDesktop: false } };
-      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktop, isCurrent: true } };
-      if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: true } };
+      if (request.op === "inspect") return { ok: true, window: { ...anchor, desktopId: "legacy-other-desktop", onCurrentDesktop: false } };
       throw new Error(`Unexpected native operation: ${String(request.op)}`);
     },
   });
-  const original = await manager.register("preview", "4321", anchor.windowId);
-  const assignment = { handle: "codex", sessionTag: "1234abcd" };
-  manager.assignAgent("preview", assignment);
-  currentDesktop = ownerDesktop;
-
-  const rebound = await manager.adoptCurrentDesktop("preview");
-  assert.equal(rebound.desktopId, ownerDesktop);
-  assert.equal(rebound.anchor, null);
-  assert.equal(rebound.roomWindowId, null);
-  assert.equal(rebound.roomDesktopId, original.roomDesktopId, "opaque desktop lease identity remains stable");
-  assert.deepEqual(rebound.agentAssignment, assignment);
-  assert.equal(requests.some((request) => request.op === "move" || request.op === "activateDesktop" || request.op === "close"), false,
-    "rebinding changes only the local mapping and never manipulates the user's desktop or window");
+  await manager.register("preview", "4321", anchor.windowId);
+  const inspected = await manager.inspectStage("preview");
+  assert.equal(inspected.anchor?.pid, anchor.pid);
+  assert.equal(inspected.anchor?.windowId, anchor.windowId);
+  assert.deepEqual(Object.keys(inspected.anchor ?? {}).sort(), ["pid", "windowId"]);
+  assert.deepEqual(requests.map((request) => request.op), ["inspect", "inspect"]);
 }));
 
-test("owner-preview inspection uses the current desktop query and never the private desktop-list API", async () => withRoot(async (root) => {
-  let currentDesktop = stageDesktop;
+test("stage inspection is local metadata and does not ask about Windows desktop identity", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {},
     invokeNative: async (request) => {
       requests.push(request);
-      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktop, isCurrent: true } };
       throw new Error(`Owner-preview must not call ${String(request.op)}`);
     },
   });
   const name = "preview-agent-0123456789abcdef01234567";
-  await manager.adoptCurrentDesktop(name);
+  await manager.ensureStage(name);
   manager.assignAgent(name, { handle: "codex", sessionTag: "1234abcd" });
-
-  assert.deepEqual(await manager.inspectStage(name), {
-    stage: manager.list()[0],
-    desktop: { desktopId: stageDesktop, isCurrent: true },
-  });
-  currentDesktop = ownerDesktop;
-  assert.deepEqual(await manager.inspectStage(name), {
-    stage: manager.list()[0],
-    desktop: { desktopId: stageDesktop, isCurrent: false },
-  });
-  assert.deepEqual(requests.map((request) => request.op), ["currentDesktop", "currentDesktop", "currentDesktop"]);
+  assert.deepEqual(await manager.inspectStage(name), { stage: manager.list()[0] });
+  assert.deepEqual(requests, []);
 }));
 
-test("reads v1 stage registries and writes v3 when changed", async () => withRoot(async (root) => {
+test("reads old stage registries, drops OS desktop fields, and writes v6 when changed", async () => withRoot(async (root) => {
   const path = join(root, "windows-stages.json");
   writeFileSync(path, JSON.stringify({
     version: 1,
-    stages: [{ name: "stage", desktopId: stageDesktop, anchor: { pid: 4_321, windowId: "123" }, registeredAt: "2026-10-04T12:00:00.000Z" }],
+    stages: [{ name: "stage", desktopId: roomId, returnToDesktopId: roomId, anchor: { pid: 4_321, windowId: "123" }, registeredAt: "2026-10-04T12:00:00.000Z" }],
   }), "utf8");
   const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {} });
   assert.equal(manager.list()[0]?.anchor?.pid, 4_321);
   manager.forget("stage");
-  assert.match(readFileSync(path, "utf8"), /"version": 3/);
+  const migrated = readFileSync(path, "utf8");
+  assert.match(migrated, /"version": 6/);
+  assert.doesNotMatch(migrated, /returnToDesktopId|"desktopId"/);
 }));
 
-test("re-registering a known desktop refreshes its anchor without changing its identity", async () => withRoot(async (root) => {
+test("re-registering a known stage refreshes its anchor without changing its coordination identity", async () => withRoot(async (root) => {
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {}, now: () => new Date("2026-10-04T12:00:00Z"),
     invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
   });
   const original = await manager.register("stage", "4321", "123");
   const refreshed = await manager.register("stage", "9876", "456");
-  assert.equal(refreshed.desktopId, original.desktopId);
   assert.equal(refreshed.registeredAt, original.registeredAt);
   assert.deepEqual(refreshed.anchor, { pid: 9_876, windowId: "456" });
   assert.equal(refreshed.roomDesktopId, original.roomDesktopId);
@@ -278,57 +254,26 @@ test("room lease keys are stable and opaque and migrate existing v2 records once
   for (const stage of v2.stages) { delete stage.roomDesktopId; delete stage.roomWindowId; }
   writeFileSync(path, JSON.stringify(v2), "utf8");
   const migrated = await manager.roomKeys("stage");
-  assert.match(readFileSync(path, "utf8"), /"version"\s*:\s*3/);
+  assert.match(readFileSync(path, "utf8"), /"version"\s*:\s*6/);
   const migratedKeys = formatWindowsStageRoomKeys(machineId, migrated.stage);
   assert.deepEqual(formatWindowsStageRoomKeys(machineId, (await manager.roomKeys("stage")).stage), migratedKeys);
 }));
 
-test("moves only the exact PID/window pair to the registered desktop and verifies the destination", async () => withRoot(async (root) => {
+test("attaches only the selected live window without issuing an OS desktop move", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {},
     invokeNative: async (request) => {
       requests.push(request);
-      if (request.op === "move") return { ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } };
-      const desktopId = Number(request.pid) === anchor.pid ? stageDesktop : ownerDesktop;
-      return { ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId), desktopId, onCurrentDesktop: true } };
-    },
-  });
-  await manager.register("stage", "4321", anchor.windowId);
-  const result = await manager.moveWindow("stage", "7777", "0x1fff");
-  assert.equal(result.fromDesktopId, ownerDesktop);
-  assert.equal(result.window.desktopId, stageDesktop);
-  assert.deepEqual(requests.at(-1), { op: "move", pid: 7_777, windowId: "0x1fff", desktopId: stageDesktop });
-}));
-
-test("attaches only the selected live window, moves it to the stage, then records it as the anchor", async () => withRoot(async (root) => {
-  const requests: Record<string, unknown>[] = [];
-  const desktopByWindow = new Map([["4321:123", stageDesktop], ["7777:999", ownerDesktop]]);
-  const manager = createWindowsDesktopStageManager({
-    platform: "win32", root, terminal: true, env: {},
-    invokeNative: async (request) => {
-      requests.push(request);
-      if (request.op === "move") {
-        desktopByWindow.set(`${request.pid}:${request.windowId}`, String(request.desktopId));
-      }
-      const key = `${request.pid}:${request.windowId}`;
-      const desktopId = desktopByWindow.get(key);
-      if (request.op === "inspect" && desktopId) {
-        return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId, onCurrentDesktop: desktopId === ownerDesktop } };
-      }
-      if (request.op === "move" && desktopId) {
-        return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId, onCurrentDesktop: false } };
-      }
+      if (request.op === "inspect") return { ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } };
       throw new Error(`Unexpected native operation: ${String(request.op)}`);
     },
   });
   await manager.register("stage", "4321", "123");
   const result = await manager.attachWindow("stage", "7777", "999");
   assert.deepEqual(result.stage.anchor, { pid: 7777, windowId: "999" });
-  assert.equal(result.window.desktopId, stageDesktop);
-  assert.deepEqual(requests.filter((request) => request.op === "move"), [
-    { op: "move", pid: 7777, windowId: "999", desktopId: stageDesktop },
-  ]);
+  assert.equal("desktopId" in result.window, false);
+  assert.equal(requests.some((request) => /^(?:currentDesktop|createDesktop|inspectDesktop|activateDesktop|moveWindowToDesktop)$/.test(String(request.op))), false);
   assert.deepEqual((await manager.inspectStage("stage")).anchor, result.window);
 }));
 
@@ -336,26 +281,16 @@ test("requires an interactive owner terminal and rejects agent initiated stage c
   const noTerminal = createWindowsDesktopStageManager({ platform: "win32", root, terminal: false, env: {} });
   await assert.rejects(() => noTerminal.register("stage", "1", "2"), /owner at an interactive terminal/);
   const agent = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: { CODEX_THREAD_ID: "thread" } });
-  await assert.rejects(() => agent.register("stage", "1", "2"), /Agents cannot create, activate, register, or move/);
-  await assert.rejects(() => agent.moveWindow("stage", "1", "2"), /Agents cannot create, activate, register, or move/);
+  await assert.rejects(() => agent.register("stage", "1", "2"), /Agents cannot change owner desktop-stage bindings/);
 }));
 
-test("refuses stale anchors, desktop id drift, and failed post-move verification", async () => withRoot(async (root) => {
-  let anchorDesktop = stageDesktop;
-  const targetDesktop = ownerDesktop;
+test("legacy off-desktop status cannot stale an exact PID and HWND binding", async () => withRoot(async (root) => {
   const manager = createWindowsDesktopStageManager({
     platform: "win32", root, terminal: true, env: {},
-    invokeNative: async (request) => {
-      if (request.op === "move") return { ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId), desktopId: targetDesktop } };
-      const desktopId = Number(request.pid) === anchor.pid ? anchorDesktop : targetDesktop;
-      return { ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId), desktopId } };
-    },
+    invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId), desktopId: "legacy-other-desktop", onCurrentDesktop: false } }),
   });
   await manager.register("stage", "4321", anchor.windowId);
-  anchorDesktop = ownerDesktop;
-  await assert.rejects(() => manager.inspectStage("stage"), /anchor moved to another desktop/);
-  await assert.rejects(() => manager.moveWindow("stage", "7777", "999"), /did not confirm/);
-  assert.equal(manager.list()[0]?.desktopId, stageDesktop, "failed live checks must not silently rewrite the saved stage");
+  assert.equal((await manager.inspectStage("stage")).anchor?.windowId, anchor.windowId);
 }));
 
 test("fails closed on a corrupt registry and forgetting removes only the local mapping", async () => withRoot(async (root) => {
@@ -370,7 +305,7 @@ test("fails closed on a corrupt registry and forgetting removes only the local m
   assert.throws(() => manager.list(), /registry is corrupt/);
   writeFileSync(path, saved, "utf8");
   const forgotten = manager.forget("stage");
-  assert.equal(forgotten.desktopId, stageDesktop);
+  assert.equal(forgotten.name, "stage");
   assert.deepEqual(manager.list(), []);
 }));
 

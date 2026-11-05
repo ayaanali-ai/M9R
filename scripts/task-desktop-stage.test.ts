@@ -1,4 +1,4 @@
-import { StageCaptureRefreshError, serializeStageFailure } from "../src/lib/native/stage-errors";
+import { serializeStageFailure } from "../src/lib/native/stage-errors";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,18 +14,21 @@ import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT, discoverInstalledW
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 
+type TestVisibleWindow = { pid: number; windowId: string; title: string; width: number; height: number;
+  appName?: string; processName?: string | null; className?: string; zOrder?: number; processPath?: string | null; appUserModelId?: string | null };
+
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
   const { task } = store.addTask({ from: "you", to: "codex", goal: "Use a stage", origin: "human_typed", idempotencyKey: "stage-one", targetSession: "session-one" });
-  let creations = 0;
   const desktopActions: Array<{ kind: string; x?: number; y?: number }> = [];
-  const currentDesktopId = "33333333-3333-4333-8333-333333333333";
-  let anchorDesktopId = currentDesktopId;
+  const retiredDesktopOps = new Set(["currentDesktop", "createDesktop", "inspectDesktop", "activateDesktop", "moveWindowToDesktop"]);
+  let retiredDesktopOpCount = 0;
   let foregroundWindow = { pid: 123, windowId: "456" };
   const nativeOps: string[] = [];
   const presentedWindows: Array<{ pid: number; windowId: string }> = [];
+  let visibleWindows: TestVisibleWindow[] = [];
   const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
   const driver = {
     capture: async () => previewCapture,
@@ -40,23 +43,21 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
     platform: "win32", env: {}, invokeNative: async (request) => {
       nativeOps.push(String(request.op));
-      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentDesktopId, isCurrent: true } };
-      if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: { ...foregroundWindow, desktopId: currentDesktopId,
-        onCurrentDesktop: true, title: "Active window", className: "Chrome_WidgetWin_1", visible: true, minimized: false } };
-      if (request.op === "createDesktop") {
-        creations++;
-        return { ok: true, desktop: { desktopId: "11111111-1111-4111-8111-111111111111", isCurrent: false, returnDesktopId: "22222222-2222-4222-8222-222222222222" } };
-      }
-      if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: String(request.desktopId) === currentDesktopId } };
-      if (request.op === "presentOwnerWindow") { anchorDesktopId = currentDesktopId; presentedWindows.push({ pid: Number(request.pid), windowId: String(request.windowId) });
-        return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: currentDesktopId, onCurrentDesktop: true } }; }
-      if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId), desktopId: anchorDesktopId, onCurrentDesktop: anchorDesktopId === currentDesktopId } };
+      if (retiredDesktopOps.has(String(request.op))) { retiredDesktopOpCount++; return { ok: false, error: "Windows desktop operations are retired." }; }
+      if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: { ...foregroundWindow,
+        title: "Active window", className: "Chrome_WidgetWin_1", visible: true, minimized: false } };
+      if (request.op === "listVisibleWindows") return { ok: true, windows: visibleWindows };
+      if (request.op === "listOwnedWindows") return { ok: true, windows: visibleWindows.filter((window) => window.pid === Number(request.pid)) };
+      if (request.op === "presentOwnerWindow") { presentedWindows.push({ pid: Number(request.pid), windowId: String(request.windowId) });
+        return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } }; }
+      if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
   } });
   return { root, store, identity, task, service, driver, nativeOps, presentedWindows,
     setForegroundWindow: (pid: number, windowId: string) => { foregroundWindow = { pid, windowId }; },
-    moveAnchor: () => { anchorDesktopId = "22222222-2222-4222-8222-222222222222"; }, creations: () => creations, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+    setVisibleWindows: (windows: TestVisibleWindow[]) => { visibleWindows = windows; },
+    retiredDesktopOpCount: () => retiredDesktopOpCount, creations: () => retiredDesktopOpCount, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("a stalled cursor compositor cannot delay stage preparation or dispatch", async () => {
@@ -116,91 +117,6 @@ test("incomplete packaged renderer metadata stays ambiguous instead of crashing 
   ])), /multiple installed apps/);
 });
 
-test("owner-preview repairs a saved zero desktop ID and refuses zero IDs from the native helper", async () => {
-  const testTemp = join(process.cwd(), ".test-tmp");
-  mkdirSync(testTemp, { recursive: true });
-  const root = mkdtempSync(join(testTemp, "m9r-zero-desktop-id-"));
-  const stageName = "preview-agent-test";
-  const emptyId = "00000000-0000-0000-0000-000000000000";
-  const currentId = "33333333-3333-4333-8333-333333333333";
-  const roomDesktopId = "44444444-4444-4444-8444-444444444444";
-  writeFileSync(join(root, "windows-stages.json"), JSON.stringify({
-    version: 3,
-    stages: [{
-      name: stageName,
-      desktopId: emptyId,
-      roomDesktopId,
-      returnToDesktopId: null,
-      anchor: null,
-      roomWindowId: null,
-      agentAssignment: { handle: "codex", sessionTag: "12345678" },
-      registeredAt: "2026-10-06T19:12:50.290Z",
-    }],
-  }));
-  let reportedDesktopId = currentId;
-  const manager = createWindowsDesktopStageManager({
-    platform: "win32",
-    root,
-    env: {},
-    terminal: true,
-    invokeNative: async (request) => {
-      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: reportedDesktopId, isCurrent: true } };
-      if (request.op === "inspect") return { ok: true, window: {
-        pid: Number(request.pid), windowId: String(request.windowId), desktopId: reportedDesktopId, onCurrentDesktop: true,
-      } };
-      throw new Error("Unexpected native operation.");
-    },
-  });
-
-  try {
-    const adopted = await manager.adoptCurrentDesktop(stageName);
-    assert.equal(adopted.desktopId, currentId, "a valid current desktop repairs the legacy zero mapping");
-    assert.equal(adopted.agentAssignment?.sessionTag, "12345678", "repair preserves the agent assignment");
-    assert.equal(adopted.roomDesktopId, roomDesktopId, "repair preserves the room coordination identity");
-
-    reportedDesktopId = emptyId;
-    await assert.rejects(manager.adoptCurrentDesktop(stageName), /invalid desktop result/);
-    // An empty window desktop ID now falls back to the owner's current desktop (a shell-hosted
-    // window, e.g. File Explorer, can legitimately report no specific desktop affinity) -- but
-    // when the current-desktop lookup is *also* empty, there is nothing left to fall back to,
-    // and the failure correctly surfaces as the desktop lookup that actually failed.
-    await assert.rejects(manager.inspectWindow("123", "456"), /invalid desktop result/);
-    assert.equal(manager.list()[0]?.desktopId, currentId, "invalid native data must not overwrite the repaired mapping");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a window with no specific desktop affinity resolves to the owner's current desktop instead of being refused", async () => {
-  const testTemp = join(process.cwd(), ".test-tmp");
-  mkdirSync(testTemp, { recursive: true });
-  const root = mkdtempSync(join(testTemp, "m9r-unaffinitized-window-"));
-  const emptyId = "00000000-0000-0000-0000-000000000000";
-  const currentId = "55555555-5555-4555-8555-555555555555";
-  const manager = createWindowsDesktopStageManager({
-    platform: "win32",
-    root,
-    env: {},
-    terminal: true,
-    invokeNative: async (request) => {
-      if (request.op === "currentDesktop") return { ok: true, desktop: { desktopId: currentId, isCurrent: true } };
-      // A shell-hosted window (e.g. a new File Explorer window) can legitimately
-      // report no specific virtual-desktop affinity.
-      if (request.op === "inspect") return { ok: true, window: {
-        pid: Number(request.pid), windowId: String(request.windowId), desktopId: emptyId, onCurrentDesktop: false,
-      } };
-      throw new Error("Unexpected native operation.");
-    },
-  });
-  try {
-    const window = await manager.inspectWindow("777", "888");
-    assert.equal(window.desktopId, currentId, "an unaffinitized window resolves to the owner's current desktop");
-    assert.equal(window.onCurrentDesktop, true, "an unaffinitized window is treated as present on the current desktop");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("app launches use the task project cwd and never inherit Windows System32", () => {
   const home = join(tmpdir(), "m9r-app-home");
   const project = join(home, "project");
@@ -223,24 +139,25 @@ test("a native target inspection failure is returned immediately instead of beco
   } finally { f.cleanup(); }
 });
 
-test("approved task preparation is idempotent and does not expose desktop GUIDs", async () => {
+test("approved task preparation is idempotent and does not invoke Windows desktop APIs", async () => {
   const f = fixture();
   try {
     const [a, b] = await Promise.all([f.service.prepare(f.identity.token, f.task.id, "background"), f.service.prepare(f.identity.token, f.task.id, "background")]);
     assert.deepEqual(a, b);
-    assert.equal(f.creations(), 1);
-    assert.equal(JSON.stringify(a).includes("11111111-1111"), false);
+    assert.equal(f.creations(), 0);
+    assert.equal(f.retiredDesktopOpCount(), 0);
+    assert.equal(JSON.stringify(a).includes("desktopId"), false);
     assert.equal(a.hasAnchor, false);
   } finally { f.cleanup(); }
 });
 
-test("omitted mode stays on the owner's current desktop for preparation and cursor actions", async () => {
+test("omitted mode prepares owner-visible work without Windows desktop queries", async () => {
   const f = fixture(true);
   try {
     const prepared = await f.service.prepare(f.identity.token, f.task.id);
     assert.equal(prepared.mode, "owner-preview");
     assert.match(prepared.name, /^preview-agent-[a-f0-9]{24}$/);
-    assert.equal(f.creations(), 0, "normal task preparation must not create a virtual desktop");
+    assert.equal(f.creations(), 0, "normal task preparation must not create or query a Windows desktop");
 
     await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 88, y: 144 });
     assert.deepEqual(f.desktopActions, [{ kind: "cursor", x: 88, y: 144 }], "an omitted action mode must use the owner-visible desktop driver");
@@ -286,10 +203,10 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
     return { executable: join(root, "chrome.exe"), args: [] };
   });
   try {
-    f.driver.listVisibleWindows = async () => [
+    f.setVisibleWindows([
       { pid: 123, windowId: "456", appName: "chrome.exe", title: "Work Chrome", width: 1280, height: 720 },
       { pid: 321, windowId: "789", appName: "chrome.exe", title: "Active Personal Chrome", width: 960, height: 640 },
-    ];
+    ].map(({ appName, ...window }) => ({ ...window, processName: appName })));
     f.setForegroundWindow(321, "789");
     const opened = await f.service.launch(f.identity.token, f.task.id, "chrome");
     assert.equal(opened.reused, true);
@@ -306,7 +223,7 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
     assert.equal((await f.service.prepare(f.identity.token, next.id, "owner-preview")).hasAnchor, true,
       "a newly authorized task in the same authenticated session retains its exact selected window");
     await f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview");
-    assert.equal(f.creations(), 0, "launch without an explicit background mode must not create a desktop or process");
+    assert.equal(f.creations(), 0, "launch reuse must not create or query a Windows desktop");
   } finally { f.cleanup(); }
 });
 
@@ -318,7 +235,7 @@ test("invalid stage modes fail closed instead of becoming background mode", asyn
   } finally { f.cleanup(); }
 });
 
-test("owner-preview preparation does not create or switch to a background desktop", async () => {
+test("owner-preview preparation uses only an M9R stage mapping", async () => {
   const f = fixture();
   try {
     const prepared = await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
@@ -326,7 +243,7 @@ test("owner-preview preparation does not create or switch to a background deskto
     assert.match(prepared.name, /^preview-agent-[a-f0-9]{24}$/);
     assert.equal(prepared.hasAnchor, false);
     assert.equal("roomDesktopId" in prepared, false);
-    assert.equal(f.creations(), 0, "preview preparation must not call createDesktop");
+    assert.equal(f.creations(), 0, "preview preparation must not call retired Windows desktop operations");
   } finally { f.cleanup(); }
 });
 
@@ -413,6 +330,7 @@ function moneyFixture(label: string | undefined, verdict: boolean, manualRelease
   const seen: StageApprovalRequest[] = [];
   const clicks: Array<{ x: number; y: number }> = [];
   let releaseApproval: (() => void) | null = null;
+  const nativeOps: string[] = [];
   const fakeDriver = {
     describeTarget: async () => (label === undefined ? undefined : { label }),
     click: async (_name: string, x: number, y: number) => {
@@ -425,8 +343,7 @@ function moneyFixture(label: string | undefined, verdict: boolean, manualRelease
     readPolicy: () => (control ? { handles: ["codex"], controlHandles: ["codex"] } : { handles: ["codex"] }),
     stage: {
       platform: "win32", env: {}, invokeNative: async (request) => {
-        if (request.op === "createDesktop") return { ok: true, desktop: { desktopId: "11111111-1111-4111-8111-111111111111", isCurrent: false, returnDesktopId: "22222222-2222-4222-8222-222222222222" } };
-        if (request.op === "inspectDesktop") return { ok: true, desktop: { desktopId: String(request.desktopId), isCurrent: false } };
+        nativeOps.push(String(request.op));
         throw new Error(`Unexpected native operation in money-gate fixture: ${request.op}`);
       },
     },
@@ -439,13 +356,15 @@ function moneyFixture(label: string | undefined, verdict: boolean, manualRelease
       },
     }),
   });
-  return { root, store, identity, task, service, seen, clicks, setControl: (value: boolean) => { control = value; }, release: () => releaseApproval?.(), cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, store, identity, task, service, seen, clicks, nativeOps, setControl: (value: boolean) => { control = value; }, release: () => releaseApproval?.(), cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("a money-like stage click waits for the owner and never executes on deny", async () => {
   const f = moneyFixture("Pay $49 now", false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
+    assert.equal(f.nativeOps.some((op) => ["currentDesktop", "createDesktop", "inspectDesktop", "activateDesktop", "moveWindowToDesktop"].includes(op)), false,
+      "a task stage is a local mapping, not a Windows desktop operation");
     await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"),
       (error: unknown) => error instanceof DesktopInputNotDispatchedError && /did not approve/.test(error.message));
     assert.equal(f.seen.length, 1);
@@ -576,30 +495,44 @@ test("an enabled agent resolves any named or absolute app without per-app approv
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("owner-preview inspects durable anchors and refuses stale input after a rebind", async () => {
+test("owner-preview reuses the exact durable HWND without querying a Windows desktop", async () => {
   const f = fixture(true, (root) => ({ executable: join(root, "chrome.exe"), args: [] }));
   try {
-    f.driver.listVisibleWindows = async () => [{ pid: 123, windowId: "456", appName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }];
+    f.setVisibleWindows([{ pid: 123, windowId: "456", processName: "chrome.exe", title: "Personal Chrome", width: 1280, height: 720 }]);
     await f.service.launch(f.identity.token, f.task.id, "chrome");
     f.nativeOps.length = 0;
     await f.service.prepare(f.identity.token, f.task.id);
-    assert.ok(f.nativeOps.includes("inspect"));
-    assert.equal(f.nativeOps.includes("currentDesktop"), false, "reuse must not clear a valid anchor");
+    assert.equal(f.nativeOps.includes("inspect"), false, "preparation keeps the durable HWND without an extra native round trip");
+    assert.equal(f.retiredDesktopOpCount(), 0);
     f.nativeOps.length = 0;
     const reused = await f.service.launch(f.identity.token, f.task.id, "chrome");
     assert.equal(reused.reused, true);
-    assert.equal(f.nativeOps.includes("currentDesktop"), false, "repeat launch must inspect before adopting");
-    f.moveAnchor();
-    let actions = 0;
-    f.driver.clickElement = async () => { actions++; throw new Error("stale click must not dispatch"); };
-    await assert.rejects(f.service.act(f.identity.token, f.task.id,
-      { kind: "click_element", view: "app", ref: "old-reference" }), (error: unknown) => {
-        assert.ok(error instanceof StageCaptureRefreshError);
-        const failure = serializeStageFailure(error, "failed");
-        assert.equal(failure.dispatchState, "not-dispatched");
-        assert.equal(failure.recovery?.kind, "capture_refreshed");
-        return true;
-      });
-    assert.equal(actions, 0);
+    assert.ok(f.nativeOps.includes("inspect"), "launch reuse validates the exact anchored HWND");
+    assert.equal(f.retiredDesktopOpCount(), 0, "no physical desktop identity participates in HWND selection");
+    assert.deepEqual(f.presentedWindows.at(-1), { pid: 123, windowId: "456" });
+  } finally { f.cleanup(); }
+});
+
+test("a persisted ApplicationFrameHost HWND is not reused after Windows changes its app identity", async () => {
+  const settingsAumid = "Microsoft.Windows.Settings_8wekyb3d8bbwe!App";
+  const calculatorAumid = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";
+  const app: StageAppLaunchSpec = { executable: "C:\\Windows\\explorer.exe",
+    args: [`shell:AppsFolder\\${settingsAumid}`], windowExecutable: "ApplicationFrameHost.exe", appUserModelId: settingsAumid };
+  const f = fixture(true, () => app);
+  const frame = (windowId: string, appUserModelId: string): TestVisibleWindow => ({ pid: 123, windowId,
+    appName: "ApplicationFrameHost.exe", processName: "ApplicationFrameHost.exe", className: "ApplicationFrameWindow",
+    appUserModelId, title: "Settings", width: 900, height: 700, zOrder: 0 });
+  try {
+    f.setVisibleWindows([frame("456", settingsAumid)]);
+    await f.service.launch(f.identity.token, f.task.id, "settings");
+
+    // Windows may keep the same ApplicationFrameHost process and numeric HWND
+    // while changing the packaged view it hosts. A persisted PID/HWND is not
+    // enough to establish app identity.
+    f.setVisibleWindows([frame("456", calculatorAumid), frame("789", settingsAumid)]);
+    const selected = await f.service.launch(f.identity.token, f.task.id, "settings");
+    assert.equal(selected.reused, true);
+    assert.deepEqual(f.presentedWindows.at(-1), { pid: 123, windowId: "789" },
+      "the launch reuses the exact live Settings HWND, never the stale frame now hosting Calculator");
   } finally { f.cleanup(); }
 });

@@ -24,10 +24,12 @@ import {
   resolveStageLaunchApp,
   selectPersonalBrowserWindow,
   selectExistingPersonalBrowserWindow,
+  selectTargetAppWindow,
   hasAmbiguousExistingPersonalBrowserWindow,
   stageAppLaunchCwd,
   stageBrowserKind,
   stageWindowMatchesApp,
+  type BrowserWindowCandidate,
   type StageAppLaunchSpec,
 } from "./task-stage-apps";
 import type { ChildProcess } from "node:child_process";
@@ -74,23 +76,12 @@ function stageCoordinationKey(goal: string): string {
 /**
  * `inspectStage`'s "anchor is unavailable" message is the one case where the native
  * helper actually could not find the window at all -- genuinely closed or crashed.
- * Every other inspectStage failure (the anchor resolved but on a different desktop,
- * a helper timeout, a malformed response) means the window may well still be alive;
- * treating those as "gone" and relaunching a replacement left a needless second
- * instance running alongside a perfectly live one.
+ * Every other inspectStage failure (a helper timeout or malformed response) means
+ * the window may well still be alive; treating those as "gone" and relaunching a
+ * replacement left a needless second instance running alongside a perfectly live one.
  */
 function isStageWindowGoneError(error: unknown): boolean {
   return error instanceof Error && /anchor is unavailable/i.test(error.message);
-}
-
-/**
- * A live window can move to another virtual desktop while the owner is away
- * from the M9R preview. That is recoverable presentation state, not proof
- * that the process or document disappeared. Keep this separate from the
- * genuinely-gone predicate so a live window is never duplicated by a launch.
- */
-function isStageWindowMovedError(error: unknown): boolean {
-  return error instanceof Error && /anchor moved to another desktop/i.test(error.message);
 }
 
 export function setTaskStagePermission(root: string, handle: string, enabled: boolean, context: { terminal: boolean; env: Record<string, string | undefined> }, control = false, mode?: TaskStageAccessMode) {
@@ -260,6 +251,30 @@ export function createTaskDesktopStageService(input: {
   const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, taskActive, ...input.stage, root, terminal: true };
   const ownsManager = !input.manager;
   const manager = input.manager ?? createWindowsDesktopStageManager(stageDeps);
+  let nativeStageWarmPromise: Promise<void> | undefined;
+  const warmNativeStageHost = (): Promise<void> => {
+    if (isAgentContext(stageDeps.env ?? process.env)) return Promise.resolve();
+    // An injected native transport is already owned by its caller (and is
+    // commonly a deterministic test seam). Only warm the manager's bundled
+    // persistent helper; sending an unsolicited ping through an injected
+    // transport can itself be an observable desktop operation.
+    if (stageDeps.invokeNative) return Promise.resolve();
+    if (typeof manager.warm !== "function") return Promise.resolve();
+    if (!nativeStageWarmPromise) {
+      nativeStageWarmPromise = manager.warm().catch((error) => {
+        nativeStageWarmPromise = undefined;
+        throw error;
+      });
+    }
+    return nativeStageWarmPromise;
+  };
+  if (ownsManager && stageDeps.nativeHostPath && !isAgentContext(stageDeps.env ?? process.env)) {
+    // Start the persistent helper during broker initialization so the first
+    // owner task does not pay process startup and UIA DLL load latency.
+    void warmNativeStageHost().catch((error) => {
+      process.stderr.write(`[native-stage-host-warm] ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+  }
   const activeTimingTasks = new Map<string, string>();
   const driver = input.driver ?? createCuaStageDriver({
     stage: stageDeps,
@@ -293,16 +308,24 @@ export function createTaskDesktopStageService(input: {
         // views are commonly hosted by ApplicationFrameHost.exe while their
         // top-level class is only ApplicationFrameWindow.
         appName: window.processName ?? window.className ?? "",
+        processPath: window.processPath ?? undefined,
+        appUserModelId: window.appUserModelId ?? undefined,
+        zOrder: window.zOrder,
         title: window.title,
         width: window.width,
         height: window.height,
         isOnScreen: true,
         minimized: false,
       }));
-    } catch {
-      return driver.listVisibleWindows({ onScreenOnly: false });
+    } catch (error) {
+      // App launch matching must use one authoritative identity source. The
+      // retired Cua inventory does not expose the packaged app identity and
+      // can turn generic ApplicationFrameHost HWNDs into false candidates.
+      // Surface native inventory failure instead of silently mixing engines.
+      throw new Error(`Native Windows window inventory failed; no app window was selected from a fallback inventory. ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
   };
+  const windowIdentityKey = (window: { pid: number; windowId: string }) => `${window.pid}:${window.windowId.toLowerCase()}`;
   const readPolicy = input.readPolicy ?? (() => readTaskStagePolicy(root));
   // Serialize preparations so duplicate deliveries cannot create duplicate desktops --
   // but ONE queue per stage name, not one for the whole broker. A single shared queue
@@ -562,8 +585,9 @@ export function createTaskDesktopStageService(input: {
       const existing = manager.list().find((stage) => stage.name === name);
       let assignedStage: ReturnType<typeof manager.assignAgent> | undefined;
       if (mode === "background") {
-        if (existing) await manager.inspectStage(name);
-        else await manager.create(name);
+        // Background is an M9R action-routing mode. The local stage maps to an
+        // HWND on the normal Windows desktop; it never creates or switches OS desktops.
+        if (!existing) await manager.ensureStage(name);
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
       } else {
         if (options.bindForeground) {
@@ -572,13 +596,13 @@ export function createTaskDesktopStageService(input: {
           // Never bind M9R's own overlay or a hidden/minimized window. This
           // keeps "look at my screen" from targeting the control surface that
           // is issuing the request.
-          if (!foreground.visible || foreground.minimized || !foreground.onCurrentDesktop) {
-            throw new Error("The current foreground window is not visible on the owner's desktop.");
+          if (!foreground.visible || foreground.minimized) {
+            throw new Error("The current foreground window is not visible.");
           }
           if (/\bm9r\b|m9r[-_ ]?(?:overlay|pill|broker)/i.test(`${foreground.title} ${foreground.className}`)) {
             throw new Error("The current foreground window is M9R's own overlay; focus the app you want the agent to inspect.");
           }
-          await manager.adoptCurrentDesktop(name);
+          await manager.ensureStage(name);
           const attached = await manager.attachWindow(name, String(foreground.pid), foreground.windowId);
           assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
           ownedApps.set(name, { taskId, appId: "", pid: foreground.pid, windowId: foreground.windowId, ownsProcess: false });
@@ -586,30 +610,18 @@ export function createTaskDesktopStageService(input: {
             throw new Error("Windows did not confirm the current foreground window binding.");
           }
         } else {
-        // Owner preview is desktop-wide, follows the desktop the user is
-        // viewing now, and detaches only stale registry HWND metadata. It never
-        // creates, activates, moves, or closes a desktop or user window.
+        // Owner preview binds to the owner's current screen and keeps an exact
+        // HWND anchor. It never creates, moves, or closes a Windows desktop.
         recoverPersistedApp(name, taskId);
-        let retainSelection = false;
         // `name` is one stage per authenticated identity/session (see authorize()), so
         // `ownedApps.get(name)` holds at most one entry regardless of which taskId that
         // session is currently using -- the real continuation boundary is "this stage
         // already has a selected app", not "the exact same taskId selected it". A real
         // session naturally issues a fresh taskId per request even mid-task.
-        if (existing?.anchor) {
-          try {
-            const inspected = await manager.inspectStage(name);
-            retainSelection = inspected.desktop.isCurrent;
-          } catch {
-            // A closed or moved window must be rebound to the owner's desktop.
-          }
-        }
-        if (!retainSelection && !existing?.anchor) {
-          await manager.adoptCurrentDesktop(name);
-        }
+        if (!existing) await manager.ensureStage(name);
         // Keep the durable exact-window anchor when inspection fails. act()
-        // distinguishes gone windows (recover once) from moved/unknown windows
-        // (refuse without spawning). Clearing it here destroys that evidence,
+        // distinguishes a genuinely gone window (recover once) from an unknown
+        // inspection outcome (do not spawn). Clearing it here destroys evidence,
         // including for a fresh broker that must recover from disk.
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
         }
@@ -687,7 +699,6 @@ export function createTaskDesktopStageService(input: {
           windowId = replacement.windowId;
           process.stderr.write(`[stage-recovery] ${taskId}: stale window handle ${selected.windowId}; rebinding same-process window ${windowId}\n`);
         }
-        await manager.adoptCurrentDesktop(name);
         await manager.presentOwnerWindow(name, selected.pid, windowId, coordinationKey);
         await manager.attachWindow(name, String(selected.pid), windowId, selected.appId || undefined, coordinationKey);
         if (windowId !== selected.windowId) {
@@ -699,23 +710,13 @@ export function createTaskDesktopStageService(input: {
       try {
         inspected = await manager.inspectStage(name);
       } catch (error) {
-        // A moved window is recoverable without a relaunch: verify the same
-        // PID/window identity, rebind the owner-preview desktop, and present
-        // that exact window. Only a genuinely closed/gone window justifies
-        // launching a replacement. A helper timeout or malformed response
-        // remains an error; it is never guessed to be a closed app.
+        // Only a genuinely closed/gone window justifies launching a replacement.
+        // A helper timeout or malformed response remains an error; it is never
+        // guessed to be a closed app.
         const ownedBeforeFailure = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
-        if (isStageWindowMovedError(error) && mode === "owner-preview" && ownedBeforeFailure) {
-          const recoveryStartedAt = Date.now();
-          process.stderr.write(`[stage-recovery] ${taskId}: exact window moved desktops; re-presenting it on the owner desktop\n`);
-          inspected = await rePresentLiveWindow(ownedBeforeFailure);
-          process.stderr.write(`[stage-recovery] ${taskId}: re-presentation completed after ${Date.now() - recoveryStartedAt}ms\n`);
-          recoveryNotice = "The exact application window was on another Windows desktop and was re-presented on the owner’s current desktop; its state was preserved.";
-        } else {
-          // "anchor moved to another desktop", a helper timeout, or any other
-          // inspection failure means a live window may still exist; do not
-          // create a needless second instance alongside it.
-          if (!isStageWindowGoneError(error)) throw error;
+        // A helper timeout or other inspection failure means a live window may
+        // still exist; do not create a needless second instance alongside it.
+        if (!isStageWindowGoneError(error)) throw error;
         // The window this stage previously owned is gone -- closed, crashed, or
         // otherwise invalid. Relaunch the exact same app once and retry, instead
         // of failing the whole action just because the target disappeared since
@@ -754,11 +755,10 @@ export function createTaskDesktopStageService(input: {
         } else {
           throw error;
         }
-        }
       }
       const selected = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
-      // The selected app is the default target after launch. Explicit desktop
-      // actions detach only the view anchor; the selected app remains available.
+      // The selected app is the default target after launch. Explicit screen
+      // observation can detach only the view anchor; the selected app remains available.
       // `name` is one stage per identity/session (see authorize()): `selected`, if
       // present, already belongs to this exact request's session regardless of
       // which taskId originally selected it -- a real session naturally issues a
@@ -769,7 +769,7 @@ export function createTaskDesktopStageService(input: {
         ? action
         : { ...action, view: action.view ?? (selected ? "app" : "desktop") };
       if (mode === "owner-preview" && effectiveAction.view === "desktop" && inspected.anchor) {
-        await manager.adoptCurrentDesktop(name);
+        await manager.clearOwnedAnchor(name, inspected.anchor.pid, inspected.anchor.windowId);
         inspected = await manager.inspectStage(name);
       } else if (mode === "owner-preview" && effectiveAction.view === "app" && !inspected.anchor && selected) {
         await manager.attachWindow(name, String(selected.pid), selected.windowId, selected.appId || undefined);
@@ -777,11 +777,6 @@ export function createTaskDesktopStageService(input: {
       }
       if (effectiveAction.view === "app" && (!selected || !inspected.anchor)) {
         throw new Error("This task has no selected application window. Open the requested app before using the app view.");
-      }
-      if (mode === "owner-preview" && !inspected.desktop.isCurrent) {
-        if (!selected) throw new Error("The owner-visible preview stage is not on the owner's current desktop.");
-        inspected = await rePresentLiveWindow(selected);
-        recoveryNotice = "The exact application window was on another Windows desktop and was re-presented on the owner’s current desktop; its state was preserved.";
       }
       if (recoveryNotice && action.kind !== "capture" && action.kind !== "read_structure") {
         // Rebinding invalidates the old observation. Ask the caller to re-plan
@@ -995,6 +990,10 @@ export function createTaskDesktopStageService(input: {
       const { name, identity, task } = authorize(token, taskId, mode);
       const coordinationKey = mode === "owner-preview" ? stageCoordinationKey(task.goal) : undefined;
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
+      // Broker startup warming is intentionally asynchronous, but app launch
+      // must not race that warm-up and accidentally make the first task pay
+      // cold helper startup while other desktop requests are already queued.
+      await warmNativeStageHost();
       // m9r_stage_app is itself a desktop operation and may be the first tool
       // call in a task. Establish the provider's visible overlay before any
       // window discovery, launch, or focus-related work begins.
@@ -1070,17 +1069,27 @@ export function createTaskDesktopStageService(input: {
       if (priorOwned && priorOwned.appId === appId) {
         let sameWindowIsRunning = false;
         try {
-          const inspected = await manager.inspectStage(name);
-          sameWindowIsRunning = inspected.anchor?.pid === priorOwned.pid && inspected.anchor.windowId === priorOwned.windowId;
-          if (sameWindowIsRunning && mode === "owner-preview" && !inspected.desktop.isCurrent) await manager.adoptCurrentDesktop(name);
+          // A PID/HWND/process-generation match only proves that the same
+          // process still owns that numeric window handle. ApplicationFrameHost
+          // can reuse one long-lived HWND for a different packaged app, so a
+          // persisted stage anchor is not proof that this is still the app the
+          // task selected. Recheck the app identity from the live native
+          // inventory before treating a saved anchor as an already-open app.
+          const liveWindows = await manager.listOwnedWindowsForProcess(priorOwned.pid);
+          const live = liveWindows.find((window) => window.windowId.toLowerCase() === priorOwned.windowId.toLowerCase());
+          sameWindowIsRunning = Boolean(live && stageWindowMatchesApp({
+            pid: live.pid,
+            windowId: live.windowId,
+            appName: live.processName ?? live.className ?? "",
+            processName: live.processName,
+            processPath: live.processPath,
+            appUserModelId: live.appUserModelId,
+            title: live.title,
+          }, approved));
         } catch (error) {
-          if (mode === "owner-preview" && isStageWindowMovedError(error)) {
-            // Verify the exact live identity before clearing registry metadata.
-            const live = await manager.inspectWindow(String(priorOwned.pid), priorOwned.windowId);
-            sameWindowIsRunning = live.pid === priorOwned.pid && live.windowId === priorOwned.windowId;
-            if (sameWindowIsRunning) await manager.adoptCurrentDesktop(name);
-          } else if (!isStageWindowGoneError(error)) {
-            // Timeouts and malformed inspection responses never imply closure.
+          if (!isStageWindowGoneError(error)) {
+            // Timeouts and malformed inspection responses never imply that
+            // the prior app is gone, and must not trigger a duplicate launch.
             throw error;
           }
         }
@@ -1091,12 +1100,16 @@ export function createTaskDesktopStageService(input: {
           }
           return finishLaunch({ name, taskId, appId, running: true });
         }
+        // The numeric handle still existed but now belongs to another app.
+        // Retire only this stale identity mapping; never close or mutate the
+        // window that currently occupies it.
+        manager.clearOwnedAnchor(name, priorOwned.pid, priorOwned.windowId);
+        ownedApps.delete(name);
+        browserSpaces.remove(`space-${name}`);
       }
       if (mode === "owner-preview") {
         const preLoopStartedAt = Date.now();
-        process.stderr.write(`[stage-launch-pre] ${taskId}: calling adoptCurrentDesktop\n`);
-        await manager.adoptCurrentDesktop(name);
-        process.stderr.write(`[stage-launch-pre] ${taskId}: adoptCurrentDesktop done after ${Date.now() - preLoopStartedAt}ms, calling listVisibleWindows\n`);
+        await manager.ensureStage(name);
         const before = await listVisibleWindows();
         process.stderr.write(`[stage-launch-pre] ${taskId}: listVisibleWindows done after ${Date.now() - preLoopStartedAt}ms total, found ${before.length} windows\n`);
         const kind = stageBrowserKind(approved.executable);
@@ -1106,24 +1119,32 @@ export function createTaskDesktopStageService(input: {
         // lease is shared only for the same hashed intent; unrelated stages
         // remain isolated and cannot silently adopt one another's HWND.
         if (coordinationKey) {
-          const coordinated = [] as Array<{ pid: number; windowId: string }>;
+          const coordinated = [] as Array<Parameters<typeof selectTargetAppWindow>[0][number]>;
           for (const candidate of manager.list().filter((stage) => stage.name !== name
             && stage.appId === appId && stage.coordinationKey === coordinationKey && stage.anchor)) {
             try {
               const inspected = await manager.inspectStage(candidate.name);
-              if (!inspected.desktop.isCurrent || !inspected.anchor) continue;
+              if (!inspected.anchor) continue;
               // Cross-check against the live window inventory before trusting another
               // stage's anchor: a coordination group can carry forward a stale anchor
               // (e.g. a shell/desktop window mistakenly captured by an earlier launch)
               // that stageWindowMatchesApp would otherwise have refused to join.
-              const live = before.find((window) => window.pid === inspected.anchor!.pid && window.windowId === inspected.anchor!.windowId);
-              if (live && !stageWindowMatchesApp(live, approved)) continue;
-              coordinated.push(inspected.anchor);
+              const live = before.find((window) => window.pid === inspected.anchor!.pid
+                && window.windowId.toLowerCase() === inspected.anchor!.windowId.toLowerCase());
+              // A durable registry anchor is only a hint. It must still exist
+              // in the current native inventory and match this app's exact
+              // identity before it can be joined.
+              if (!live || !stageWindowMatchesApp(live, approved)) continue;
+              coordinated.push(live);
             } catch { /* stale groups are retained as recovery evidence, not adopted */ }
           }
-          if (coordinated.length > 1) throw new Error("Multiple live windows are already assigned to this joint task; owner selection is required.");
-          if (coordinated.length === 1) {
-            const selected = coordinated[0]!;
+          if (coordinated.length > 0) {
+            let foreground: Awaited<ReturnType<typeof manager.currentForegroundWindow>> | undefined;
+            if (coordinated.length > 1) {
+              try { foreground = await manager.currentForegroundWindow(); } catch { /* Win32 z-order remains the fallback among exact matches. */ }
+            }
+            const selected = selectTargetAppWindow(coordinated, foreground);
+            if (!selected) throw new Error("The coordinated app window disappeared before it could be joined.");
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
             ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
@@ -1133,13 +1154,18 @@ export function createTaskDesktopStageService(input: {
           }
         }
         const existingMatches = kind ? undefined : await matchesLaunchedWindows(before);
-        if (existingMatches && existingMatches.length > 1) throw new Error("The requested application has multiple visible windows; owner selection is required before joining one.");
-        let existing = kind ? selectExistingPersonalBrowserWindow(kind, before) : existingMatches?.[0];
-        if (kind && !existing && hasAmbiguousExistingPersonalBrowserWindow(kind, before)) {
-          try {
-            existing = selectExistingPersonalBrowserWindow(kind, before, await manager.currentForegroundWindow());
-          } catch { /* If the OS cannot identify its active HWND, do not guess among user-owned windows. */ }
+        let foreground: Awaited<ReturnType<typeof manager.currentForegroundWindow>> | undefined;
+        if ((existingMatches?.length ?? 0) > 1 || (kind && hasAmbiguousExistingPersonalBrowserWindow(kind, before))) {
+          try { foreground = await manager.currentForegroundWindow(); } catch { /* Exact candidates and native Z order remain available. */ }
         }
+        // Windows can recycle an ApplicationFrameWindow HWND while switching
+        // the hosted app view. Track the target app identity before launch,
+        // rather than every HWND, so a reused frame can still prove that the
+        // requested app appeared with its exact AUMID after activation.
+        const beforeTargetWindowKeys = new Set((existingMatches ?? []).map(windowIdentityKey));
+        const existing = kind
+          ? selectExistingPersonalBrowserWindow(kind, before, foreground)
+          : selectTargetAppWindow(existingMatches ?? [], foreground);
         if (existing) {
           authorize(token, taskId, mode);
           if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
@@ -1156,7 +1182,7 @@ export function createTaskDesktopStageService(input: {
         // page; that route is now permanently disabled (Finding C, WEB_EXTENSION_ROUTE_ENABLED
         // in mcp-server.ts), so the thing this was protecting against no longer exists. Existing
         // personal windows are adopted above and are never replaced by this fallback.
-        const beforeKeys = new Set(before.map((window) => `${window.pid}:${window.windowId}`));
+        const beforeKeys = new Set(before.map(windowIdentityKey));
         const launchSpec = kind
           ? ownedBrowserLaunch(root, name, approved)
           : approved;
@@ -1184,16 +1210,19 @@ export function createTaskDesktopStageService(input: {
             }
             // Windows packaged apps may delegate to another PID. Select the new
             // exact window of the resolved executable, never the launcher stub.
-            const newWindows = windows.filter((window) => !beforeKeys.has(`${window.pid}:${window.windowId}`));
-            const matches = await matchesLaunchedWindows(newWindows);
+            const appMatches = await matchesLaunchedWindows(windows);
+            const matches = appMatches.filter((window) => !beforeTargetWindowKeys.has(windowIdentityKey(window)));
             // Chromium can briefly expose several delegated HWND records for
             // one --new-window launch (renderer/helper/host). Use the same
             // eligibility/ranking policy as existing-browser adoption instead
             // of treating the broad launch inventory as user ambiguity.
+            let currentForeground: Awaited<ReturnType<typeof manager.currentForegroundWindow>> | undefined;
+            if (matches.length > 1) {
+              try { currentForeground = await manager.currentForegroundWindow(); } catch { /* Exact identity and z-order determine the fallback. */ }
+            }
             const selected = kind
               ? selectPersonalBrowserWindow(kind, matches, beforeKeys)
-              : matches.length === 1 ? matches[0] : undefined;
-            if (!selected && matches.length > 1 && !kind) throw new Error("The requested application opened multiple windows; select the intended window before continuing.");
+              : selectTargetAppWindow(matches, currentForeground);
             if (selected) {
               ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
               bindBrowserSpace(name, approved.executable, selected.pid, selected.windowId);
@@ -1238,7 +1267,11 @@ export function createTaskDesktopStageService(input: {
         ownedApps.delete(name);
         browserSpaces.remove(`space-${name}`);
       }
-      if (!manager.list().some((stage) => stage.name === name)) await manager.create(name);
+      if (!manager.list().some((stage) => stage.name === name)) {
+        // The stage is a broker-side identity map. It does not create or
+        // switch Windows desktops as a side effect of app launch.
+        await manager.ensureStage(name);
+      }
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       const browserKind = stageBrowserKind(approved.executable);
@@ -1248,7 +1281,9 @@ export function createTaskDesktopStageService(input: {
       // to hand the request to another process and exit immediately; the new
       // window, not the launcher PID, is the durable ownership signal.
       const beforeLaunchWindows = await listVisibleWindows();
-      const beforeLaunchWindowKeys = new Set(beforeLaunchWindows.map((window) => `${window.pid}:${window.windowId}`));
+      const beforeLaunchWindowKeys = new Set(beforeLaunchWindows.map(windowIdentityKey));
+      const beforeTargetWindows = await matchesLaunchedWindows(beforeLaunchWindows);
+      const beforeTargetWindowKeys = new Set(beforeTargetWindows.map(windowIdentityKey));
       const beforeBrowserWindows = personalBrowser ? beforeLaunchWindowKeys : undefined;
       const child = launchStageApp(ownedBrowserLaunch(root, name, approved), { windowsHide: true, cwd: stageAppLaunchCwd(task.cwd) });
       let spawnError: Error | undefined;
@@ -1266,7 +1301,7 @@ export function createTaskDesktopStageService(input: {
           }
           let selectedPid = child.pid;
           let selectedWindowId: string | undefined;
-          let candidateWindows: Array<{ pid: number; windowId: string; title?: string; width?: number; height?: number }>;
+          let candidateWindows: BrowserWindowCandidate[];
           if (personalBrowser) {
             const candidate = selectPersonalBrowserWindow(browserKind!, await listVisibleWindows(), beforeBrowserWindows!);
             if (!candidate) {
@@ -1282,38 +1317,46 @@ export function createTaskDesktopStageService(input: {
             // existing/app-model process before the child receives its exit
             // event. The pre-launch snapshot prevents adopting an unrelated
             // already-open window.
-            let exactProcessWindows: Array<{ pid: number; windowId: string; title?: string; width?: number; height?: number }> = [];
+            let exactProcessWindows: BrowserWindowCandidate[] = [];
             try {
-              exactProcessWindows = await manager.listOwnedWindowsForProcess(processPid);
+              exactProcessWindows = (await manager.listOwnedWindowsForProcess(processPid)).map((window) => ({
+                ...window,
+                appName: window.processName ?? window.className ?? "",
+                ...(window.processPath ? { processPath: window.processPath } : {}),
+                ...(window.appUserModelId ? { appUserModelId: window.appUserModelId } : {}),
+              })).filter((window) => stageWindowMatchesApp(window, approved));
             } catch {
               // A launcher can disappear before its transient process can be
               // enumerated. The desktop-wide window snapshot below remains
               // the safe hand-off path.
             }
+            // A launcher PID is not automatically the app window identity.
+            // AppsFolder and other delegated launches can use Explorer as a
+            // dispatcher; only keep same-process HWNDs that also prove the
+            // resolved target's exact app identity.
             const visibleWindows = await listVisibleWindows();
-            const delegatedWindows = await matchesLaunchedWindows(visibleWindows.filter((window) => !beforeLaunchWindowKeys.has(`${window.pid}:${window.windowId}`)));
+            const delegatedWindows = (await matchesLaunchedWindows(visibleWindows))
+              .filter((window) => !beforeTargetWindowKeys.has(windowIdentityKey(window)));
             const candidates = [...exactProcessWindows, ...delegatedWindows.filter((window) =>
               !exactProcessWindows.some((exact) => exact.pid === window.pid && exact.windowId === window.windowId))];
             candidateWindows = candidates;
-            if (candidateWindows.length === 1) selectedPid = candidateWindows[0]!.pid;
+            const selected = selectTargetAppWindow(candidateWindows);
+            if (selected) selectedPid = selected.pid;
           }
-          if (candidateWindows.length > 1) throw new Error("The approved app has multiple candidate windows; owner selection is required.");
-          if (candidateWindows.length === 1) {
+          const selectedWindow = selectTargetAppWindow(candidateWindows);
+          if (selectedWindow) {
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-            selectedWindowId = candidateWindows[0]!.windowId;
+            selectedWindowId = selectedWindow.windowId;
+            selectedPid = selectedWindow.pid;
             if (selectedPid === undefined) throw new Error("The approved app did not expose a process id.");
             const ownedPid = selectedPid;
-            await manager.moveOwnedWindow(name, ownedPid, selectedWindowId);
+            // App launch binds the exact HWND on the owner's visible desktop.
+            // The retired background-stage path moved this window through
+            // private virtual-desktop APIs, which made ordinary launches slow
+            // and could leave the owner unable to see or target the app.
+            await manager.presentOwnerWindow(name, ownedPid, selectedWindowId);
             await manager.attachWindow(name, String(ownedPid), selectedWindowId, appId);
-            try {
-              authorize(token, taskId, mode);
-              if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-              await manager.showOwnedWindow(name);
-              authorize(token, taskId, mode);
-              if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-            }
-            catch (error) { manager.clearOwnedAnchor(name, ownedPid, selectedWindowId); throw error; }
             ownedApps.set(name, {
               taskId,
               appId,
