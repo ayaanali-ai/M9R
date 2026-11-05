@@ -30,6 +30,9 @@ function fixture() {
   let unlabeled = false;
   let popupCaptureFallback = false;
   let structureCoverage: Record<string, unknown> | undefined;
+  let desktopWindows: Array<Record<string, unknown>> | undefined;
+  let structureScreenRect: Record<string, number> | undefined;
+  let stageWindowFrame: { requested: { x: number; y: number; width: number; height: number }; actual: { x: number; y: number; width: number; height: number }; verified: boolean } | undefined;
   let activeTaskId = "T1";
   let clockMs: number | undefined;
   const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString() });
@@ -41,6 +44,8 @@ function fixture() {
       actionsSent.push(input);
       if (action.kind === "read_structure") return { ok: true, result: { status: unlabeled ? "complete" : "partial", capturedAt: new Date().toISOString(),
         ...(structureCoverage ? { coverage: structureCoverage } : {}),
+        ...(structureScreenRect ? { screenRect: structureScreenRect } : {}),
+        ...(desktopWindows ? { scope: "desktop", windows: desktopWindows } : {}),
         elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: "Button", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
       if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched", gateCode: "foreground-lease" };
       if (failure === "uncertain") throw new Error("Response lost after input");
@@ -49,9 +54,11 @@ function fixture() {
           ? { status: "partial", completedSteps: 1, totalSteps: 2, stoppedAt: "enter", message: "Owner interaction paused before Enter; no key was sent." }
           : { status: "complete", completedSteps: 2, totalSteps: 2 },
         operationReceipt: { status: "applied" }, actionExecuted: true } };
-      const outcome = (input as { kind: string; view?: string }).kind === "click" && (input as { view?: string }).view === "popup"
-        ? { status: "unverified", foregroundConfirmed: true }
-        : { status: "confirmed" };
+      const outcome = action.kind === "window_frame" && stageWindowFrame
+        ? { status: stageWindowFrame.verified ? "confirmed" : "partial", windowFrame: stageWindowFrame }
+        : action.kind === "click" && (input as { view?: string }).view === "popup"
+          ? { status: "unverified", foregroundConfirmed: true }
+          : { status: "confirmed" };
       return { ok: true, result: { ...(popupCaptureFallback && (input as { view?: string }).view === "popup" ? { captureScope: "popup" } : {}),
         capture: capture(), outcome, operationReceipt: { status: "applied" }, actionExecuted: true } };
     },
@@ -63,6 +70,9 @@ function fixture() {
   return { calls, actionsSent, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     setPopupCaptureFallback: () => { popupCaptureFallback = true; },
     setCoverage: (value: Record<string, unknown>) => { structureCoverage = value; },
+    setDesktopWindows: (value: Array<Record<string, unknown>>) => { desktopWindows = value; },
+    setStructureScreenRect: (value: Record<string, number>) => { structureScreenRect = value; },
+    setWindowFrameOutcome: (value: NonNullable<typeof stageWindowFrame>) => { stageWindowFrame = value; },
     setBatchFailure: (value: typeof batchFailure) => { batchFailure = value; },
     setNow: (value: number) => { clockMs = value; },
     call: async (name: string, input: Record<string, unknown>) => (await handlers.get(name)!(input)).structuredContent,
@@ -128,6 +138,44 @@ test("desktop observation exposes only the bounded scroll-coverage contract", as
       { scope: "window", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
     assert.equal(JSON.stringify(observed.observation).includes("must-not-leak"), false);
     assert.equal(JSON.stringify(observed.observation).includes("\"max\""), false);
+  } finally { f.close(); }
+});
+
+test("computer-use observation preserves absolute window bounds separately from screenshot-local bounds", async () => {
+  const f = fixture(); try {
+    f.setDesktopWindows([{ ref: "desktop-window-1", appName: "editor.exe", title: "Document",
+      rect: { x: 120, y: 20, width: 800, height: 600 },
+      screenRect: { x: -1800, y: 60, width: 800, height: 600 },
+      elements: [] }]);
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const windows = (observed.observation.structure as unknown as { windows: Array<Record<string, unknown>> }).windows;
+    assert.deepEqual(windows[0]?.rect, { x: 120, y: 20, width: 800, height: 600 });
+    assert.deepEqual(windows[0]?.screenRect, { x: -1800, y: 60, width: 800, height: 600 });
+    assert.equal(JSON.stringify(windows).includes("windowId"), false, "opaque native handles never leave the stage boundary");
+  } finally { f.close(); }
+});
+
+test("app observation exposes its absolute screen frame for later generic window placement", async () => {
+  const f = fixture(); try {
+    f.setStructureScreenRect({ x: -1200, y: 40, width: 900, height: 700 });
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    assert.deepEqual((observed.observation.structure as unknown as { screenRect: unknown }).screenRect,
+      { x: -1200, y: 40, width: 900, height: 700 });
+  } finally { f.close(); }
+});
+
+test("computer-use resize result carries the requested and actual native frame", async () => {
+  const f = fixture(); try {
+    f.setStructureScreenRect({ x: 100, y: 50, width: 700, height: 500 });
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const requested = { x: 120, y: 70, width: 1, height: 1 };
+    const actual = { x: 120, y: 70, width: 320, height: 200 };
+    f.setWindowFrameOutcome({ requested, actual, verified: false });
+    const result = await f.call("m9r_computer_action", { action: {
+      kind: "window_frame", operationId: "window-frame-adjusted", targetId: observed.target.targetId,
+      targetRevision: observed.target.revision, ...requested,
+    } });
+    assert.deepEqual(result.result.windowFrame, { requested, actual, verified: false });
   } finally { f.close(); }
 });
 

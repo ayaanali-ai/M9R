@@ -678,7 +678,10 @@ export function createTaskDesktopStageService(input: {
       if (action.kind === "window_status") {
         const selected = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
         if (!selected) throw new Error("This session has no selected application window.");
-        return { windowState: await manager.windowStatus(selected.pid, selected.windowId) };
+        const windowState = await manager.windowStatus(selected.pid, selected.windowId);
+        return windowState === "closed" || windowState === "minimized"
+          ? { windowState }
+          : { windowState, frame: await manager.windowRect(selected.pid, selected.windowId) };
       }
       const rePresentLiveWindow = async (selected: OwnedStageApp): Promise<Awaited<ReturnType<typeof manager.inspectStage>>> => {
         const previousStage = manager.list().find((stage) => stage.name === name);

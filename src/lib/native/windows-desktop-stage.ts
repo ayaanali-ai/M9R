@@ -1115,7 +1115,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   async function setWindowFrame(pid: number, windowId: string, frame: { x: number; y: number; width: number; height: number }) {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
-    if (![frame.x, frame.y, frame.width, frame.height].every(Number.isFinite) || frame.width < 80 || frame.height < 60) {
+    if (![frame.x, frame.y, frame.width, frame.height].every(Number.isSafeInteger)
+      || frame.x < -16_383 || frame.x > 16_383 || frame.y < -16_383 || frame.y > 16_383
+      || frame.width < 1 || frame.width > 16_383 || frame.height < 1 || frame.height > 16_383) {
       throw new Error("Invalid native window frame.");
     }
     const result = await invokeNative({ op: "setWindowFrame", pid, windowId, ...frame });

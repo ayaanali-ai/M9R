@@ -965,8 +965,11 @@ mod platform {
         };
         let x = integer("x")?;
         let y = integer("y")?;
-        let width = integer("width")?.max(80);
-        let height = integer("height")?.max(60);
+        let width = integer("width")?;
+        let height = integer("height")?;
+        if width <= 0 || height <= 0 {
+            return Err("window frame width and height must be positive".into());
+        }
         const SWP_NOACTIVATE: u32 = 0x0010;
         const SWP_SHOWWINDOW: u32 = 0x0040;
         if unsafe {

@@ -14,6 +14,7 @@ type NativeStageFixture = {
   state?: Record<string, unknown>;
   windows?: Array<Record<string, unknown>>;
   screenSize?: { width: number; height: number };
+  desktopOrigin?: { x: number; y: number };
   foregroundWindow?: { pid: number; windowId: string; title?: string; className?: string; visible?: boolean; minimized?: boolean };
   responses?: Record<string, Record<string, unknown>>;
   responseSequences?: Record<string, Record<string, unknown>[]>;
@@ -148,6 +149,20 @@ test("app captures expose bounded accessibility targets in screenshot coordinate
   assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 20, y: 20, width: 200, height: 40 } }]);
 }));
 
+test("app structure exposes its absolute window frame separately from local element coordinates", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const state = { pid: 4321, windowId: BigInt(windowId), appName: "Test App", windowTitle: "Window",
+    screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: -1200, y: 80, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }],
+    elements: [{ label: "Search", role: "Edit", enabled: true, frame: { x: -1180, y: 100, w: 200, h: 40 } }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, state, calls: [] }) as never });
+  const structure = await driver.readStructure("stage");
+  assert.deepEqual(structure.screenRect, { x: -1200, y: 80, width: 400, height: 200 });
+  assert.deepEqual(structure.elements[0]?.rect, { x: 20, y: 20, width: 200, height: 40 });
+  await driver.shutdown();
+}));
+
 test("structure completeness does not imply offscreen content is absent", async () => withRoot(async (root) => {
   await registerStage(root);
   const state = { pid: 4321, windowId: BigInt(windowId), appName: "File Explorer", windowTitle: "Documents",
@@ -200,6 +215,63 @@ test("desktop coverage aggregates generic scroll evidence per visible window", a
   const structure = await driver.readDesktopStructure("preview", identity);
   assert.deepEqual(structure.coverage, { scope: "desktop", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
   assert.deepEqual(structure.windows[0]?.coverage, { scope: "window", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
+  await driver.shutdown();
+}));
+
+test("desktop structure keeps screenshot-local click bounds separate from absolute window placement bounds", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "desktop-session" };
+  await registerOwnerPreview(root, identity);
+  setNativeFixture(root, {
+    desktopOrigin: { x: -1920, y: 40 }, screenSize: { width: 1920, height: 1080 },
+    windows: [{ pid: 4321, windowId: BigInt(windowId), appName: "editor.exe", title: "Document",
+      bounds: { x: -1800, y: 60, width: 800, height: 600 }, isOnScreen: true, minimized: false, zIndex: BigInt(1) }],
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [] }) as never });
+  const structure = await driver.readDesktopStructure("preview", identity);
+  assert.deepEqual(structure.windows[0]?.rect, { x: 120, y: 20, width: 800, height: 600 });
+  assert.deepEqual(structure.windows[0]?.screenRect, { x: -1800, y: 60, width: 800, height: 600 });
+  await driver.shutdown();
+}));
+
+test("window_frame reports the exact native frame and selected HWND", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const requested = { x: 120, y: 80, width: 640, height: 480 };
+  setNativeFixture(root, { responses: { setWindowFrame: { ok: true, rect: requested } } });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [] }) as never });
+  const proof = await driver.windowFrame("stage", requested.x, requested.y, requested.width, requested.height);
+  assert.equal(proof.outcome.status, "confirmed");
+  assert.deepEqual(proof.outcome.windowFrame, { requested, actual: requested, verified: true });
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "setWindowFrame" && call.pid === 4321
+    && call.windowId === windowId && call.x === 120 && call.y === 80 && call.width === 640 && call.height === 480));
+  await driver.shutdown();
+}));
+
+test("window_frame reports app or Windows size constraints as partial with the actual frame", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const requested = { x: 120, y: 80, width: 1, height: 1 };
+  const actual = { x: 120, y: 80, width: 320, height: 200 };
+  setNativeFixture(root, { responses: { setWindowFrame: { ok: true, rect: actual } } });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [] }) as never });
+  const proof = await driver.windowFrame("stage", requested.x, requested.y, requested.width, requested.height);
+  assert.equal(proof.outcome.status, "partial");
+  assert.deepEqual(proof.outcome.windowFrame, { requested, actual, verified: false });
+  await driver.shutdown();
+}));
+
+test("snap docks the exact selected window to its fresh monitor work area and reports actual bounds", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const workArea = { x: -1600, y: 40, width: 1600, height: 860 };
+  const frame = { x: -800, y: 40, width: 800, height: 860 };
+  setNativeFixture(root, { responses: {
+    workArea: { ok: true, rect: workArea },
+    setWindowFrame: { ok: true, rect: frame },
+  } });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [] }) as never });
+  const proof = await driver.snapWindow("stage", "right");
+  assert.equal(proof.outcome.status, "confirmed");
+  assert.deepEqual(proof.outcome.windowFrame, { requested: frame, actual: frame, verified: true });
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "workArea" && call.pid === 4321 && call.windowId === windowId));
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "setWindowFrame" && call.pid === 4321 && call.windowId === windowId));
   await driver.shutdown();
 }));
 
@@ -335,7 +407,7 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
         const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=";
         return { ok: true, capture: { dataUrl: `data:image/png;base64,${image}`,
           width: fixture.screenSize?.width ?? 1920, height: fixture.screenSize?.height ?? 1080,
-          originX: 0, originY: 0 } };
+          originX: fixture.desktopOrigin?.x ?? 0, originY: fixture.desktopOrigin?.y ?? 0 } };
       }
       if (request.op === "windowRect") {
         return { ok: true, rect: captureBounds };

@@ -16,6 +16,21 @@ test("visible window inventory keeps ordinary windows whose optional shell ident
     "native JSON nulls mean identity metadata is unavailable, not that the real app window is invalid");
 }));
 
+test("window frame accepts every positive size exposed by the action contract and returns Windows' actual bounds", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const actual = { x: -120, y: 40, width: 240, height: 180 };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => {
+      requests.push(request);
+      return { ok: true, rect: actual };
+    } });
+  assert.deepEqual(await manager.setWindowFrame(anchor.pid, anchor.windowId, { x: -120, y: 40, width: 1, height: 1 }), actual);
+  assert.deepEqual(requests[0], { op: "setWindowFrame", pid: anchor.pid, windowId: anchor.windowId,
+    x: -120, y: 40, width: 1, height: 1 });
+  await assert.rejects(() => manager.setWindowFrame(anchor.pid, anchor.windowId, { x: 0, y: 0, width: 0, height: 100 }), /Invalid native window frame/);
+  assert.equal(requests.length, 1, "invalid geometry is rejected before reaching the native host");
+}));
+
 test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };

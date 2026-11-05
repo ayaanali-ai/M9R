@@ -324,6 +324,12 @@ export const computerUseResultSchema = z.object({
     observedAt: timestampMs,
     evidenceRef: opaqueRef,
   }).strict().optional(),
+  /** Requested and actual native outer-window bounds for resize or placement actions. */
+  windowFrame: z.object({
+    requested: z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(1), height: z.number().int().min(1) }).strict(),
+    actual: z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(1), height: z.number().int().min(1) }).strict(),
+    verified: z.boolean(),
+  }).strict().optional(),
   error: z.object({
     code: z.string().min(1).max(128),
     message: z.string().min(1).max(2_000),

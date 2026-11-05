@@ -48,6 +48,8 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
         title: "Active window", className: "Chrome_WidgetWin_1", visible: true, minimized: false } };
       if (request.op === "listVisibleWindows") return { ok: true, windows: visibleWindows };
       if (request.op === "listOwnedWindows") return { ok: true, windows: visibleWindows.filter((window) => window.pid === Number(request.pid)) };
+      if (request.op === "windowStatus") return { ok: true, windowState: "visible" };
+      if (request.op === "windowRect") return { ok: true, rect: { x: -120, y: 40, width: 640, height: 480 } };
       if (request.op === "presentOwnerWindow") { presentedWindows.push({ pid: Number(request.pid), windowId: String(request.windowId) });
         return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } }; }
       if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } };
@@ -224,6 +226,26 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
       "a newly authorized task in the same authenticated session retains its exact selected window");
     await f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview");
     assert.equal(f.creations(), 0, "launch reuse must not create or query a Windows desktop");
+  } finally { f.cleanup(); }
+});
+
+test("window_status reports native bounds for the exact selected window without relaunching it", async () => {
+  const f = fixture(true, (root, appId) => {
+    assert.equal(appId, "chrome");
+    return { executable: join(root, "chrome.exe"), args: [] };
+  });
+  try {
+    f.setVisibleWindows([{ pid: 321, windowId: "789", processName: "chrome.exe", title: "Personal Chrome", width: 960, height: 640 }]);
+    f.setForegroundWindow(321, "789");
+    await f.service.launch(f.identity.token, f.task.id, "chrome");
+    const status = await f.service.act(f.identity.token, f.task.id, { kind: "window_status", view: "app" }, "owner-preview") as {
+      windowState: string; frame?: { x: number; y: number; width: number; height: number };
+    };
+    assert.equal(status.windowState, "visible");
+    assert.deepEqual(status.frame, { x: -120, y: 40, width: 640, height: 480 });
+    assert.ok(f.nativeOps.includes("windowStatus"));
+    assert.ok(f.nativeOps.includes("windowRect"));
+    assert.equal(f.nativeOps.filter((op) => op === "launch").length, 0, "reading bounds does not launch or replace a window");
   } finally { f.cleanup(); }
 });
 

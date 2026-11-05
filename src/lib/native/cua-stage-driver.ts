@@ -167,6 +167,12 @@ export interface CuaStageActionOutcome {
   status: "confirmed" | "partial" | "unverifiable" | "suspected-noop" | "unverified";
   route?: number;
   summary?: string;
+  /** Exact outer-window bounds observed after a native geometry operation. */
+  windowFrame?: {
+    requested: { x: number; y: number; width: number; height: number };
+    actual: { x: number; y: number; width: number; height: number };
+    verified: boolean;
+  };
   /** The target window was explicitly brought to the OS foreground before delivery. */
   foregroundConfirmed?: true;
 }
@@ -176,6 +182,14 @@ export interface CuaStageActionProof {
   /** Popup-local fallback pixels must never be mistaken for the parent app observation. */
   captureScope?: "app" | "popup";
   outcome: CuaStageActionOutcome;
+}
+
+function sameWindowFrame(
+  requested: { x: number; y: number; width: number; height: number },
+  actual: { x: number; y: number; width: number; height: number },
+): boolean {
+  return requested.x === actual.x && requested.y === actual.y
+    && requested.width === actual.width && requested.height === actual.height;
 }
 
 export interface CuaStageWindowClosedProof {
@@ -210,6 +224,8 @@ export interface CuaStageStructure {
   /** Current viewport was observed; a complete UIA walk does not prove there is no offscreen content. */
   coverage: CuaContentCoverage;
   capturedAt: string;
+  /** Absolute outer-window bounds for window placement; element rects remain screenshot-local. */
+  screenRect?: CuaStageWindowBounds;
   appName?: string;
   windowTitle?: string;
   elements: Array<{
@@ -253,7 +269,10 @@ export interface CuaDesktopStructureWindow {
   ref: string;
   appName: string;
   title: string;
+  /** Screenshot-local bounds used for coordinate actions. */
   rect: { x: number; y: number; width: number; height: number };
+  /** Absolute virtual-screen bounds for window placement, including negative monitor origins. */
+  screenRect: { x: number; y: number; width: number; height: number };
   frontmost?: boolean;
   minimized?: boolean;
   status: "complete" | "partial" | "unavailable";
@@ -1829,6 +1848,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           status: structure.status === "partial" || structure.truncated ? "partial" : "complete",
           coverage: contentCoverage("window", elements.map(({ mapped }) => mapped)),
           capturedAt,
+          ...(frame.windowBounds ? { screenRect: frame.windowBounds } : {}),
           elements: elements.map(({ native, mapped }) => ({
             ref: native.ref, depth: native.depth, role: native.role, label: normalizeAccessibleLabel(native.label) ?? "", enabled: native.enabled,
             actions: mapped.actions, ...(native.actions?.setValue ? { canReplaceValue: true } : {}),
@@ -1841,6 +1861,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         };
       }
       return { status: "unavailable", coverage: contentCoverage("window"), capturedAt,
+        ...(frame.windowBounds ? { screenRect: frame.windowBounds } : {}),
         elements: [], fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now) };
     };
 
@@ -2007,6 +2028,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         if (/m9r(?:[- ]overlay)?|agent cursor overlay|cua cursor overlay/i.test(`${item.className ?? ""} ${item.title}`)) continue;
         const x = Number.isFinite(item.x) ? item.x! : 0;
         const y = Number.isFinite(item.y) ? item.y! : 0;
+        const screenRect = { x, y, width: item.width, height: item.height };
         const rect = { x: x - origin.x, y: y - origin.y, width: item.width, height: item.height };
         if (rect.width <= 0 || rect.height <= 0 || rect.x + rect.width <= 0 || rect.y + rect.height <= 0
           || rect.x >= screen.width || rect.y >= screen.height) continue;
@@ -2043,7 +2065,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           // Preserve the visible window even if one app's UIA provider fails.
           // Its exact screenshot remains available in the returned fallback.
         }
-        windows.push({ ref, appName: (item.processName ?? item.className ?? "").slice(0, 120), title: item.title.slice(0, 240), rect,
+        windows.push({ ref, appName: (item.processName ?? item.className ?? "").slice(0, 120), title: item.title.slice(0, 240), rect, screenRect,
           ...(current && current.pid === item.pid && current.windowId === item.windowId ? { frontmost: true } : {}),
           minimized: false, status, coverage, elements: windowElements });
       }
@@ -3104,8 +3126,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, session, pid, windowId, capture: captureWindow }) => {
       options.signal?.throwIfAborted();
-      await manager.setWindowFrame(pid, windowId.toString(), { x, y, width, height });
-      const outcome: CuaStageActionOutcome = { status: "unverified", summary: "Native window frame was applied; the refreshed capture is the semantic verification." };
+      const requested = { x, y, width, height };
+      const actual = await manager.setWindowFrame(pid, windowId.toString(), requested);
+      const verified = sameWindowFrame(requested, actual);
+      const outcome: CuaStageActionOutcome = {
+        status: verified ? "confirmed" : "partial",
+        summary: verified
+          ? "The selected window now has the requested screen bounds."
+          : `Windows adjusted the selected window bounds; actual frame is ${actual.x},${actual.y},${actual.width},${actual.height}.`,
+        windowFrame: { requested, actual, verified },
+      };
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -3131,8 +3161,15 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           : position === "right" ? { x: work.x + work.width - half(work.width), y: work.y, width: half(work.width), height: work.height }
             : position === "top" ? { x: work.x, y: work.y, width: work.width, height: half(work.height) }
               : { x: work.x, y: work.y + work.height - half(work.height), width: work.width, height: half(work.height) };
-      await manager.setWindowFrame(pid, windowId.toString(), frame);
-      const outcome: CuaStageActionOutcome = { status: "unverified", summary: "Native window frame was applied; the refreshed capture is the semantic verification." };
+      const actual = await manager.setWindowFrame(pid, windowId.toString(), frame);
+      const verified = sameWindowFrame(frame, actual);
+      const outcome: CuaStageActionOutcome = {
+        status: verified ? "confirmed" : "partial",
+        summary: verified
+          ? `The selected window is docked ${position} in its monitor's usable work area.`
+          : `Windows adjusted the selected window bounds while docking ${position}; actual frame is ${actual.x},${actual.y},${actual.width},${actual.height}.`,
+        windowFrame: { requested: frame, actual, verified },
+      };
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }

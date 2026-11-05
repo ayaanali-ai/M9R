@@ -974,6 +974,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         appName: window.appName.slice(0, 120),
         title: window.title.slice(0, 240),
         rect: window.rect,
+        ...(validRect(window.screenRect) ? { screenRect: window.screenRect } : {}),
         ...(window.frontmost === true ? { frontmost: true } : {}),
         ...(typeof window.minimized === "boolean" ? { minimized: window.minimized } : {}),
         ...(window.status === "complete" || window.status === "partial" || window.status === "unavailable" ? { status: window.status } : {}),
@@ -987,6 +988,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       capturedAt: typeof structure.capturedAt === "string" ? structure.capturedAt : new Date(observedAt).toISOString(),
       ...(typeof structure.appName === "string" ? { appName: structure.appName.slice(0, 120) } : {}),
       ...(typeof structure.windowTitle === "string" ? { windowTitle: structure.windowTitle.slice(0, 240) } : {}),
+      ...(validRect(structure.screenRect) ? { screenRect: structure.screenRect } : {}),
       ...(publicContentCoverage(structure.coverage) ? { coverage: publicContentCoverage(structure.coverage) } : {}),
       elements: publicElements,
       ...(publicWindows ? { windows: publicWindows } : {}),
@@ -1735,6 +1737,15 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       const responseMutationRevision = mutationRevisionOf(resultObject?.mutationRevision);
       if (responseMutationRevision !== undefined) record.mutationRevision = responseMutationRevision;
       const outcome = recordOf(resultObject?.outcome);
+      const nativeWindowFrame = recordOf(outcome?.windowFrame);
+      const requestedWindowFrame = recordOf(nativeWindowFrame?.requested);
+      const actualWindowFrame = recordOf(nativeWindowFrame?.actual);
+      const windowFrame = requestedWindowFrame && actualWindowFrame && typeof nativeWindowFrame?.verified === "boolean"
+        && validRect(requestedWindowFrame) && validRect(actualWindowFrame)
+        && [requestedWindowFrame.x, requestedWindowFrame.y, actualWindowFrame.x, actualWindowFrame.y].every(Number.isSafeInteger)
+        ? { requested: requestedWindowFrame as { x: number; y: number; width: number; height: number },
+          actual: actualWindowFrame as { x: number; y: number; width: number; height: number }, verified: nativeWindowFrame.verified }
+        : undefined;
       const batchOutcomeRecord = recordOf(resultObject?.batchOutcome);
       const nativePostcondition = recordOf(resultObject?.postcondition);
       const targetClosed = response.ok && nativePostcondition?.kind === "window-closed" && nativePostcondition.verified === true
@@ -1812,6 +1823,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           ? { operationReceipt: { status: operationReceipt.state, ...(operationReceipt.updatedAt ? { updatedAt: operationReceipt.updatedAt } : {}) } } : {}),
         ...(updated ? { observation: { revision: updated.record.target.revision, observedAt: updated.record.target.observedAt, evidenceRef: updated.record.target.revision } }
           : targetClosed ? { observation: { revision: nativePostcondition!.evidenceRef as string, observedAt: Date.parse(nativePostcondition!.observedAt as string), evidenceRef: nativePostcondition!.evidenceRef as string } } : {}),
+        ...(windowFrame ? { windowFrame } : {}),
         ...(batchOutcomeRecord?.status === "complete" && batchOutcomeRecord.completedSteps === 2
           ? { batchOutcome: { status: "complete" as const, completedSteps: 2, totalSteps: 2 as const } }
           : partialBatch
