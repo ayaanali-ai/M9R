@@ -71,7 +71,6 @@ function runNodeScript(script, env) {
 }
 
 if (!resumePath) {
-  runNodeScript("build-cli.mjs", { M9R_CLI_OUTPUT_DIR: cliOutput });
   runNodeScript("build-engine.mjs", {
     M9R_CLI_OUTPUT_DIR: cliOutput,
     M9R_ENGINE_OUTPUT_DIR: runtimeOutput,

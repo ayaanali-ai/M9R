@@ -1,7 +1,8 @@
 // Build the self-contained M9R runtime: one executable for CLI/MCP and one
 // separately supervised broker executable. Provider lifecycle hooks are not
 // packaged; the broker owns provider processes directly.
-// Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe.
+// The engine builder always regenerates its selected CLI input before bundling.
+// Output: engine/dist/m9r-engine.exe.
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -111,7 +112,18 @@ function isHeldLocalProvenancePath(path) {
   return heldLocalProvenancePatterns.some((pattern) => pattern.test(normalized));
 }
 
-if (!existsSync(join(cliOutput, "m9r.js")) || !existsSync(brokerBundle)) throw new Error(`CLI build output is missing: ${cliOutput}. Run npm run build:cli first or set M9R_CLI_OUTPUT_DIR to its completed output.`);
+const cliBuild = spawnSync(process.execPath, [join(root, "scripts", "build-cli.mjs")], {
+  cwd: root,
+  env: process.env,
+  stdio: "inherit",
+  windowsHide: true,
+});
+if (cliBuild.error || cliBuild.status !== 0) {
+  throw new Error(`The CLI build failed before engine packaging (exit ${cliBuild.status ?? "unknown"}).`, { cause: cliBuild.error });
+}
+if (!existsSync(join(cliOutput, "m9r.js")) || !existsSync(brokerBundle)) {
+  throw new Error(`The engine builder did not produce complete CLI inputs at ${cliOutput}.`);
+}
 rmSync(stableCliOutput, { recursive: true, force: true });
 cpSync(cliOutput, stableCliOutput, { recursive: true });
 const stableBrokerBundle = join(stableCliOutput, "m9r-web-broker.cjs");
