@@ -20,6 +20,12 @@ export function validateCuaDriverHostMetadata(metadata: { driverVersion: string;
   }
 }
 
+export function validateCuaDriverPackageVersion(version: unknown, source: string): void {
+  if (version !== CUA_DRIVER_VERSION) {
+    throw new HostConfigurationError(`${source} is ${String(version)}; M9R requires ${CUA_DRIVER_VERSION}.`);
+  }
+}
+
 export interface CuaDriverSdkConnector {
   CuaDriver: { connect(socketPath: string | undefined): CuaDriverLike };
 }

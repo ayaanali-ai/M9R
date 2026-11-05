@@ -23,6 +23,7 @@
   "claim-approval-auth.test.ts",
   "auth-session-persistence.test.ts",
   "oathlock-cli.test.ts",
+  "cua-driver-host.test.ts",
   "oathlock-bootstrap.test.ts",
   "rule-health.test.ts",
   "agent-session-response.test.ts",

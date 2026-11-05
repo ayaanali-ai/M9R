@@ -5,11 +5,11 @@ import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { defaultStoreRoot } from "./local-store";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ActionResult, ActionTarget, ClickPosition as CuaClickPosition, CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "./desktop-input-errors";
 import { StageCaptureRefreshError } from "./stage-errors";
-import { CUA_DRIVER_VERSION, startCuaDriverHost, type CuaDriverHostConnection } from "./cua-driver-host";
+import { CUA_DRIVER_VERSION, startCuaDriverHost, validateCuaDriverPackageVersion, type CuaDriverHostConnection } from "./cua-driver-host";
 import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type NativeWindowStructureElement, type WindowsSystemControlRequest } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
@@ -521,15 +521,36 @@ function bundledSdkUrl(): string | null {
   let version: unknown;
   try { version = JSON.parse(readFileSync(manifestPath, "utf8")).version; }
   catch { throw new Error("The bundled Cua Driver package metadata is unreadable. Reinstall the M9R Windows runtime."); }
-  if (version !== CUA_DRIVER_VERSION) {
-    throw new Error(`The bundled Cua Driver is ${String(version)}; M9R requires ${CUA_DRIVER_VERSION}. Reinstall the M9R Windows runtime with its matching Cua Driver files.`);
-  }
+  validateCuaDriverPackageVersion(version, "Bundled Cua Driver package");
   return pathToFileURL(entryPath).href;
+}
+
+function installedCuaDriverPackageVersion(): unknown {
+  let directory = dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const packageRoot = join(directory, "node_modules", "@trycua", "cua-driver");
+    const manifestPath = join(packageRoot, "package.json");
+    if (existsSync(manifestPath)) {
+      let metadata: unknown;
+      try { metadata = JSON.parse(readFileSync(manifestPath, "utf8")); }
+      catch (error) { throw new Error(`Installed Cua Driver package metadata is unreadable at ${manifestPath}.`, { cause: error }); }
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+        || (metadata as { name?: unknown }).name !== CUA_PACKAGE) {
+        throw new Error(`Installed Cua Driver package metadata is invalid at ${manifestPath}.`);
+      }
+      return (metadata as { version?: unknown }).version;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) return undefined;
+    directory = parent;
+  }
 }
 
 async function loadCuaSdk(): Promise<CuaSdk> {
   let packageError: unknown;
   try {
+    const packageVersion = installedCuaDriverPackageVersion();
+    validateCuaDriverPackageVersion(packageVersion, "Installed Cua Driver package");
     return normalizeCuaSdk(await import(CUA_PACKAGE), CUA_PACKAGE);
   } catch (error) {
     packageError = error;
