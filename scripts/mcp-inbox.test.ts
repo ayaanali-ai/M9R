@@ -42,6 +42,22 @@ test("desktop stage MCP tools default to the current owner desktop", () => {
   } finally { t.done(); }
 });
 
+test("public stage-action schema exposes popup capture and native filename editing without enabling popup structure routing", () => {
+  const t = setup();
+  try {
+    const tools = (t.server as unknown as ToolServer)._registeredTools;
+    const action = (tools["m9r_stage_action"]?.inputSchema as { shape?: { action?: { parse(value: unknown): unknown } } } | undefined)?.shape?.action;
+    assert.ok(action);
+    assert.deepEqual(action.parse({ kind: "capture", view: "popup" }), { kind: "capture", view: "popup" });
+    assert.deepEqual(action.parse({ kind: "click", view: "popup", x: 45, y: 20 }), { kind: "click", view: "popup", x: 45, y: 20 });
+    assert.deepEqual(action.parse({ kind: "type", view: "popup", mode: "replace", x: 70, y: 22, text: "M9R-demo-smoke.txt" }),
+      { kind: "type", view: "popup", mode: "replace", x: 70, y: 22, text: "M9R-demo-smoke.txt" });
+    assert.deepEqual(action.parse({ kind: "press_key", view: "popup", key: "Enter" }), { kind: "press_key", view: "popup", key: "Enter" });
+    assert.throws(() => action.parse({ kind: "read_structure", view: "popup" }));
+    assert.match(tools["m9r_stage_action"]?.description ?? "", /view=popup[\s\S]*modal dialog[\s\S]*popup-local coordinates/);
+  } finally { t.done(); }
+});
+
 test("desktop stage input derives a private one-shot receipt ID from the MCP request identity", async () => {
   let receivedOperationId = "";
   const web: WebBrokerClient = {

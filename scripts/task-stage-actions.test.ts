@@ -17,6 +17,9 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
   assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", text: "search terms" }), /exact app view/);
   assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "x".repeat(5_001) }), /Invalid stage input text/);
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
+  assert.deepEqual(parseTaskStageAction({ kind: "type", view: "popup", mode: "replace", x: 32, y: 14, text: "M9R-demo-smoke.txt" }),
+    { kind: "type", view: "popup", mode: "replace", x: 32, y: 14, text: "M9R-demo-smoke.txt" });
+  assert.throws(() => parseTaskStageAction({ kind: "type", view: "popup", mode: "replace", text: "filename.txt" }), /Replace text requires an exact field point/);
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
   assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
   assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
@@ -128,6 +131,7 @@ test("text and save shortcuts stay on the selected app while modal controls stay
     hotkey: async (...args: unknown[]) => { calls.push({ method: "hotkey", args }); return proof; },
     capturePopup: async (...args: unknown[]) => { calls.push({ method: "capturePopup", args }); return proof.capture; },
     clickPopup: async (...args: unknown[]) => { calls.push({ method: "clickPopup", args }); return proof; },
+    typeTextPopup: async (...args: unknown[]) => { calls.push({ method: "typeTextPopup", args }); return proof; },
     pressKeyPopup: async (...args: unknown[]) => { calls.push({ method: "pressKeyPopup", args }); return proof; },
   } as unknown as ReturnType<typeof createCuaStageDriver>;
   const identity = { handle: "codex", sessionId: "session" };
@@ -136,14 +140,19 @@ test("text and save shortcuts stay on the selected app while modal controls stay
   await runTaskStageAction(driver, "selected-app", { kind: "hotkey", view: "app", keys: ["Control", "S"] }, identity);
   await runTaskStageAction(driver, "selected-app", { kind: "capture", view: "popup" }, identity);
   await runTaskStageAction(driver, "selected-app", { kind: "click", view: "popup", x: 20, y: 12 }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "type", view: "popup", mode: "replace", x: 40, y: 20, text: "M9R-demo-smoke.txt" }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "type", view: "popup", mode: "insert", text: "M9R-demo-smoke.txt" }, identity);
   await runTaskStageAction(driver, "selected-app", { kind: "press_key", view: "popup", key: "Enter" }, identity);
 
-  assert.deepEqual(calls.map(({ method }) => method), ["typeText", "hotkey", "capturePopup", "clickPopup", "pressKeyPopup"]);
+  assert.deepEqual(calls.map(({ method }) => method), ["typeText", "hotkey", "capturePopup", "clickPopup", "typeTextPopup", "typeTextPopup", "pressKeyPopup"]);
   assert.equal(calls[0]?.args[0], "selected-app", "text is sent through the specifically selected app window");
   assert.equal(calls[1]?.args[0], "selected-app", "the save shortcut is sent through that same app window");
   assert.deepEqual(calls[2]?.args, ["selected-app"], "the modal is captured from the selected app's owned popup");
   assert.equal(calls[3]?.args[0], "selected-app", "popup coordinates are dispatched to the owned popup route");
-  assert.equal(calls[4]?.args[0], "selected-app", "popup confirmation keys are dispatched to the owned popup route");
+  assert.equal(calls[4]?.args[0], "selected-app", "whole-field replacement is dispatched to the popup itself");
+  assert.deepEqual(calls[4]?.args[2], { deliveryMode: "owner-preview", mode: "replace", x: 40, y: 20 });
+  assert.equal(calls[5]?.args[0], "selected-app", "caret insertion after selecting a popup field stays on the popup route");
+  assert.equal(calls[6]?.args[0], "selected-app", "popup confirmation keys are dispatched to the owned popup route");
 });
 
 test("owner-preview app actions preserve semantic delivery until foreground is explicit", async () => {

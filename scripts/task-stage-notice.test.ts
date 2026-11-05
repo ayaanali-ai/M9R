@@ -64,6 +64,9 @@ test("task delivery describes actual stage modes and typed dispatch recovery", a
     assert.match(context, /latest, newest, or most recent[\s\S]*authoritative source[\s\S]*search rank and first-visible position alone are not proof/);
     assert.match(context, /an ad, preview, loading state, or unrelated queued item does not satisfy it/);
     assert.match(context, /Report the observed title\/date and distinguish verified results from missing evidence/);
+    assert.match(context, /For a save or Save As task[\s\S]*active app-owned dialog[\s\S]*filename and location fields/);
+    assert.match(context, /choose Replace only when the task explicitly authorizes overwriting that exact target/);
+    assert.match(context, /reopen the exact requested file[\s\S]*compare its contents with the requested text/);
     assert.doesNotMatch(context, /YouTube|Spotify/);
     assert.doesNotMatch(context, /isolated Windows desktop/);
     assert.match(context, /Preserve existing windows and tabs unless the user asks to change them/);

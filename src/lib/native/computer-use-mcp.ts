@@ -1057,6 +1057,18 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   }
 
   function actionPreflight(record: TargetRecord, action: ComputerUseAction): string | undefined {
+    if (action.kind === "click" && action.targetPopup
+      && (record.context.kind !== "desktop" || record.context.view !== "app" || action.locator.kind !== "point")) {
+      return "Popup clicks require a point on one exact observed app window; no input was sent.";
+    }
+    if (action.kind === "key" && action.targetPopup
+      && (record.context.kind !== "desktop" || record.context.view !== "app")) {
+      return "Popup keys require one exact observed desktop app window; no input was sent.";
+    }
+    if (action.kind === "text" && action.targetPopup
+      && (record.context.kind !== "desktop" || record.context.view !== "app")) {
+      return "Popup text requires one exact observed desktop app window; no input was sent.";
+    }
     const intent = action.intent;
     if (intent && action.kind !== "observe") {
       const controlText = action.kind === "click" && action.locator.kind === "element"
@@ -1087,7 +1099,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       return "This desktop target did not expose accessible controls, so the requested postcondition cannot be verified; no action was sent.";
     }
     if (action.kind === "click") {
-      const error = checkLocator(record, action.locator);
+      // Popup-local points are validated against the live owned-popup capture
+      // by the native popup dispatcher, not against the parent window's size.
+      const error = action.targetPopup
+        ? action.locator.kind === "point" && action.locator.coordinateSpace === "target-local"
+          ? undefined : "Popup clicks require popup-local point coordinates."
+        : checkLocator(record, action.locator);
       if (error) return error;
       if (record.context.kind === "browser" && action.locator.kind === "element"
         && record.context.elements.get(action.locator.ref)?.disabled === true) {
@@ -1302,7 +1319,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(action.durationMs !== undefined ? { durationMs: action.durationMs } : {}), view: record.context.view,
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "text" && action.mode === "insert") {
-      stageAction = { kind: "type", mode: "insert", text: action.text, view: record.context.view,
+      stageAction = { kind: "type", mode: "insert", text: action.text, view: action.targetPopup ? "popup" : record.context.view,
         ...(action.confirmFocusForeground ? { confirmFocusForeground: true } : {}) };
     } else if (action.kind === "text_then_enter") {
       stageAction = { kind: "type_then_enter", text: action.text, view: "app",
@@ -1709,8 +1726,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         }
         return refreshStaleTarget(action, identity, record, authToken, timing, response.error ?? "The target changed since it was observed.");
       }
-      const capture = stageCapture(response);
       const resultObject = recordOf(response.result);
+      // A popup-local fallback is useful context for a human/agent, but its
+      // coordinates and controls are not the app-window observation that this
+      // target record describes. Never feed it back as a fresh app snapshot.
+      const captureScope = resultObject?.captureScope === "popup" ? "popup" : "app";
+      const capture = captureScope === "app" ? stageCapture(response) : undefined;
       const responseMutationRevision = mutationRevisionOf(resultObject?.mutationRevision);
       if (responseMutationRevision !== undefined) record.mutationRevision = responseMutationRevision;
       const outcome = recordOf(resultObject?.outcome);
@@ -1725,6 +1746,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       // matching comment in cua-stage-driver.ts's click()/clickElement().
       const inputSelectionConfirmed = action.kind === "click"
         ? response.ok && (outcome?.status === "confirmed"
+          || outcome?.foregroundConfirmed === true
           || (action.confirmFocusForeground === true && outcome?.status !== "suspected-noop"))
         : (action.kind === "text" && action.mode === "insert" || action.kind === "key" || action.kind === "text_then_enter")
           ? response.ok && record.context.inputSelectionConfirmed

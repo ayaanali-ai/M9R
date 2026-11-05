@@ -217,9 +217,14 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
     /** Browser routes require an explicit fresh field ref; desktop routes may use current caret focus. */
     locator: computerUseLocatorSchema.optional(),
     confirmFocusForeground: z.boolean().optional(),
+    /** Send caret insertion to the selected app's current owned popup, after a popup-targeted click. */
+    targetPopup: z.boolean().optional(),
   }).strict().superRefine((action, context) => {
     if (action.confirmFocusForeground && action.mode !== "insert") {
       context.addIssue({ code: "custom", path: ["confirmFocusForeground"], message: "Foreground delivery is only valid for caret insertion, not whole-field replacement." });
+    }
+    if (action.targetPopup && (action.mode !== "insert" || action.locator !== undefined)) {
+      context.addIssue({ code: "custom", path: ["targetPopup"], message: "Popup text insertion uses the caret selected by a preceding popup-targeted click; it does not accept an app-window locator or replace mode." });
     }
   }),
   z.object({

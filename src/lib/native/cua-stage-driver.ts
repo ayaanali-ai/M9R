@@ -173,6 +173,8 @@ export interface CuaStageActionOutcome {
 
 export interface CuaStageActionProof {
   capture: CuaStageCapture;
+  /** Popup-local fallback pixels must never be mistaken for the parent app observation. */
+  captureScope?: "app" | "popup";
   outcome: CuaStageActionOutcome;
 }
 
@@ -2590,40 +2592,114 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     driver?: CuaDriverLike; session: string; pid: number; popupWindowId: bigint;
     capture: () => Promise<CuaStageCapture>;
   }) => Promise<T>): Promise<T> {
-    const inspected = await manager.inspectStage(nameInput);
+    let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
+    try { inspected = await manager.inspectStage(nameInput); }
+    catch (error) {
+      if (error instanceof DesktopInputNotDispatchedError || error instanceof DesktopInputOutcomeUnknownError) throw error;
+      throw new DesktopInputNotDispatchedError(
+        `The exact app stage could not be inspected before popup input; no input was sent. ${error instanceof Error ? error.message : String(error)}`,
+        "target-identity",
+      );
+    }
     const { stage, anchor } = inspected;
     if (!anchor) throw new DesktopInputNotDispatchedError(`Stage “${stage.name}” has no registered app window.`);
     const pid = anchor.pid;
     const windowId = parseWindowId(anchor.windowId);
-    const popups = await manager.ownedPopups(pid, windowId.toString());
+    let popups: Awaited<ReturnType<typeof manager.ownedPopups>>;
+    try { popups = await manager.ownedPopups(pid, windowId.toString()); }
+    catch (error) {
+      if (error instanceof DesktopInputNotDispatchedError || error instanceof DesktopInputOutcomeUnknownError) throw error;
+      throw new DesktopInputNotDispatchedError(
+        `Owned popup observation failed before input; no input was sent. ${error instanceof Error ? error.message : String(error)}`,
+        "target-identity",
+      );
+    }
     if (popups.length === 0) throw new DesktopInputNotDispatchedError("This app owns no popup window right now; nothing to interact with.");
-    // Enumeration order is not a documented z-order guarantee, but the most
-    // recently created owned popup -- generally the last one enumerated -- is
-    // the one almost always meant by "the popup" when exactly one is expected
-    // (a single error dialog, a single Save-As box).
-    const popupWindowId = BigInt(popups[popups.length - 1]!.windowId);
+    let popupWindowId: bigint;
+    if (popups.length === 1) popupWindowId = BigInt(popups[0]!.windowId);
+    else {
+      // Enumeration order is not z-order. With multiple owned dialogs, use the
+      // actual foreground identity; never guess based on list position.
+      let foreground: Awaited<ReturnType<typeof manager.currentForegroundWindow>>;
+      try { foreground = await manager.currentForegroundWindow(); }
+      catch (error) {
+        throw new DesktopInputNotDispatchedError(
+          `The active owned popup could not be identified; no input was sent. ${error instanceof Error ? error.message : String(error)}`,
+          "target-identity",
+        );
+      }
+      const matches = popups.filter((popup) => BigInt(popup.windowId) === BigInt(foreground.windowId));
+      if (foreground.pid !== pid || matches.length !== 1) {
+        throw new DesktopInputNotDispatchedError("More than one owned popup is open and none uniquely matches the foreground window; no input was sent.", "target-identity");
+      }
+      popupWindowId = BigInt(matches[0]!.windowId);
+    }
     const session = safeSessionName(stage.name);
     const capture = async (): Promise<CuaStageCapture> => {
-      const stillOwned = (await manager.ownedPopups(pid, windowId.toString())).some((popup) => BigInt(popup.windowId) === popupWindowId);
-      if (!stillOwned) throw new DesktopInputNotDispatchedError("The popup window closed or changed before input; no input was sent.", "target-identity");
-      const [image, structure] = await Promise.all([
-        manager.captureWindow(pid, popupWindowId.toString()),
-        manager.windowStructure(pid, popupWindowId.toString(), { maxElements: 4096, maxDepth: 64 }).catch(() => undefined),
-      ]);
-      const bounds = boundsAtWindowCapture(image);
-      const controls = structure?.elements.flatMap((element) => {
-        const left = Math.max(0, (element.rect.x - bounds.x) * image.width / bounds.width);
-        const top = Math.max(0, (element.rect.y - bounds.y) * image.height / bounds.height);
-        const right = Math.min(image.width, (element.rect.x + element.rect.width - bounds.x) * image.width / bounds.width);
-        const bottom = Math.min(image.height, (element.rect.y + element.rect.height - bounds.y) * image.height / bounds.height);
-        return [left, top, right, bottom].every(Number.isFinite) && right > left && bottom > top
-          ? [{ ...(element.label ? { label: element.label } : {}), ...(element.role ? { role: element.role } : {}),
-            rect: { x: left, y: top, width: right - left, height: bottom - top } }]
-          : [];
-      });
-      return stageCapture({ ...image, ...(controls ? { controls, ...(structure?.truncated ? { controlsTruncated: true as const } : {}) } : {}) }, now);
+      try {
+        const stillOwned = (await manager.ownedPopups(pid, windowId.toString())).some((popup) => BigInt(popup.windowId) === popupWindowId);
+        if (!stillOwned) throw new DesktopInputNotDispatchedError("The popup window closed or changed before input; no input was sent.", "target-identity");
+        const [image, structure] = await Promise.all([
+          manager.captureWindow(pid, popupWindowId.toString()),
+          manager.windowStructure(pid, popupWindowId.toString(), { maxElements: 4096, maxDepth: 64 }).catch(() => undefined),
+        ]);
+        const bounds = boundsAtWindowCapture(image);
+        const controls = structure?.elements.flatMap((element) => {
+          const left = Math.max(0, (element.rect.x - bounds.x) * image.width / bounds.width);
+          const top = Math.max(0, (element.rect.y - bounds.y) * image.height / bounds.height);
+          const right = Math.min(image.width, (element.rect.x + element.rect.width - bounds.x) * image.width / bounds.width);
+          const bottom = Math.min(image.height, (element.rect.y + element.rect.height - bounds.y) * image.height / bounds.height);
+          return [left, top, right, bottom].every(Number.isFinite) && right > left && bottom > top
+            ? [{ ...(element.label ? { label: element.label } : {}), ...(element.role ? { role: element.role } : {}),
+              rect: { x: left, y: top, width: right - left, height: bottom - top } }]
+            : [];
+        });
+        return stageCapture({ ...image, ...(controls ? { controls, ...(structure?.truncated ? { controlsTruncated: true as const } : {}) } : {}) }, now);
+      } catch (error) {
+        if (error instanceof DesktopInputNotDispatchedError || error instanceof DesktopInputOutcomeUnknownError) throw error;
+        throw new DesktopInputNotDispatchedError(
+          `Owned popup observation failed before input; no input was sent. ${error instanceof Error ? error.message : String(error)}`,
+          "target-identity",
+        );
+      }
     };
     return run({ driver: agentRuntimeReady?.driver, session, pid, popupWindowId, capture });
+  }
+
+  async function captureAfterPopupDispatch(name: string, before: CuaStageCapture,
+    outcome: CuaStageActionOutcome): Promise<CuaStageActionProof> {
+    try {
+      // Keep the target observation in the parent app's coordinate space. The
+      // app capture also carries any still-owned popup images; a popup-local
+      // frame is never mislabeled as an app-window frame after an action.
+      const parentCapture = await withRegisteredWindow(name, async ({ capture }) => stageCapture(await capture(), now));
+      return { capture: parentCapture, captureScope: "app", outcome: { ...outcome,
+        summary: [outcome.summary, "The parent app and its current owned popups were recaptured. Inspect the requested filename, any conflict prompt, and the saved result separately."].filter(Boolean).join(" ") } };
+    } catch {
+      // Input already returned successfully. Keep its dispatch result, but mark
+      // the stale popup pixels as popup-scoped context so computer-use cannot
+      // feed them back as a fresh parent-app observation.
+      return { capture: before, captureScope: "popup", outcome: { ...outcome, status: "unverified",
+        summary: [outcome.summary, "A fresh parent-app capture could not be obtained after popup input. The returned popup image is prior context only; inspect the app before continuing."].filter(Boolean).join(" ") } };
+    }
+  }
+
+  function popupElementsForHitTest(structure: Awaited<ReturnType<typeof manager.windowStructure>>) {
+    const indexByPath = new Map<string, bigint>();
+    structure.elements.forEach((element, index) => indexByPath.set(JSON.stringify(element.path), BigInt(index)));
+    return structure.elements.map((element, index) => {
+      const parentIndex = element.path.length ? indexByPath.get(JSON.stringify(element.path.slice(0, -1))) : undefined;
+      const actions = [
+        ...(element.actions?.invoke ? ["invoke"] : []),
+        ...(element.actions?.select ? ["select"] : []),
+        ...(element.actions?.toggle ? ["toggle"] : []),
+        ...(element.actions?.legacy ? ["click"] : []),
+        ...(element.actions?.setValue ? ["set_value"] : []),
+      ];
+      return { elementToken: element.ref, elementIndex: BigInt(index), ...(parentIndex !== undefined ? { parentIndex } : {}),
+        depth: element.depth, role: element.role, label: normalizeAccessibleLabel(element.label) ?? "", enabled: element.enabled, actions,
+        frame: { x: element.rect.x, y: element.rect.y, w: element.rect.width, h: element.rect.height } } as unknown as CuaWindowElement;
+    });
   }
 
   async function clickPopup(name: string, x: number, y: number, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
@@ -2645,31 +2721,106 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
             });
           }),
       });
-      return { capture: await capture(), outcome };
+      return captureAfterPopupDispatch(name, before, outcome);
     });
   }
 
   async function pressKeyPopup(name: string, key: string, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredPopup(name, async ({ driver, session, pid, popupWindowId, capture }) => {
+      const before = await capture();
       const outcome = await driverInputAction("press_key", {
         pid, window_id: Number(popupWindowId), key, session,
       }, "Cua Driver could not press the requested key in the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(pid, popupWindowId, () => manager.sendKeyCombo(pid, popupWindowId.toString(), [key])),
       });
-      return { capture: await capture(), outcome };
+      return captureAfterPopupDispatch(name, before, outcome);
     });
   }
 
   async function hotkeyPopup(name: string, keys: string[], options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredPopup(name, async ({ driver, session, pid, popupWindowId, capture }) => {
+      const before = await capture();
       const outcome = await driverInputAction("hotkey", {
         pid, window_id: Number(popupWindowId), keys, session,
       }, "Cua Driver could not send the requested key combination to the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(pid, popupWindowId, () => manager.sendKeyCombo(pid, popupWindowId.toString(), keys)),
       });
-      return { capture: await capture(), outcome };
+      return captureAfterPopupDispatch(name, before, outcome);
+    });
+  }
+
+  async function typeTextPopup(name: string, text: string, options: CuaStageTextOptions = {}): Promise<CuaStageActionProof> {
+    if (typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_ACTION_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
+      throw new DesktopInputNotDispatchedError(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
+    }
+    let delayMs: number;
+    try { delayMs = normalizeTypeDelayMs(options.delayMs); }
+    catch (error) {
+      throw new DesktopInputNotDispatchedError(
+        `${error instanceof Error ? error.message : String(error)} No popup input was sent.`,
+        "native-dispatch-unavailable",
+      );
+    }
+    return withRegisteredPopup(name, async ({ session, pid, popupWindowId, capture }) => {
+      const before = await capture();
+      let outcome: CuaStageActionOutcome;
+      if (options.mode === "replace") {
+        if (options.x === undefined || options.y === undefined) throw new DesktopInputNotDispatchedError("Replace mode requires an exact popup field point; no text was sent.");
+        if (!validPoint(options.x, options.y, before)) throw new DesktopInputNotDispatchedError("Replace coordinates must fall inside the current popup snapshot.", "target-identity");
+        let structure: Awaited<ReturnType<typeof manager.windowStructure>>;
+        let screen: { x: number; y: number };
+        try {
+          structure = await manager.windowStructure(pid, popupWindowId.toString(), { maxElements: 4096, maxDepth: 64 });
+          screen = await localToScreenPoint(pid, popupWindowId, options.x, options.y, before.width, before.height);
+        } catch (error) {
+          if (error instanceof DesktopInputNotDispatchedError || error instanceof DesktopInputOutcomeUnknownError) throw error;
+          throw new DesktopInputNotDispatchedError(
+            `The popup field could not be resolved before text replacement; no input was sent. ${error instanceof Error ? error.message : String(error)}`,
+            "target-identity",
+          );
+        }
+        const element = elementAtScreenPoint(popupElementsForHitTest(structure), screen.x, screen.y,
+          (candidate) => candidate.actions?.includes("set_value") === true);
+        const nativeElement = element?.elementToken
+          ? structure.elements.find((candidate) => candidate.ref === element.elementToken)
+          : undefined;
+        if (!nativeElement || nativeElement.enabled === false || !nativeElement.actions?.setValue) {
+          throw new DesktopInputNotDispatchedError("No accessible replaceable text field was found at that popup point; no text was sent.", "target-identity");
+        }
+        if ((options.expectedRole !== undefined && nativeElement.role !== options.expectedRole)
+          || (options.expectedLabel !== undefined && normalizeAccessibleLabel(nativeElement.label) !== options.expectedLabel)) {
+          throw new DesktopInputNotDispatchedError("The popup field at that point does not match the observed role and label; no text was sent.", "target-identity");
+        }
+        let semantic: Awaited<ReturnType<typeof manager.invokeWindowElement>>;
+        try {
+          semantic = await manager.invokeWindowElement(pid, popupWindowId.toString(), {
+            path: nativeElement.path, action: "setValue", expectedRole: nativeElement.role,
+            expectedLabel: nativeElement.label, expectedClassName: nativeElement.className,
+            expectedAutomationId: nativeElement.automationId, text,
+          });
+        } catch (error) {
+          if (error instanceof DesktopInputNotDispatchedError || error instanceof DesktopInputOutcomeUnknownError) throw error;
+          throw new DesktopInputNotDispatchedError(
+            `The popup field could not be set before native input; no text was sent. ${error instanceof Error ? error.message : String(error)}`,
+            "target-identity",
+          );
+        }
+        if (semantic.dispatched) {
+          outcome = { status: "unverified", summary: `Native UI Automation replaced the exact popup field value via ${semantic.mechanism ?? "the value pattern"}; the refreshed popup capture is the separate effect check.` };
+        } else {
+          const screenPoint = await localToScreenPoint(pid, popupWindowId, options.x, options.y, before.width, before.height);
+          outcome = await nativeReplaceTextAtScreenPoint(pid, popupWindowId, screenPoint.x, screenPoint.y, text,
+            { session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
+        }
+      } else {
+        outcome = await deliverTextToExactWindow({ session, pid, windowId: popupWindowId, text, delayMs,
+          preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode,
+          nativeForeground: nativeStageInput(pid, popupWindowId, () => manager.sendText(pid, popupWindowId.toString(), text)),
+          signal: options.signal });
+      }
+      return captureAfterPopupDispatch(name, before, outcome);
     });
   }
 
@@ -3143,7 +3294,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,
-    clickPopup, pressKeyPopup, hotkeyPopup, capturePopup };
+    clickPopup, pressKeyPopup, hotkeyPopup, typeTextPopup, capturePopup };
 }
 
 async function readStageTextFromStdin(): Promise<string> {

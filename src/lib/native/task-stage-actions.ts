@@ -78,8 +78,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   // error dialog, a Save-As box) instead of the app's own window -- only
   // meaningful for the small set of actions that dispatch input by point or
   // key, not for the semantic/structural ones that assume the registered app.
-  if (action.view === "popup" && !["click", "double_click", "middle_click", "right_click", "press_key", "hotkey", "capture"].includes(action.kind)) {
-    throw new Error("A popup view is only valid for click, press_key, hotkey, or capture.");
+  if (action.view === "popup" && !["click", "double_click", "middle_click", "right_click", "type", "press_key", "hotkey", "capture"].includes(action.kind)) {
+    throw new Error("A popup view is only valid for capture and direct popup input actions.");
   }
   if (action.kind === "read_structure" && action.view !== "app" && action.view !== "desktop") throw new Error("Structure observation requires an exact app or desktop view.");
   if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
@@ -203,12 +203,9 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "type": {
       const options = stageOptions({ confirmFocusForeground, mode: action.mode,
         x: action.x, y: action.y, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel });
-      if (desktopWide) return options
-        ? driver.typeTextDesktop(name, action.text, identity, options)
-        : driver.typeTextDesktop(name, action.text, identity);
-      return options
-        ? driver.typeText(name, action.text, identity, options)
-        : driver.typeText(name, action.text, identity);
+      if (popupTargeted) return driver.typeTextPopup(name, action.text, options ?? { deliveryMode: mode });
+      if (desktopWide) return driver.typeTextDesktop(name, action.text, identity, options);
+      return driver.typeText(name, action.text, identity, options);
     }
     case "type_then_enter": {
       if (action.view !== "app") throw new DesktopInputNotDispatchedError(

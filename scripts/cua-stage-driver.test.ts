@@ -16,6 +16,7 @@ type NativeStageFixture = {
   screenSize?: { width: number; height: number };
   foregroundWindow?: { pid: number; windowId: string; title?: string; className?: string; visible?: boolean; minimized?: boolean };
   responses?: Record<string, Record<string, unknown>>;
+  responseSequences?: Record<string, Record<string, unknown>[]>;
   structureRevision?: number;
   calls: Array<Record<string, unknown>>;
 };
@@ -308,6 +309,8 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
     invokeNative: async (request) => {
       const fixture = nativeFixture(root);
       fixture.calls.push({ ...request });
+      const queued = fixture.responseSequences?.[String(request.op)]?.shift();
+      if (queued) return queued as never;
       const configured = fixture.responses?.[String(request.op)];
       if (configured) return configured as never;
       if (["currentDesktop", "createDesktop", "inspectDesktop", "activateDesktop", "moveWindowToDesktop"].includes(String(request.op))) {
@@ -433,6 +436,9 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
       }
       if (request.op === "currentForegroundWindow") {
         return { ok: true, foregroundWindow: fixture.foregroundWindow ?? { pid: 4321, windowId, title: "Stage window", className: "TestWindow", visible: true, minimized: false } };
+      }
+      if (request.op === "foregroundWindow") {
+        return { ok: true, foregroundWindow: fixture.foregroundWindow ?? { pid: Number(request.pid), windowId: String(request.windowId) } };
       }
       if (request.op === "windowAtPoint") {
         const x = Number(request.x), y = Number(request.y);
@@ -1651,5 +1657,129 @@ test("replace-mode text uses exact UI Automation ValuePattern before physical fa
   assert.equal(invoke?.action, "setValue");
   assert.equal(invoke?.text, "new value");
   assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false);
+  await driver.shutdown();
+}));
+
+test("popup replace mode resolves the exact enabled UIA edit and sets its value on the popup HWND", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const popupWindows = [
+    { pid: 4321, windowId: BigInt(windowId), title: "Editor", appName: "editor.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+    { pid: 4321, windowId: BigInt("1234"), title: "Save As", appName: "editor.exe", bounds: { x: 300, y: 200, width: 400, height: 300 }, isOnScreen: true },
+  ];
+  const popupElements = [{ role: "Edit", label: "File name", className: "Edit", automationId: "FileName", enabled: true,
+    actions: ["set_value"], frame: { x: 320, y: 250, width: 220, height: 24 } }];
+  setNativeFixture(root, {
+    windows: popupWindows,
+    responses: { listOwnedPopups: { ok: true, windows: [{ pid: 4321, windowId: "1234" }] } },
+    state: { elements: popupElements },
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls,
+    state: { elements: popupElements }, windows: popupWindows }) as never });
+
+  const observed = await driver.capturePopup("stage");
+  assert.equal(observed.controls?.some((control) => control.role === "Edit" && control.label === "File name"), true,
+    "the popup screenshot is accompanied by its accessible field labels and coordinates");
+  const result = await driver.typeTextPopup("stage", "M9R-demo-smoke.txt", { mode: "replace", x: 70, y: 60,
+    expectedRole: "Edit", expectedLabel: "File name", deliveryMode: "owner-preview" });
+  assert.equal(result.outcome.status, "unverified", "ValuePattern delivery is not mistaken for a saved-file effect");
+  const native = nativeFixture(root).calls;
+  const invoke = native.find((call) => call.op === "invokeWindowElement") as Record<string, unknown> | undefined;
+  assert.equal(invoke?.windowId, "1234", "the live semantic action is scoped to the owned popup HWND");
+  assert.equal(invoke?.action, "setValue");
+  assert.equal(invoke?.text, "M9R-demo-smoke.txt");
+  assert.equal(native.some((call) => ["sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false,
+    "the accessible filename field uses UIA ValuePattern without unnecessary physical input");
+  await driver.shutdown();
+}));
+
+test("popup caret insertion sends native text to the selected popup window", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  setNativeFixture(root, {
+    windows: [
+      { pid: 4321, windowId: BigInt(windowId), title: "Editor", appName: "editor.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+      { pid: 4321, windowId: BigInt("1234"), title: "Save As", appName: "editor.exe", bounds: { x: 300, y: 200, width: 400, height: 300 }, isOnScreen: true },
+    ],
+    foregroundWindow: { pid: 4321, windowId: "1234", title: "Save As", className: "Dialog", visible: true, minimized: false },
+    responses: { listOwnedPopups: { ok: true, windows: [{ pid: 4321, windowId: "1234" }] } },
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+
+  const result = await driver.typeTextPopup("stage", "M9R-demo-smoke.txt", { mode: "insert", deliveryMode: "owner-preview" });
+  assert.equal(result.outcome.foregroundConfirmed, true);
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "sendText" && call.windowId === "1234"),
+    "native text input carries the exact popup PID/HWND rather than the parent app identity");
+  assert.equal(nativeFixture(root).calls.some((call) => call.op === "sendText" && call.windowId === windowId), false);
+  await driver.shutdown();
+}));
+
+test("popup replacement reports a typed pre-dispatch refusal when its live UIA tree cannot be read", async () => withRoot(async root => {
+  await registerStage(root);
+  const popupWindows = [
+    { pid: 4321, windowId: BigInt(windowId), title: "Editor", appName: "editor.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+    { pid: 4321, windowId: BigInt("1234"), title: "Save As", appName: "editor.exe", bounds: { x: 300, y: 200, width: 400, height: 300 }, isOnScreen: true },
+  ];
+  setNativeFixture(root, {
+    windows: popupWindows,
+    calls: [],
+    responses: {
+      listOwnedPopups: { ok: true, windows: [{ pid: 4321, windowId: "1234" }] },
+      inspectWindowStructure: { ok: false, error: "Tree unavailable" },
+    },
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, windows: popupWindows, calls: [] }) as never });
+
+  await assert.rejects(() => driver.typeTextPopup("stage", "M9R-demo-smoke.txt", { mode: "replace", x: 70, y: 60 }),
+    error => error instanceof DesktopInputNotDispatchedError && /no input was sent/i.test(error.message));
+  assert.equal(nativeFixture(root).calls.some((call) => ["invokeWindowElement", "sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false,
+    "tree-read failure is reported before any semantic or physical input");
+  await driver.shutdown();
+}));
+
+test("popup Enter that closes Save As keeps its dispatched receipt and refreshes the parent app", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const popupList = { ok: true, windows: [{ pid: 4321, windowId: "1234" }] };
+  const noPopups = { ok: true, windows: [] };
+  setNativeFixture(root, {
+    windows: [
+      { pid: 4321, windowId: BigInt(windowId), title: "Editor", appName: "editor.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+      { pid: 4321, windowId: BigInt("1234"), title: "Save As", appName: "editor.exe", bounds: { x: 300, y: 200, width: 400, height: 300 }, isOnScreen: true },
+    ],
+    foregroundWindow: { pid: 4321, windowId: "1234", title: "Save As", className: "Dialog", visible: true, minimized: false },
+    responseSequences: { listOwnedPopups: [popupList, popupList, noPopups, noPopups] },
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+
+  const result = await driver.pressKeyPopup("stage", "Enter", { deliveryMode: "owner-preview" });
+  assert.equal(result.outcome.status, "unverified");
+  assert.match(result.outcome.summary ?? "", /parent app and its current owned popups were recaptured/);
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendKeyCombo" && call.windowId === "1234").length, 1,
+    "Enter is dispatched once to the modal");
+  assert.equal(result.capture.ownedPopups?.length, 0, "the returned refreshed parent capture reflects the closed modal");
+  assert.equal(result.capture.width, 600, "the fallback evidence is the parent app capture, not a false popup capture");
+  await driver.shutdown();
+}));
+
+test("multiple owned popups resolve by foreground identity, not enumeration order", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  setNativeFixture(root, {
+    windows: [
+      { pid: 4321, windowId: BigInt(windowId), title: "Editor", appName: "editor.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+      { pid: 4321, windowId: BigInt("1234"), title: "Save As", appName: "editor.exe", bounds: { x: 300, y: 200, width: 400, height: 300 }, isOnScreen: true },
+      { pid: 4321, windowId: BigInt("5678"), title: "Replace?", appName: "editor.exe", bounds: { x: 330, y: 220, width: 300, height: 180 }, isOnScreen: true },
+    ],
+    foregroundWindow: { pid: 4321, windowId: "5678", title: "Replace?", className: "Dialog", visible: true, minimized: false },
+    responses: { listOwnedPopups: { ok: true, windows: [{ pid: 4321, windowId: "1234" }, { pid: 4321, windowId: "5678" }] } },
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+
+  await driver.capturePopup("stage");
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "captureWindow" && call.windowId === "5678"),
+    "the active conflict prompt is selected using the OS foreground identity");
+  assert.equal(nativeFixture(root).calls.some((call) => call.op === "captureWindow" && call.windowId === "1234"), false,
+    "an arbitrary list-order popup is never captured as the target");
   await driver.shutdown();
 }));

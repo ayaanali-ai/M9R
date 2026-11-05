@@ -24,9 +24,11 @@ function fixture() {
   const identity = store.verifyIdentity(token)!;
   const handlers = new Map<string, Handler>();
   const calls: { kind: string; operationId?: string }[] = [];
+  const actionsSent: unknown[] = [];
   let failure: "none" | "before" | "uncertain" = "none";
   let batchFailure: "none" | "partial" = "none";
   let unlabeled = false;
+  let popupCaptureFallback = false;
   let structureCoverage: Record<string, unknown> | undefined;
   let activeTaskId = "T1";
   let clockMs: number | undefined;
@@ -36,6 +38,7 @@ function fixture() {
     async taskStageAction(_token, _taskId, input, _mode, operationId) {
       const action = input as { kind: string };
       calls.push({ kind: action.kind, operationId });
+      actionsSent.push(input);
       if (action.kind === "read_structure") return { ok: true, result: { status: unlabeled ? "complete" : "partial", capturedAt: new Date().toISOString(),
         ...(structureCoverage ? { coverage: structureCoverage } : {}),
         elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: "Button", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
@@ -46,14 +49,19 @@ function fixture() {
           ? { status: "partial", completedSteps: 1, totalSteps: 2, stoppedAt: "enter", message: "Owner interaction paused before Enter; no key was sent." }
           : { status: "complete", completedSteps: 2, totalSteps: 2 },
         operationReceipt: { status: "applied" }, actionExecuted: true } };
-      return { ok: true, result: { capture: capture(), outcome: { status: "confirmed" }, operationReceipt: { status: "applied" }, actionExecuted: true } };
+      const outcome = (input as { kind: string; view?: string }).kind === "click" && (input as { view?: string }).view === "popup"
+        ? { status: "unverified", foregroundConfirmed: true }
+        : { status: "confirmed" };
+      return { ok: true, result: { ...(popupCaptureFallback && (input as { view?: string }).view === "popup" ? { captureScope: "popup" } : {}),
+        capture: capture(), outcome, operationReceipt: { status: "applied" }, actionExecuted: true } };
     },
   };
   registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
     { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => activeTaskId,
       resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }),
       now: () => new Date(clockMs ?? Date.now()) });
-  return { calls, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
+  return { calls, actionsSent, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
+    setPopupCaptureFallback: () => { popupCaptureFallback = true; },
     setCoverage: (value: Record<string, unknown>) => { structureCoverage = value; },
     setBatchFailure: (value: typeof batchFailure) => { batchFailure = value; },
     setNow: (value: number) => { clockMs = value; },
@@ -135,6 +143,52 @@ test("post-action pixel captures are paired with a fresh accessibility structure
     assert.equal(result.observation.controls.some((control: { label?: string }) => control.label === "Action"), true,
       "fresh semantic controls remain available for the next decision");
     assert.ok(result.observation.capture, "the refreshed tree retains its same-read screenshot fallback");
+  } finally { f.close(); }
+});
+
+test("popup field clicks select the owned modal and allow subsequent popup text insertion", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const selected = await f.call("m9r_computer_action", { action: {
+      kind: "click", operationId: "save-dialog-field", targetId: observed.target.targetId, targetRevision: observed.target.revision,
+      locator: { kind: "point", x: 46, y: 18, coordinateSpace: "target-local" }, targetPopup: true,
+    } });
+    const freshTarget = selected.target;
+    const entered = await f.call("m9r_computer_action", { action: {
+      kind: "text", mode: "insert", text: "M9R-demo-smoke.txt", targetPopup: true,
+      operationId: "save-dialog-filename", targetId: freshTarget.targetId, targetRevision: freshTarget.revision,
+    } });
+    assert.equal(entered.result.dispatchStatus, "dispatched");
+    assert.deepEqual(f.actionsSent.filter((action) => ["click", "type"].includes((action as { kind: string }).kind))
+      .map((action) => ({ kind: (action as { kind: string }).kind, view: (action as { view?: string }).view })),
+    [{ kind: "click", view: "popup" }, { kind: "type", view: "popup" }]);
+    const dispatchedBeforeInvalidReplace = f.actionsSent.length;
+    const invalidReplace = await f.callRaw("m9r_computer_action", { action: {
+      kind: "text", mode: "replace", text: "bad", targetPopup: true, operationId: "popup-replace-no-ref",
+      targetId: freshTarget.targetId, targetRevision: freshTarget.revision,
+    } });
+    assert.match(JSON.stringify(invalidReplace), /Popup text insertion/);
+    assert.equal(f.actionsSent.length, dispatchedBeforeInvalidReplace, "popup replacement is rejected before dispatch because it has no exact popup-local field point");
+  } finally { f.close(); }
+});
+
+test("popup-local fallback pixels are never reused as a fresh app observation", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const structureReadsBefore = f.calls.filter((call) => call.kind === "read_structure").length;
+    f.setPopupCaptureFallback();
+    const result = await f.call("m9r_computer_action", { action: {
+      kind: "click", operationId: "popup-close-no-parent-capture", targetId: observed.target.targetId,
+      targetRevision: observed.target.revision,
+      locator: { kind: "point", x: 46, y: 18, coordinateSpace: "target-local" }, targetPopup: true,
+    } });
+
+    assert.equal(result.result.dispatchStatus, "dispatched", "the successful input receipt survives the missing parent capture");
+    assert.equal(result.result.effectStatus, "unknown", "the popup-local image cannot verify an app-window effect");
+    assert.equal(result.result.error?.code, "post-action-observation-failed");
+    assert.equal(f.calls.filter((call) => call.kind === "read_structure").length, structureReadsBefore,
+      "popup-local pixels must not trigger an app-window UIA reread using the wrong coordinate frame");
+    assert.equal(result.observation, undefined, "no popup-scoped pixels are presented as the app target's latest observation");
   } finally { f.close(); }
 });
 
