@@ -7,10 +7,10 @@ import { defaultStoreRoot } from "./local-store";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ActionResult, ActionTarget, ClickPosition as CuaClickPosition, CuaDriverLike, ToolResult } from "@trycua/cua-driver";
-import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
+import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "./desktop-input-errors";
 import { StageCaptureRefreshError } from "./stage-errors";
 import { CUA_DRIVER_VERSION, startCuaDriverHost, type CuaDriverHostConnection } from "./cua-driver-host";
-import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type WindowsSystemControlRequest } from "./windows-desktop-stage";
+import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type NativeWindowStructureElement, type WindowsSystemControlRequest } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
 
@@ -25,8 +25,6 @@ const MAX_TEXT_ACTION_LENGTH = 5_000;
 // bounded custom delay through the existing action contract.
 const DEFAULT_TYPE_DELAY_MS = 15;
 const MAX_TYPE_DELAY_MS = 200;
-const MAX_WINDOW_OPTIONS = 256;
-const MAX_DESKTOP_STRUCTURE_WINDOWS = 64;
 const MAX_DESKTOP_STRUCTURE_ELEMENTS = 4096;
 const SESSION_PREFIX = "m9r-stage-";
 const CURSOR_THEME_ID = /^[A-Za-z0-9._:-]{1,64}$/.test(process.env.M9R_CURSOR_THEME ?? "")
@@ -162,7 +160,6 @@ export interface CuaStageWindowOption {
   height: number;
   isOnScreen?: boolean;
   minimized?: boolean;
-  onCurrentSpace?: boolean;
   zIndex?: string;
 }
 
@@ -257,7 +254,6 @@ export interface CuaDesktopStructureWindow {
   rect: { x: number; y: number; width: number; height: number };
   frontmost?: boolean;
   minimized?: boolean;
-  onCurrentSpace?: boolean;
   status: "complete" | "partial" | "unavailable";
   coverage: CuaContentCoverage;
   elements: CuaDesktopStructureElement[];
@@ -318,6 +314,9 @@ interface CuaStageWindowFrame {
   dataUrl: string;
   width: number;
   height: number;
+  capturedAt?: string;
+  stageName?: string;
+  identityKey?: string;
   windowBounds?: CuaStageWindowBounds;
   controls?: CuaStageTargetDescription[];
 }
@@ -423,6 +422,7 @@ interface CachedDesktopCapture extends CuaDesktopTargetSnapshot {
   capturedAt: string;
   stageName: string;
   identityKey: string;
+  origin?: { x: number; y: number };
 }
 
 interface DesktopInputTarget {
@@ -435,7 +435,7 @@ interface DesktopInputTarget {
 type CuaWindowInfo = Awaited<ReturnType<CuaDriverLike["listWindows"]>>["windows"][number];
 type CuaWindowElement = NonNullable<Awaited<ReturnType<CuaDriverLike["getWindowState"]>>["elements"]>[number];
 
-function contentCoverage(scope: CuaContentCoverage["scope"], elements?: readonly CuaWindowElement[]): CuaContentCoverage {
+function contentCoverage(scope: CuaContentCoverage["scope"], elements?: readonly { role?: string; actions?: readonly string[] }[]): CuaContentCoverage {
   const scrollabilityIndicated = elements?.some((element) => {
     const role = typeof element.role === "string" ? element.role.toLowerCase().replace(/[\s_-]+/g, "") : "";
     const roleIndicatesScrolling = /^(?:scrollbar|scrollarea|scrollview|scrollcontainer)$/.test(role);
@@ -448,6 +448,12 @@ function contentCoverage(scope: CuaContentCoverage["scope"], elements?: readonly
     scrollability: scrollabilityIndicated ? "indicated" : "unknown",
     offscreenContent: scrollabilityIndicated ? "possible" : "unknown",
   };
+}
+
+function normalizeAccessibleLabel(value: string | undefined, maxLength = 160): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, maxLength) : undefined;
 }
 
 function aggregateDesktopCoverage(windows: readonly CuaDesktopStructureWindow[]): CuaContentCoverage {
@@ -482,48 +488,6 @@ function elementAtScreenPoint(elements: readonly CuaWindowElement[], x: number, 
   return undefined;
 }
 
-async function typeIntoExactField(input: {
-  driver: CuaDriverLike;
-  selected: DesktopInputTarget;
-  session: string;
-  text: string;
-  deliveryMode?: "background" | "owner-preview";
-  delayMs?: number;
-  fallback?: () => Promise<CuaStageActionOutcome>;
-  signal?: AbortSignal;
-}) {
-  const { driver, selected, session, text, signal } = input;
-  signal?.throwIfAborted();
-  if (!selected.field || !Number.isSafeInteger(Number(selected.windowId))) throw new DesktopInputNotDispatchedError("The selected text field has no representable exact window identity.");
-  const state = await driver.getWindowState({ pid: selected.pid, windowId: selected.windowId, session,
-    includeAccessibilityTree: true, includeScreenshot: false, maxElements: 512, maxDepth: 24, timeoutMs: 1_500 }, signal ? { signal } : undefined);
-  if (state.pid !== selected.pid || state.windowId !== selected.windowId) throw new DesktopInputNotDispatchedError("The selected text field returned a different application window.");
-  const element = elementAtScreenPoint(state.elements ?? [], selected.field.x, selected.field.y,
-    (candidate) => candidate.actions?.includes("set_value") === true);
-  const normalizeLabel = (value: string | undefined) => value?.replace(/[\r\n\t]+/g, " ").trim().toLocaleLowerCase();
-  const expectedLabel = normalizeLabel(selected.field.label);
-  const currentLabel = normalizeLabel(element?.label);
-  // Editable controls often expose a value-derived accessible name (for
-  // example "Search (before)") after the click. Keep the exact point/window,
-  // role, and ValuePattern checks, but do not treat a harmless label extension
-  // as a different control. A wholly unrelated label still fails closed.
-  const labelsCompatible = expectedLabel === undefined || currentLabel === undefined
-    || expectedLabel === currentLabel || expectedLabel.includes(currentLabel) || currentLabel.includes(expectedLabel);
-  const roleCompatible = selected.field.role === undefined || element?.role === selected.field.role;
-  if (!element?.elementToken || !labelsCompatible || !roleCompatible || !element.actions?.includes("set_value")) {
-    throw new DesktopInputNotDispatchedError("The selected text field changed; no text was sent.");
-  }
-  // UIA ValuePattern has no caret/selection range in this driver contract.
-  // Background insertion therefore appends to the freshly read value; never
-  // replace existing content or invent an empty value when it is unavailable.
-  // UIA ValuePattern is perception only in the native runtime. Text delivery
-  // must use the same owned SendInput path as every other text action; callers
-  // provide the exact-window fallback with its native foreground/background
-  // sender. Never invoke the retired semantic Cua set_value operation here.
-  if (!input.fallback) throw new DesktopInputNotDispatchedError("Native text delivery is unavailable for the selected field; no text was sent.", "native-dispatch-unavailable");
-  return input.fallback();
-}
-
 function normalizeTypeDelayMs(value: number | undefined): number {
   const delay = value ?? DEFAULT_TYPE_DELAY_MS;
   if (!Number.isSafeInteger(delay) || delay < 0 || delay > MAX_TYPE_DELAY_MS) {
@@ -545,6 +509,7 @@ interface ResolvedDesktopPoint {
   shellControl?: NativePointControl;
   nativeKeyboardWindow?: boolean;
   element?: CuaWindowElement;
+  nativeElement?: NativeWindowStructureElement;
 }
 
 function bundledSdkUrl(): string | null {
@@ -770,6 +735,12 @@ function actionOutcome(result: ActionResult | ToolResult, fallback: string): Cua
   };
 }
 
+function assertNotAbortedBeforeInput(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new DesktopInputNotDispatchedError("The desktop action was canceled before target input was sent.", "dispatch-gate");
+  }
+}
+
 function inputToolTextForRefusal(result: ToolResult): string {
   const parts = [result.text, result.rawJson, result.structuredJson,
     typeof (result as ToolResult & { errorCode?: unknown }).errorCode === "string"
@@ -848,7 +819,7 @@ function desktopRectInCapture(
 
 function windowCoversPoint(window: CuaWindowInfo, x: number, y: number): boolean {
   const bounds = window.bounds;
-  return window.isOnScreen === true && window.onCurrentSpace !== false && window.minimized !== true
+  return window.isOnScreen === true && window.minimized !== true
     && Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0
     && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
     && [bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
@@ -977,7 +948,7 @@ function desktopTargetAt(result: ToolResult, x: number, y: number): CuaStageTarg
     return [{ label, area: (width as number) * (height as number), rect: { x: rx as number, y: ry as number, width: width as number, height: height as number } }];
   }).sort((left, right) => left.area - right.area);
   const hit = hits[0];
-  return hit ? { label: hit.label.replace(/[\r\n\t]+/g, " ").slice(0, 160), rect: hit.rect } : undefined;
+  return hit ? { label: normalizeAccessibleLabel(hit.label) ?? "", rect: hit.rect } : undefined;
 }
 
 /**
@@ -986,56 +957,56 @@ function desktopTargetAt(result: ToolResult, x: number, y: number): CuaStageTarg
  */
 export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const manager = deps.manager ?? createWindowsDesktopStageManager(deps.stage);
-  // Injected native seams are test-only. In production, a native failure is
-  // surfaced instead of silently re-entering the retired Cua perception path.
-  // An explicit compatibility flag keeps emergency rollback possible without
-  // making it the normal architecture.
-  // Native UIA/GDI is the production perception route. A previous test-seam
-  // shortcut (`Boolean(deps.stage?.invokeNative)`) accidentally enabled the
-  // retired Cua perception fallback in every real broker because production
-  // stages also expose invokeNative. Keep the compatibility path opt-in only.
-  const allowCuaCompatibility = deps.stage?.env?.M9R_ENABLE_CUA_COMPAT === "1";
+  // The Cua package is only the visual cursor overlay. Perception and input
+  // belong to M9R's native Windows stage host; there is no compatibility route
+  // that can silently switch to a second engine after a native failure.
 
   /**
-   * Build one native sender for a registered stage. Foreground delivery uses
-   * the owner's current desktop. Background delivery performs the only safe
-   * Windows equivalent of an off-screen input transaction: activate the
-   * stage's private desktop, raise the exact HWND, send the OS events, and
-   * return to the owner's desktop in a finally block. The provider never sees
-   * this transition and no Cua action endpoint participates in it.
+   * Build one native sender for a registered stage. Semantic UIA operations
+   * can remain headless. When a control requires OS input, the exact window
+   * must already be on the owner's currently visible desktop and uses the
+   * shared foreground lease; computer-use actions never create or activate a
+   * separate Windows virtual desktop.
    */
-  function nativeStageInput(stageName: string, pid: number, windowId: string | bigint,
+  function nativeStageInput(pid: number, windowId: string | bigint,
     send: () => Promise<void>) {
     const target = windowId.toString();
     return {
       bringToFront: () => manager.bringToForeground(pid, target),
       send,
-      sendBackground: async () => {
-        const inspected = await manager.inspectStage(stageName);
-        let switched = false;
-        if (!inspected.desktop.isCurrent) {
-          if (!inspected.stage.returnToDesktopId) {
-            throw new DesktopInputNotDispatchedError("The selected background stage has no verified owner desktop to return to; no input was sent.", "background-unavailable");
-          }
-          await manager.activate(stageName);
-          switched = true;
-        }
-        try {
-          await manager.bringToForeground(pid, target);
-          await send();
-        } finally {
-          if (switched) await manager.returnToOwnerDesktop(stageName);
-        }
-      },
     };
   }
 
-  async function nativeReplaceTextAtScreenPoint(pid: number, windowId: string | bigint, x: number, y: number, text: string): Promise<CuaStageActionOutcome> {
-    await manager.bringToForeground(pid, windowId.toString());
-    await manager.sendClick(pid, windowId.toString(), x, y, {});
-    await manager.sendKeyCombo(pid, windowId.toString(), ["CTRL", "A"]);
-    await manager.sendText(pid, windowId.toString(), text);
-    return { status: "unverified", summary: "Native text replacement was delivered; the refreshed UI state is the semantic verification." };
+  async function nativeReplaceTextAtScreenPoint(pid: number, windowId: string | bigint, x: number, y: number, text: string,
+    input: { session: string; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview"; preferForeground?: boolean }): Promise<CuaStageActionOutcome> {
+    const targetWindowId = windowId.toString();
+    const outcome = await driverInputAction("type_text", {
+      pid, window_id: Number(targetWindowId), x, y, text, session: input.session,
+    }, "M9R could not replace text in the selected field.", {
+      signal: input.signal,
+      deliveryMode: input.deliveryMode,
+      preferForeground: input.preferForeground,
+      nativeForeground: nativeStageInput(pid, targetWindowId, async () => {
+        // Replacement is one logical action but three OS dispatches. If a later
+        // SendInput fails after an earlier event was accepted, retrying the
+        // whole replacement could duplicate or corrupt the user's text.
+        let dispatched = false;
+        try {
+          await manager.sendClick(pid, targetWindowId, x, y, {});
+          dispatched = true;
+          await manager.sendKeyCombo(pid, targetWindowId, ["CTRL", "A"]);
+          await manager.sendText(pid, targetWindowId, text);
+        } catch (error) {
+          if (dispatched) {
+            throw new DesktopInputOutcomeUnknownError(
+              `Text replacement partially dispatched to the exact window; inspect the field before retrying. ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          throw error;
+        }
+      }),
+    });
+    return { ...outcome, summary: "Native text replacement was delivered; the refreshed UI state is the separate semantic verification." };
   }
   const loadSdk = deps.loadSdk ?? loadCuaSdk;
   const now = deps.now ?? (() => new Date());
@@ -1059,7 +1030,12 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // Keep the semantics from the observation that issued each raw UIA ref.
   // Native token prefixes rotate on every walk, including the money-gate read.
   const observedElements = new Map<string, Map<string, CuaWindowElement>>();
+  // Native UIA refs belong to the native tree, never to Cua Driver's opaque
+  // element-token namespace. Keep the exact observation identity locally so
+  // the native dispatcher can re-resolve and validate the same control.
+  const nativeObservedElements = new Map<string, Map<string, NativeWindowStructureElement>>();
   let agentRuntimePromise: Promise<CuaRuntime> | undefined;
+  let agentRuntimeReady: CuaRuntime | undefined;
 
   function emitTiming(event: CuaStageTimingEvent): void {
     try { deps.onTiming?.(event); } catch { /* diagnostics must never affect desktop control */ }
@@ -1124,51 +1100,18 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     else try { await runtime.driver.shutdown(); } catch { /* preserve the primary stage result */ }
   }
 
-  /**
-   * Only a genuine transport failure (the pipe/process the cached connection
-   * depends on is actually gone) ever justifies dropping and replacing the
-   * cached connection. A business-logic failure (a stale element, a disabled
-   * control, an unsupported action) must never be mistaken for a dead
-   * connection -- that was a real bug: an earlier version reset the cache on
-   * ANY error, which could discard and orphan a perfectly healthy connection
-   * over an unrelated failure.
-   */
-  function isConnectionError(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    return /ECONNRESET|EPIPE|ENOENT|broken pipe|pipe.*(?:clos|gone|lost)|(?:clos|gone|lost).*pipe|disconnect|not connected|named pipe/i.test(message);
-  }
-
-  /**
-   * Drop the cached connection AND properly close the process behind it. A
-   * previous version of this reset only cleared the in-memory reference,
-   * never closing the stale host process or its cursor session -- the old
-   * `cua-driver.exe` and its overlay cursor were silently orphaned, and
-   * `shutdown()`/`closeAgentCursor` only ever knew about the newest
-   * connection, so the leaked one's session was never cleanly ended. This is
-   * the one place that resets the cache; every caller that detects a dead
-   * connection must go through this, not clear `agentRuntimePromise` itself.
-   */
-  async function resetDeadRuntime(): Promise<void> {
-    const stale = agentRuntimePromise;
-    agentRuntimePromise = undefined;
-    sessionRefreshedAt.clear();
-    if (!stale) return;
-    const old = await stale.catch(() => undefined);
-    if (old) await disposeRuntime(old).catch(() => undefined);
-  }
-
   async function agentRuntime(stageName?: string): Promise<CuaRuntime> {
     // No preflight liveness check here on purpose: this is called on every single
-    // access, including inside tight polling loops (e.g. launch()'s up-to-60-attempt
-    // window-discovery loop) -- adding a round-trip check to every one of those
-    // calls was tried and measured to turn a normally-fast recovery into one slow
-    // enough to blow through the 70s client timeout. Recovery from a connection
-    // that died after a successful connect is handled where it is actually used
-    // (withRegisteredWindow), reacting to a real failure instead of probing for one.
+    // access. This runtime owns only the optional cursor overlay, never the
+    // native perception or action pipeline. A cursor failure cannot reset or
+    // replay a native app action.
     const cached = Boolean(agentRuntimePromise);
     if (!agentRuntimePromise) {
       const runtimePromise = createRuntime(stageName);
       agentRuntimePromise = runtimePromise;
+      void runtimePromise.then((runtime) => {
+        if (agentRuntimePromise === runtimePromise) agentRuntimeReady = runtime;
+      }, () => undefined);
       void runtimePromise.catch(() => {
         if (agentRuntimePromise === runtimePromise) agentRuntimePromise = undefined;
       });
@@ -1312,16 +1255,15 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function inspectOwnerDesktop(name: string, identity: CuaAgentCursorIdentity) {
-    const { stage, desktop, anchor } = await manager.inspectStage(name);
+    const { stage, anchor } = await manager.inspectStage(name);
     const details = agentCursorDetails(identity);
     // These checks run inside the stage's dispatch window, so they must say plainly that nothing was sent;
     // a plain error there is recorded as an uncertain outcome and locks the surface.
-    if (anchor) throw new DesktopInputNotDispatchedError("The owner-preview stage is not a desktop-wide mapping. Prepare it again to detach any stale app-window anchor. No input was sent.", "target-identity");
-    if (!desktop.isCurrent) throw new DesktopInputNotDispatchedError("The owner-preview desktop is no longer the desktop shown to the owner. No desktop switch was made and no input was sent.", "target-identity");
+    if (anchor) throw new DesktopInputNotDispatchedError("The owner-preview stage is bound to an app window. Refresh the desktop stage before sending desktop-wide input.", "target-identity");
     if (stage.agentAssignment?.handle !== details.handle || stage.agentAssignment.sessionTag !== details.sessionTag) {
       throw new DesktopInputNotDispatchedError("This Windows desktop is not assigned to the requesting M9R agent session. No input was sent.", "target-identity");
     }
-    return { stage, desktop };
+    return { stage };
   }
 
   function desktopCaptureKey(name: string, identity: CuaAgentCursorIdentity): string {
@@ -1345,7 +1287,6 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   async function captureOwnerDesktop(name: string, identity: CuaAgentCursorIdentity, refresh = false): Promise<CuaStageCapture> {
     const details = agentCursorDetails(identity);
-    const { runtime, session } = await ensureAgentSession(identity, name);
     await inspectOwnerDesktop(name, identity);
     if (!refresh) {
       try { return stageCapture(currentDesktopCapture(name, identity), now); } catch { /* take a new capture */ }
@@ -1353,76 +1294,40 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     // Native Win32 capture is the production observation path. It is not tied
     // to a Cua capture token and therefore cannot lose the desktop identity
     // when the optional presentation adapter is restarted.
-    try {
-      const native = await manager.captureDesktop();
-      const captureId = `native-desktop-${createHash("sha256").update(native.dataUrl).digest("hex").slice(0, 24)}`;
-      const capturedAt = now();
-      const cacheKey = `${name}\0${details.key}`;
-      desktopCaptures.set(cacheKey, { captureId, width: native.width, height: native.height, stageName: name, identityKey: details.key,
-        dataUrl: native.dataUrl, capturedAtMs: capturedAt.getTime(), capturedAt: capturedAt.toISOString() });
-      await inspectOwnerDesktop(name, identity);
-      return { ...native, capturedAt: capturedAt.toISOString(), captureId,
-        ...((Number.isSafeInteger(native.originX) && Number.isSafeInteger(native.originY))
-          ? { origin: { x: native.originX!, y: native.originY! } } : {}) };
-    } catch (nativeError) {
-      if (!allowCuaCompatibility) throw nativeError;
-    }
-    const result = await runtime.driver.getDesktopState({ session: session.session, maxImageDimension: MAX_IMAGE_DIMENSION });
-    resultError(result, "Cua Driver could not capture the owner's current desktop.");
-    const image = result.images?.[0];
-    if (!image) throw new Error("Cua Driver returned no image for the owner's current desktop.");
-    const safe = checkImage(image.mimeType, image.dataBase64);
-    if (safe.mimeType !== "image/png") throw new Error("Cua Driver returned a desktop screenshot that is not PNG.");
-    const bytes = Buffer.from(safe.dataBase64, "base64");
-    if (bytes.length < 33 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-      || bytes.toString("ascii", 12, 16) !== "IHDR") {
-      throw new Error("Cua Driver returned a desktop screenshot without a valid PNG frame.");
-    }
-    const width = bytes.readUInt32BE(16);
-    const height = bytes.readUInt32BE(20);
-    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1
-      || width > 16_384 || height > 16_384) throw new Error("Cua Driver returned invalid desktop screenshot dimensions.");
-    const encoded = result.structuredJson ?? result.rawJson;
-    let metadata: unknown;
-    try { metadata = encoded ? JSON.parse(encoded) : null; } catch { metadata = null; }
-    const captureId = findDesktopCaptureId(metadata);
-    if (!captureId) throw new Error("Cua Driver did not return the capture identity required to bind desktop actions to this exact screenshot.");
+    const native = await manager.captureDesktop();
+    const captureId = `native-desktop-${createHash("sha256").update(native.dataUrl).digest("hex").slice(0, 24)}`;
     await inspectOwnerDesktop(name, identity);
     const capturedAt = now();
     const cacheKey = `${name}\0${details.key}`;
-    desktopCaptures.set(cacheKey, { captureId, width, height, stageName: name, identityKey: details.key,
-      dataUrl: `data:image/png;base64,${safe.dataBase64}`, capturedAtMs: capturedAt.getTime(), capturedAt: capturedAt.toISOString() });
-    return { dataUrl: `data:image/png;base64,${safe.dataBase64}`, width, height, capturedAt: capturedAt.toISOString() };
+    desktopCaptures.set(cacheKey, { captureId, width: native.width, height: native.height, stageName: name, identityKey: details.key,
+      ...(Number.isSafeInteger(native.originX) && Number.isSafeInteger(native.originY) ? { origin: { x: native.originX!, y: native.originY! } } : {}),
+      dataUrl: native.dataUrl, capturedAtMs: capturedAt.getTime(), capturedAt: capturedAt.toISOString() });
+    // The capture key is private bookkeeping. Providers act against the
+    // broker's latest identity-bound capture; exposing a hash of screenshot
+    // pixels is neither needed for dispatch nor part of the observation API.
+    return { dataUrl: native.dataUrl, width: native.width, height: native.height, capturedAt: capturedAt.toISOString(),
+      ...((Number.isSafeInteger(native.originX) && Number.isSafeInteger(native.originY))
+        ? { origin: { x: native.originX!, y: native.originY! } } : {}) };
   }
 
   async function withOwnerDesktop<T>(name: string, identity: CuaAgentCursorIdentity, run: (input: {
-    runtime: CuaRuntime;
+    runtime?: CuaRuntime;
     session: AgentCursorSession;
     capture: CachedDesktopCapture;
   }) => Promise<T>): Promise<T> {
-    const { runtime, session } = await ensureAgentSession(identity, name);
+    const session = agentCursorDetails(identity);
+    await inspectOwnerDesktop(name, identity);
+    let capture: CachedDesktopCapture;
     try {
-      await inspectOwnerDesktop(name, identity);
-      let capture: CachedDesktopCapture;
-      try {
-        capture = currentDesktopCapture(name, identity);
-      } catch (error) {
-        // Coordinate actions must never be replayed against an expired image.
-        // Refresh the exact owner desktop once and return that fresh image as a
-        // typed, non-dispatched recovery result so the provider can re-plan
-        // against current coordinates instead of receiving an opaque "uncertain"
-        // failure and abandoning the rest of its task.
-        if (!(error instanceof Error) || !/desktop view is missing or expired/i.test(error.message)) throw error;
-        const refreshed = await captureOwnerDesktop(name, identity, true);
-        throw new StageCaptureRefreshError(refreshed,
-          "The desktop observation was missing or expired. A fresh owner-desktop capture is attached; no input was sent. Inspect it and retry the intended action.");
-      }
-      if (capture.stageName !== name || capture.identityKey !== session.key) throw new Error("The captured desktop does not belong to this agent's current stage session.");
-      return await run({ runtime, session, capture });
+      capture = currentDesktopCapture(name, identity);
     } catch (error) {
-      await hideAgentCursor(runtime.driver, session.session);
-      throw error;
+      if (!(error instanceof Error) || !/desktop view is missing or expired/i.test(error.message)) throw error;
+      const refreshed = await captureOwnerDesktop(name, identity, true);
+      throw new StageCaptureRefreshError(refreshed,
+        "The desktop observation was missing or expired. A fresh owner-desktop capture is attached; no input was sent. Inspect it and retry the intended action.");
     }
+    if (capture.stageName !== name || capture.identityKey !== session.key) throw new DesktopInputNotDispatchedError("The captured desktop does not belong to this agent's current stage identity.", "target-identity");
+    return run({ runtime: agentRuntimeReady, session, capture });
   }
 
   function desktopInputKey(name: string, identity: CuaAgentCursorIdentity): string {
@@ -1455,64 +1360,51 @@ function backgroundRefusalMessage(value: unknown): string {
 }
 
 /**
- * Owner-directed: the owner has explicitly waived pointer-coexistence deferral, so real
- * SendInput dispatches immediately regardless of concurrent owner pointer movement. The
- * owner's pointer position is still captured before dispatch and restored afterward, purely
- * so their cursor visibly ends up back where they left it -- a cosmetic courtesy, not a gate.
- * If restoration cannot be confirmed after foreground input, the call fails explicitly as
- * uncertain instead of claiming clean pointer isolation.
- * Uses `deps.ownerPointer` when supplied (the test seam); production always uses the real native
- * Windows stage manager's get/restore, which is in closure scope here via `manager`.
+ * Dispatch through the exact-window native sender. Owner-pointer preservation
+ * is a best-effort courtesy only; inability to sample or restore the pointer
+ * must never prevent an otherwise valid action or turn a delivered action
+ * into a reported failure.
  */
-async function driverInputAction(_driver: CuaDriverLike, name: string, args: Record<string, unknown>, fallback: string,
+async function driverInputAction(name: string, args: Record<string, unknown>, fallback: string,
   options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview";
-    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void>; sendBackground?: () => Promise<void> } } = {}) {
-  options.signal?.throwIfAborted();
-  // The test suite can inject a legacy Cua runtime to exercise compatibility
-  // parsing. Production never reaches this branch: it is enabled only by the
-  // explicit M9R_ENABLE_CUA_COMPAT operator flag and only when no native owner
-  // pointer seam was supplied. This keeps the shipped path single-engine while
-  // preserving deterministic coverage of the retired adapter.
-  if (allowCuaCompatibility && !deps.ownerPointer) {
-    const deliveryMode = options.deliveryMode ?? "background";
-    const result = await _driver.callTool(name, JSON.stringify({
-      ...args,
-      delivery_mode: deliveryMode === "owner-preview" ? "foreground" : "background",
-    }));
-    return actionOutcome(result, fallback);
-  }
-  // Registered app stages default to the non-activating/background contract.
-  // Owner-preview callers pass `owner-preview` explicitly. Treating an omitted
-  // mode as an error made ordinary stage actions fall through to a refusal even
-  // though the native stage adapter had a valid desktop-isolation route.
-  const deliveryMode = options.deliveryMode ?? "background";
+    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void> } } = {}) {
+  assertNotAbortedBeforeInput(options.signal);
+  // Omitted mode follows the owner-visible stage contract. Background is an
+  // explicit request and may only use a semantic caller path that does not
+  // reach this physical sender.
+  const deliveryMode = options.deliveryMode ?? "owner-preview";
   const ownerPointer = deps.ownerPointer ?? { get: () => manager.getOwnerCursorPosition(), restore: (x: number, y: number) => manager.restoreOwnerCursorPosition(x, y) };
   let foregroundPointer: { x: number; y: number } | undefined;
   const deliverForeground = async (): Promise<CuaStageActionOutcome> => {
     const pid = args.pid;
     const windowId = args.window_id;
-    const session = args.session;
     if (!Number.isSafeInteger(pid) || (pid as number) < 1 || typeof windowId !== "number" || !Number.isFinite(windowId)
-      || !Number.isInteger(windowId) || windowId < 1
-      || typeof session !== "string" || session.length < 1) {
+      || !Number.isInteger(windowId) || windowId < 1) {
       throw new DesktopInputNotDispatchedError("The foreground action is missing the exact target window identity; no input was sent.", "target-identity");
     }
     const targetPid = pid as number;
     const targetWindowId = windowId as number;
     const saved = foregroundPointer;
-    if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
     // The owner has explicitly opted into sharing real input: the agent dispatches
     // regardless of concurrent owner pointer movement. Only the pointer's resting
     // position is preserved below, for a clean restore after the action.
-    options.signal?.throwIfAborted();
+    assertNotAbortedBeforeInput(options.signal);
     if (!options.nativeForeground) throw new DesktopInputNotDispatchedError(
       "Native desktop input is unavailable for the exact target window; no input was sent.", "native-dispatch-unavailable");
     let outcome: CuaStageActionOutcome | undefined;
     let actionError: unknown;
     try {
-      options.signal?.throwIfAborted();
-      await options.nativeForeground.bringToFront();
-      options.signal?.throwIfAborted();
+      assertNotAbortedBeforeInput(options.signal);
+      try {
+        await options.nativeForeground.bringToFront();
+      } catch (error) {
+        if (error instanceof DesktopInputNotDispatchedError) throw error;
+        throw new DesktopInputNotDispatchedError(
+          `The target window could not be brought to the foreground; no target input was sent. ${error instanceof Error ? error.message : String(error)}`,
+          "foreground-lease",
+        );
+      }
+      assertNotAbortedBeforeInput(options.signal);
       await options.nativeForeground.send();
       // Native SendInput reports only OS-level delivery. The caller's refreshed
       // UIA capture is the separate semantic verification signal.
@@ -1525,13 +1417,9 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       try { await ownerPointer.restore(saved.x, saved.y); }
       catch (error) { restoreError = error; }
     }
-    if (restoreError) {
-      const detail = "Desktop input was dispatched, but the owner's pointer restoration could not be confirmed; the outcome is uncertain.";
-      if (actionError instanceof Error) throw new Error(`${detail} Original action error: ${actionError.message}`, { cause: actionError });
-      throw new Error(detail, { cause: restoreError });
-    }
     if (actionError !== undefined) throw actionError;
-    return { ...outcome!, foregroundConfirmed: true };
+    return { ...outcome!, foregroundConfirmed: true,
+      ...(restoreError ? { summary: "Native input was delivered. Restoring the owner's pointer was unavailable; this presentation detail did not affect delivery." } : {}) };
   };
   const runForeground = async () => {
     // The owner has explicitly opted into agents sharing real foreground input on
@@ -1539,7 +1427,6 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     // refuse. Only the resting position is captured here, purely so it can be
     // restored after the action -- not to gate dispatch on it.
     const saved = await ownerPointer.get().catch(() => undefined);
-    if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no foreground input was sent.", "foreground-lease");
     foregroundPointer = saved;
     return timed("foreground-lease", () => foregroundLease.run(name, options.signal, deliverForeground), {
     detail: `action=${name};delivery=foreground`,
@@ -1550,37 +1437,22 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     throw error;
     });
   };
-  const runBackgroundNative = async (): Promise<CuaStageActionOutcome> => {
-    if (!options.nativeForeground?.sendBackground) {
-      throw new DesktopInputNotDispatchedError("Background native delivery is unavailable for the selected stage; no input was sent.", "background-unavailable");
-    }
-    options.signal?.throwIfAborted();
-    const saved = await ownerPointer.get().catch(() => undefined);
-    if (!saved) throw new DesktopInputNotDispatchedError("The owner's pointer position could not be preserved; no background input was sent.", "background-unavailable");
-    let actionError: unknown;
-    try { await options.nativeForeground.sendBackground(); }
-    catch (error) { actionError = error; }
-    try { await ownerPointer.restore(saved.x, saved.y); }
-    catch (error) {
-      throw new DesktopInputNotDispatchedError("Background input was sent, but the owner's pointer could not be restored.", "background-unavailable");
-    }
-    if (actionError) throw actionError;
-    return { status: "unverified", summary: "Native stage input was delivered on the stage desktop; the refreshed UI state is the semantic verification." };
-  };
-  // Native SendInput is the only production input path. A stage that can safely
-  // deliver without activation supplies sendBackground; otherwise it escalates
-  // to the same exact-window foreground path. There is no Cua action fallback.
-  if (options.nativeForeground?.sendBackground && deliveryMode === "background" && !options.preferForeground) return runBackgroundNative();
-  if (options.nativeForeground && (deliveryMode === "owner-preview" || options.preferForeground || deliveryMode === "background")) return runForeground();
-  if (deliveryMode === "background" && options.preferForeground) {
-    throw new DesktopInputNotDispatchedError("A background stage cannot request foreground input; no input was sent. Use an owner-preview stage for an explicitly visible action.", "background-unavailable");
+  // Semantic UIA actions are dispatched headlessly by their call sites. A
+  // background request must never fall through to SendInput, because Windows
+  // delivers it to the real foreground window and physical pointer. Only the
+  // owner-visible mode may acquire the short global input lease.
+  if (deliveryMode === "background") {
+    throw new DesktopInputNotDispatchedError(
+      `${fallback} This target has no supported headless semantic route; background mode sent no input and did not activate a window.`,
+      "background-unavailable",
+    );
   }
+  if (options.nativeForeground) return runForeground();
   throw new DesktopInputNotDispatchedError(
-    `${fallback} Native background delivery is unavailable for this target and no input was sent.`, "background-unavailable");
+    `${fallback} Native foreground delivery is unavailable for this target and no input was sent.`, "native-dispatch-unavailable");
 }
 
   async function deliverTextToExactWindow(input: {
-    runtime: CuaRuntime;
     session: string;
     pid: number;
     windowId: string | bigint;
@@ -1590,29 +1462,15 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     preferForeground?: boolean;
     deliveryMode?: "background" | "owner-preview";
     delayMs?: number;
-    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void>; sendBackground?: () => Promise<void> };
+    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void> };
     signal?: AbortSignal;
   }): Promise<CuaStageActionOutcome> {
     const windowId = input.windowId.toString();
-    const selected = input.selected;
-    if (selected?.field && !input.preferForeground && input.deliveryMode !== "owner-preview") {
-      return typeIntoExactField({ driver: input.runtime.driver, selected, session: input.session,
-        text: input.text, deliveryMode: input.deliveryMode, delayMs: input.delayMs, signal: input.signal,
-        fallback: () => driverInputAction(input.runtime.driver, "type_text", {
-          pid: selected.pid, window_id: Number(selected.windowId), text: input.text,
-          delay_ms: input.delayMs ?? DEFAULT_TYPE_DELAY_MS, session: input.session,
-        }, "Cua Driver could not type into the selected window.", {
-          deliveryMode: input.deliveryMode, signal: input.signal,
-          nativeForeground: input.nativeForeground,
-        }),
-      });
-    }
-
     if (!input.signal && !input.preferForeground && input.nativeInput && await input.nativeInput()) {
       return { status: "unverifiable", summary: "Posted text to the selected native edit control; application effect requires verification." };
     }
 
-    return driverInputAction(input.runtime.driver, "type_text", {
+    return driverInputAction("type_text", {
       pid: input.pid,
       window_id: Number.parseInt(windowId, 10),
       text: input.text,
@@ -1635,11 +1493,10 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     for (const key of desktopInputTargets.keys()) if (key.endsWith(suffix)) desktopInputTargets.delete(key);
   }
 
-  async function resolveOwnerWindowPoint(runtime: CuaRuntime, session: AgentCursorSession, screenPoint: { x: number; y: number }, includeAccessibilityTree = false) {
-    // Win32 hit testing respects actual input regions instead of overlapping
-    // rectangles. Shell HWNDs have no titles and are excluded by Cua snapshots.
+  async function resolveOwnerWindowPoint(_runtime: CuaRuntime | undefined, _session: AgentCursorSession,
+    screenPoint: { x: number; y: number }, includeAccessibilityTree = false) {
+    // Win32 hit testing and our own UIA walker resolve the real HWND/control.
     const selected = await (deps.windowAtPoint ?? manager.windowAtPoint)(screenPoint.x, screenPoint.y);
-    if (selected.pid === runtime.processId) throw new DesktopInputNotDispatchedError("The desktop point resolves to the Cua overlay, not an application; no input was sent.");
     const { pid, windowId } = selected;
     if (selected.shell) {
       const origin = selected.screenOrigin;
@@ -1651,23 +1508,37 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       return { target: { pid, windowId }, localPoint: { x: screenPoint.x - origin.x, y: screenPoint.y - origin.y },
         shellControl, nativeKeyboardWindow: selected.keyboardWindow, state: undefined };
     }
-    const state = await runtime.driver.getWindowState({ pid, windowId, session: session.session,
-      includeAccessibilityTree, includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1_500,
-      ...(includeAccessibilityTree ? { maxElements: 512, maxDepth: 24 } : {}) });
-    const image = imageFromWindowState(state, pid, windowId);
-    const bounds = state.windowBounds;
-    const frame: CuaStageWindowFrame = { ...image,
-      ...(bounds ? { windowBounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } } : {}) };
+    const [image, bounds] = await Promise.all([manager.captureWindow(pid, windowId.toString()), manager.windowRect(pid, windowId.toString())]);
+    const frame: CuaStageWindowFrame = { ...image, windowBounds: bounds };
     const localPoint = desktopPointInWindow(screenPoint, frame);
-    return { target: { pid, windowId }, localPoint, state,
-      element: elementAtScreenPoint(state.elements ?? [], screenPoint.x, screenPoint.y) };
+    let elements: CuaWindowElement[] = [];
+    if (includeAccessibilityTree) {
+      const structure = await manager.windowStructure(pid, windowId.toString(), { maxElements: 4096, maxDepth: 64 });
+      const nativeElements = structure.elements;
+      elements = nativeElements.map((item, index) => {
+        const actions = [
+          ...(item.actions?.invoke ? ["invoke"] : []),
+          ...(item.actions?.select ? ["select"] : []),
+          ...(item.actions?.toggle ? ["toggle"] : []),
+          ...(item.actions?.legacy ? ["click"] : []),
+          ...(item.actions?.setValue ? ["set_value"] : []),
+        ];
+        return { elementToken: item.ref, elementIndex: BigInt(index), depth: item.depth, role: item.role,
+          label: normalizeAccessibleLabel(item.label) ?? "", enabled: item.enabled, actions,
+          frame: { x: item.rect.x, y: item.rect.y, w: item.rect.width, h: item.rect.height } } as unknown as CuaWindowElement;
+      });
+      const element = elementAtScreenPoint(elements, screenPoint.x, screenPoint.y,
+        (candidate) => candidate.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name)) === true);
+      return { target: { pid, windowId }, localPoint, state: { elements }, element,
+        ...(element?.elementToken ? { nativeElement: nativeElements.find((item) => item.ref === element.elementToken) } : {}) };
+    }
+    return { target: { pid, windowId }, localPoint, state: { elements } };
   }
 
-  async function resolveOwnerDesktopPoint(runtime: CuaRuntime, session: AgentCursorSession, x: number, y: number,
-    capture: CachedDesktopCapture, screen?: DesktopScreenSize, includeAccessibilityTree = false): Promise<ResolvedDesktopPoint> {
+  async function resolveOwnerDesktopPoint(runtime: CuaRuntime | undefined, session: AgentCursorSession, x: number, y: number,
+    capture: CachedDesktopCapture, _screen?: DesktopScreenSize, includeAccessibilityTree = false): Promise<ResolvedDesktopPoint> {
     if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Desktop coordinates must fall inside the latest desktop screenshot. No input was sent.", "target-identity");
-    const screenSize = screen ?? screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
-    const screenPoint = desktopPointOnScreen(x, y, capture, screenSize);
+    const screenPoint = { x: (capture.origin?.x ?? 0) + x, y: (capture.origin?.y ?? 0) + y };
     const resolved = await resolveOwnerWindowPoint(runtime, session, screenPoint, includeAccessibilityTree);
     return { desktopPoint: { x, y }, screenPoint, ...resolved };
   }
@@ -1685,13 +1556,11 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     return target;
   }
 
-  async function verifiedDesktopInputTarget(runtime: CuaRuntime, name: string, identity: CuaAgentCursorIdentity): Promise<DesktopInputTarget> {
+  async function verifiedDesktopInputTarget(_runtime: CuaRuntime | undefined, name: string, identity: CuaAgentCursorIdentity): Promise<DesktopInputTarget> {
     const selected = activeDesktopInputTarget(name, identity);
     try {
-      const listed = await runtime.driver.listWindows({ onScreenOnly: true });
-      const stillVisible = listed.windows.some((window) => window.pid === selected.pid
-        && window.windowId === selected.windowId && window.isOnScreen === true
-        && window.onCurrentSpace !== false && window.minimized !== true);
+      const listed = await manager.listVisibleWindows();
+      const stillVisible = listed.some((window) => window.pid === selected.pid && window.windowId === selected.windowId.toString());
       if (!stillVisible) throw new Error("The selected application window is no longer visible on the owner's desktop.");
       return selected;
     } catch (error) {
@@ -1701,7 +1570,11 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     }
   }
 
-  async function moveOwnerCursor(runtime: CuaRuntime, session: AgentCursorSession, point: ResolvedDesktopPoint, requireProof = false): Promise<CuaStageCursorProof> {
+  async function moveOwnerCursor(runtime: CuaRuntime | undefined, session: AgentCursorSession, point: ResolvedDesktopPoint, requireProof = false): Promise<CuaStageCursorProof> {
+    if (!runtime) {
+      if (requireProof) throw new DesktopInputNotDispatchedError("The cursor overlay is unavailable; no cursor movement was confirmed.", "overlay-not-visible");
+      return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y, enabled: false, visible: false };
+    }
     if (!requireProof) {
       // Presentation never authorizes or gates target input. Explicit cursor
       // tools can request proof; mutations only schedule a best-effort overlay.
@@ -1747,24 +1620,30 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y, enabled: true, visible: true };
   }
 
-  async function moveAndVerifyCursor(input: { driver: CuaDriverLike; sdk: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number, frame: CuaStageWindowFrame, requireProof = false): Promise<CuaStageCursorProof> {
+  async function moveAndVerifyCursor(input: { driver?: CuaDriverLike; sdk?: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number, frame: CuaStageWindowFrame, requireProof = false): Promise<CuaStageCursorProof> {
+    const driver = input.driver;
+    const sdk = input.sdk;
+    if (!driver || !sdk) {
+      if (requireProof) throw new DesktopInputNotDispatchedError("The cursor overlay is unavailable; no cursor movement was confirmed.", "overlay-not-visible");
+      return { x, y, screenX: x, screenY: y, enabled: false, visible: false };
+    }
     if (!requireProof) {
       void (async () => {
-        resultError(await input.driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cursor presentation unavailable.");
-        await input.driver.moveCursor({ x, y, target: new input.sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session });
+        resultError(await driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cursor presentation unavailable.");
+        await driver.moveCursor({ x, y, target: new sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session });
       })().catch(() => undefined);
       return { x, y, screenX: x, screenY: y, enabled: false, visible: false };
     }
     const point = cursorScreenPoint(x, y, frame);
-    resultErrorTyped(await input.driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
-    resultErrorTyped(await input.driver.moveCursor({ x, y, target: new input.sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session }), "Cua Driver could not move the agent cursor.");
-    const state = cursorStateFromResult(await input.driver.getAgentCursorState({ session: input.session }));
+    resultErrorTyped(await driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
+    resultErrorTyped(await driver.moveCursor({ x, y, target: new sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session }), "Cua Driver could not move the agent cursor.");
+    const state = cursorStateFromResult(await driver.getAgentCursorState({ session: input.session }));
     await timed("cursor-position", async () => {
       if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - x) > 1 || Math.abs(state.y - y) > 1) {
         throw new DesktopInputNotDispatchedError(`Cua Driver did not confirm the requested agent cursor position on this stage window (expected ${x},${y}; actual ${state.x ?? "missing"},${state.y ?? "missing"}).`, "position-unconfirmed");
       }
     }, { detail: "space=window-local" });
-    if (!await confirmCursorVisible(undefined, () => input.driver.getSession({ session: input.session }))) {
+    if (!await confirmCursorVisible(undefined, () => driver.getSession({ session: input.session }))) {
       throw new DesktopInputNotDispatchedError("Cua Driver moved the agent cursor but did not confirm that its desktop overlay is visible within the bounded confirmation window.", "overlay-not-visible");
     }
     return { x, y, screenX: point.x, screenY: point.y, enabled: true as const, visible: true as const };
@@ -1777,408 +1656,244 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       // Cleanup must never mask the action's original error.
     }
   }
-  async function nativeControl(name: string, kind: "click" | "type" | "scroll", point?: { x: number; y: number; imageWidth: number; imageHeight: number }, extra?: { text?: string; direction?: "up" | "down" }) {
-    const { stage, anchor } = await manager.inspectStage(name);
-    if (!anchor) throw new DesktopInputNotDispatchedError("Stage has no registered app window.");
-    const selectionPath = join(root, `stage-input-${stage.roomDesktopId}.json`);
-    if (!point) {
-      if (!existsSync(selectionPath)) return false;
-      let saved: { windowId: string; pid: number; x: number; y: number; imageWidth: number; imageHeight: number };
-      try {
-        saved = JSON.parse(readFileSync(selectionPath, "utf8")) as typeof saved;
-      } catch {
-        rmSync(selectionPath, { force: true });
-        return false;
-      }
-      if (saved.pid !== anchor.pid || saved.windowId !== anchor.windowId
-        || !Number.isSafeInteger(saved.x) || !Number.isSafeInteger(saved.y)
-        || !Number.isSafeInteger(saved.imageWidth) || saved.imageWidth <= 0
-        || !Number.isSafeInteger(saved.imageHeight) || saved.imageHeight <= 0) {
-        rmSync(selectionPath, { force: true });
-        return false;
-      }
-      point = { x: saved.x, y: saved.y, imageWidth: saved.imageWidth, imageHeight: saved.imageHeight };
-    }
-    try {
-      await manager.controlInput(name, kind, { ...point, ...extra });
-      if (kind === "click") writeFileSync(selectionPath, JSON.stringify({ pid: anchor.pid, windowId: anchor.windowId, ...point }), { mode: 0o600 });
-      return true;
-    } catch (error) {
-      // Pixel/browser surfaces keep their Driver route. No other native failure
-      // permits fallback, and there is never a foreground retry.
-      if (error instanceof Error && error.message === "unsupported native-control window") return false;
-      throw error;
-    }
-  }
-
-  async function clearNativeInputSelection(name: string): Promise<void> {
-    const stage = manager.list().find((item) => item.name === name);
-    if (stage) rmSync(join(root, `stage-input-${stage.roomDesktopId}.json`), { force: true });
-  }
-
   async function withRegisteredWindow<T>(nameInput: string, run: (input: {
-    driver: CuaDriverLike;
-    sdk: CuaSdk;
+    driver?: CuaDriverLike;
+    sdk?: CuaSdk;
     session: string;
     pid: number;
     windowId: bigint;
+    captureFrame: () => Promise<CuaStageWindowFrame>;
     capture: () => Promise<CuaStageWindowFrame>;
     readStructure: () => Promise<CuaStageStructure>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
     elementAtPoint: (x: number, y: number, action?: "click" | "set_value") => Promise<CuaWindowElement | undefined>;
     observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
-    elementByToken: (token: string, expected?: { role?: string; label?: string }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame } | undefined>;
+    elementByToken: (token: string, expected?: { role?: string; label?: string }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame; nativeElement?: NativeWindowStructureElement } | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
-    // The task stage owns recovery and invalidates observations after a rebind.
-    // A driver must never change an HWND underneath a planned action.
-    const inspected = await manager.inspectStage(nameInput);
+    let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
+    try {
+      inspected = await manager.inspectStage(nameInput);
+    } catch (error) {
+      if (error instanceof DesktopInputNotDispatchedError || error instanceof DesktopInputOutcomeUnknownError) throw error;
+      // This is a read-only target preflight. If native inventory/helper access
+      // fails here, the callback (and therefore target input) has not started.
+      throw new DesktopInputNotDispatchedError(
+        `The exact stage window could not be inspected; no target input was sent. ${error instanceof Error ? error.message : String(error)}`,
+        "target-identity",
+      );
+    }
     const { stage, anchor } = inspected;
-    if (!anchor) throw new DesktopInputNotDispatchedError(`Stage “${stage.name}” has no registered app window. Register an owned window before capturing or moving the Cua cursor.`);
+    if (!anchor) throw new DesktopInputNotDispatchedError("Stage " + stage.name + " has no registered app window. Register an owned window before capturing or acting.", "target-identity");
     const pid = anchor.pid;
     const windowId = parseWindowId(anchor.windowId);
-    const persistent = cursorIdentity ? await ensureAgentSession(cursorIdentity, nameInput) : undefined;
-    const runtime = persistent?.runtime ?? await createRuntime(nameInput);
-    const sdk = runtime.sdk;
-    const driver = runtime.driver;
-    const session = persistent?.session.session ?? safeSessionName(stage.name);
-    const observationKey = `${stage.name}\0${session}\0${pid}\0${windowId}\0${anchor.processGeneration ?? ""}`;
-    let started = false;
-    try {
-      if (!persistent) {
-        await driver.startSession({ session });
-        started = true;
-      }
-      const captureOwnedPopups = async () => {
-        const ownedPopups: NonNullable<CuaStageCapture["ownedPopups"]> = [];
-        let popupCaptureStatus: "complete" | "unavailable" = "complete";
-        try {
-          const popups = await manager.ownedPopups(pid, windowId.toString());
-          if (popups.length >= 8) popupCaptureStatus = "unavailable"; // bounded enumeration may have more surfaces
-          for (const popup of popups) {
-            const verified = (await manager.ownedPopups(pid, windowId.toString())).some((p) => p.windowId === popup.windowId);
-            if (!verified) { popupCaptureStatus = "unavailable"; continue; }
-            // Popup perception is native in production just like the owning
-            // window.  The old path asked Cua for a second screenshot here,
-            // which reintroduced a closed perception engine into every menu
-            // and suggestion-list read.  Keep that route only for injected
-            // compatibility fixtures.
-            let image: { dataUrl: string; width: number; height: number };
-            try {
-              image = await manager.captureWindow(pid, popup.windowId);
-            } catch (nativeError) {
-              if (!allowCuaCompatibility) throw nativeError;
-              const popupId = BigInt(popup.windowId);
-              const snapshot = await driver.getWindowState({ pid, windowId: popupId, session, includeAccessibilityTree: false,
-                includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, timeoutMs: 1_500 });
-              image = imageFromWindowState(snapshot, pid, popupId);
-            }
-            ownedPopups.push({ dataUrl: image.dataUrl, width: image.width, height: image.height, capturedAt: now().toISOString(), coordinateSpace: "popup-local" });
-          }
-        } catch { popupCaptureStatus = "unavailable"; }
-        return { ownedPopups, popupCaptureStatus };
-      };
-      const captureNativeWindow = async (): Promise<CuaStageWindowFrame> => {
-        const [image, bounds, structure] = await Promise.all([
-          manager.captureWindow(pid, windowId.toString()),
-          manager.windowRect(pid, windowId.toString()),
-          manager.windowStructure(pid, windowId.toString(), { maxElements: 1024, maxDepth: 48 }),
-        ]);
-        const controls: CuaStageTargetDescription[] = [];
-        let controlsTruncated = structure.truncated;
-        for (const element of structure.elements) {
+    const cursorDetails = cursorIdentity ? agentCursorDetails(cursorIdentity) : undefined;
+    const cursorSession = cursorDetails ? agentSessions.get(cursorDetails.key) : undefined;
+    const runtime = cursorSession && agentRuntimeReady ? agentRuntimeReady : undefined;
+    const driver = runtime?.driver;
+    const sdk = runtime?.sdk;
+    const session = cursorSession?.session ?? (cursorDetails ? cursorDetails.session : safeSessionName(stage.name));
+    const observationKey = stage.name + "\0" + (cursorDetails?.key ?? session) + "\0" + pid + "\0" + windowId + "\0" + (anchor.processGeneration ?? "");
+
+    const readNativeElements = async () => {
+      const structure = await manager.windowStructure(pid, windowId.toString(), { maxElements: 4096, maxDepth: 64 });
+      const indexByPath = new Map<string, bigint>();
+      structure.elements.forEach((element, index) => indexByPath.set(JSON.stringify(element.path), BigInt(index)));
+      const elements = structure.elements.map((element, index) => {
+        const parentIndex = element.path.length ? indexByPath.get(JSON.stringify(element.path.slice(0, -1))) : undefined;
+        const actions = [
+          ...(element.actions?.invoke ? ["invoke"] : []),
+          ...(element.actions?.select ? ["select"] : []),
+          ...(element.actions?.toggle ? ["toggle"] : []),
+          ...(element.actions?.legacy ? ["click"] : []),
+          ...(element.actions?.setValue ? ["set_value"] : []),
+        ];
+        const mapped = {
+          elementToken: element.ref, elementIndex: BigInt(index),
+          ...(parentIndex !== undefined ? { parentIndex } : {}),
+          depth: element.depth, role: element.role, label: normalizeAccessibleLabel(element.label) ?? "", enabled: element.enabled, actions,
+          frame: { x: element.rect.x, y: element.rect.y, w: element.rect.width, h: element.rect.height },
+        } as unknown as CuaWindowElement;
+        return { native: element, mapped };
+      });
+      observedElements.set(observationKey, new Map(elements.map(({ native, mapped }) => [native.ref, mapped])));
+      nativeObservedElements.set(observationKey, new Map(structure.elements.map((element) => [element.ref, element])));
+      while (observedElements.size > 64) observedElements.delete(observedElements.keys().next().value!);
+      while (nativeObservedElements.size > 64) nativeObservedElements.delete(nativeObservedElements.keys().next().value!);
+      return { structure, elements };
+    };
+
+    const captureNativeFrame = async (): Promise<CuaStageWindowFrame> => {
+      const [image, bounds] = await Promise.all([
+        manager.captureWindow(pid, windowId.toString()),
+        manager.windowRect(pid, windowId.toString()),
+      ]);
+      return { dataUrl: image.dataUrl, width: image.width, height: image.height,
+        windowBounds: bounds, capturedAt: now().toISOString(), stageName: stage.name,
+        identityKey: cursorDetails?.key ?? session };
+    };
+
+    const captureNativeWindowWithStructure = async (): Promise<{
+      frame: CuaStageWindowFrame;
+      observed?: Awaited<ReturnType<typeof readNativeElements>>;
+    }> => {
+      const imageFrame = await captureNativeFrame();
+      const bounds = imageFrame.windowBounds!;
+      const image = { dataUrl: imageFrame.dataUrl, width: imageFrame.width, height: imageFrame.height };
+      let controls: CuaStageTargetDescription[] = [];
+      let controlsTruncated = false;
+      let observed: Awaited<ReturnType<typeof readNativeElements>> | undefined;
+      try {
+        observed = await readNativeElements();
+        controls = observed.structure.elements.flatMap((element) => {
           const left = Math.max(0, (element.rect.x - bounds.x) * image.width / bounds.width);
           const top = Math.max(0, (element.rect.y - bounds.y) * image.height / bounds.height);
           const right = Math.min(image.width, (element.rect.x + element.rect.width - bounds.x) * image.width / bounds.width);
           const bottom = Math.min(image.height, (element.rect.y + element.rect.height - bounds.y) * image.height / bounds.height);
-          if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) continue;
-          if (controls.length >= 512) { controlsTruncated = true; break; }
-          controls.push({
-            ...(element.label ? { label: element.label } : {}),
-            ...(element.role ? { role: element.role } : {}),
-            rect: { x: left, y: top, width: right - left, height: bottom - top },
-          });
-        }
-        return { dataUrl: image.dataUrl, width: image.width, height: image.height,
-          controls, ...(controlsTruncated ? { controlsTruncated: true as const } : {}),
-          windowBounds: bounds };
-      };
-      const capture = async () => {
-        try {
-          const native = await captureNativeWindow();
-          const { ownedPopups, popupCaptureStatus } = await captureOwnedPopups();
-          return { ...native, ownedPopups, popupCaptureStatus };
-        } catch (nativeError) {
-          // The native route is authoritative in production. Compatibility is
-          // explicit and limited to injected test seams or a rollback flag;
-          // otherwise do not silently turn a native perception failure into a
-          // second, conflicting observation engine.
-          if (!allowCuaCompatibility) throw nativeError;
-        }
-        const request = {
-          pid,
-          windowId,
-          session,
-          includeAccessibilityTree: true,
-          includeScreenshot: true,
-          maxImageDimension: MAX_IMAGE_DIMENSION,
-          maxElements: 512,
-          maxDepth: 24,
-          timeoutMs: 1_500,
-        };
-        let state: Awaited<ReturnType<CuaDriverLike["getWindowState"]>>;
-        try { state = await driver.getWindowState(request); }
-        catch (structureError) {
-          // Some custom interfaces do not provide a usable accessibility tree.
-          // Keep the same exact-window screenshot route; never change input/focus.
-          try { state = await driver.getWindowState({ ...request, includeAccessibilityTree: false }); }
-          catch (captureError) {
-            // A capture failure right after an action already dispatched
-            // successfully (a renderer repaint, a closing popup, a momentary
-            // busy window) would otherwise destroy that delivery evidence by
-            // throwing here instead of returning it. One short, bounded retry
-            // absorbs that transient case; a capture that is still failing
-            // after it is a real failure, not evidence worth losing input over.
-            await new Promise((resolve) => setTimeout(resolve, 150));
-            try { state = await driver.getWindowState({ ...request, includeAccessibilityTree: false }); }
-            catch (retryError) { throw new AggregateError([structureError, captureError, retryError], "Exact-window structure and screenshot capture both failed."); }
-          }
-        }
-        const image = imageFromWindowState(state, pid, windowId);
-        const bounds = state.windowBounds;
-        const controls: CuaStageTargetDescription[] = [];
-        let controlsTruncated = false;
-        const { ownedPopups, popupCaptureStatus } = await captureOwnedPopups();
-        if (bounds && bounds.width > 0 && bounds.height > 0) {
-          for (const element of state.elements ?? []) {
-            const frame = element.frame;
-            if (element.enabled === false || !frame || frame.w <= 0 || frame.h <= 0) continue;
-            const left = Math.max(0, (frame.x - bounds.x) * image.width / bounds.width);
-            const top = Math.max(0, (frame.y - bounds.y) * image.height / bounds.height);
-            const right = Math.min(image.width, (frame.x + frame.w - bounds.x) * image.width / bounds.width);
-            const bottom = Math.min(image.height, (frame.y + frame.h - bounds.y) * image.height / bounds.height);
-            if (![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) continue;
-            if (controls.length === 200) { controlsTruncated = true; break; }
-            controls.push({
-              ...(element.label ? { label: element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
-              ...(element.role ? { role: element.role.slice(0, 40) } : {}),
-              rect: { x: left, y: top, width: right - left, height: bottom - top },
-            });
-          }
-        }
-        return {
-          dataUrl: image.dataUrl,
-          width: image.width,
-          height: image.height,
-          controls,
-          ...(controlsTruncated ? { controlsTruncated: true as const } : {}),
-          ownedPopups, popupCaptureStatus,
-          ...(bounds ? { windowBounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } } : {}),
-        };
-      };
-      const readStructure = async (): Promise<CuaStageStructure> => {
-        try {
-          const native = await captureNativeWindow();
-          const structure = await manager.windowStructure(pid, windowId.toString(), { maxElements: 1024, maxDepth: 48 });
-          const bounds = native.windowBounds!;
-          const elements = structure.elements.map((element) => ({
-            ref: element.ref,
-            depth: element.depth,
-            role: element.role,
-            label: element.label,
-            enabled: element.enabled,
-            actions: [
-              ...(element.actions?.invoke ? ["click"] : []),
-              ...(element.actions?.select ? ["select"] : []),
-              ...(element.actions?.toggle ? ["toggle"] : []),
-              ...(element.role === "edit" ? ["set_value"] : []),
-            ],
-            ...(element.rect ? { rect: {
-              x: (element.rect.x - bounds.x) * native.width / bounds.width,
-              y: (element.rect.y - bounds.y) * native.height / bounds.height,
-              width: element.rect.width * native.width / bounds.width,
-              height: element.rect.height * native.height / bounds.height,
-            } } : {}),
-          }));
-          const fallback = stageCapture({ ...native, capturedAt: now().toISOString() }, now);
-          return { status: structure.status === "partial" ? "partial" : "complete",
-            coverage: contentCoverage("window"), capturedAt: now().toISOString(), elements,
-            fallbackCapture: fallback };
-        } catch (nativeError) {
-          if (!allowCuaCompatibility) throw nativeError;
-          // Compatibility fallback for an injected pre-native host; the native
-          // path remains the only production observation route.
-        }
-        const request = {
-          pid,
-          windowId,
-          session,
-          includeAccessibilityTree: true,
-          includeScreenshot: true,
-          maxImageDimension: MAX_IMAGE_DIMENSION,
-          maxElements: 512,
-          maxDepth: 24,
-          timeoutMs: 1_500,
-        };
-        let state: Awaited<ReturnType<CuaDriverLike["getWindowState"]>>;
-        let accessibilityAvailable = true;
-        try {
-          state = await driver.getWindowState(request);
-        } catch {
-          accessibilityAvailable = false;
-          // A tree failure must not turn into an unbounded retry loop. One
-          // exact-window screenshot is the documented visual fallback.
-          state = await driver.getWindowState({ ...request, includeAccessibilityTree: false });
-        }
-        const fallback = { ...imageFromWindowState(state, pid, windowId), ...await captureOwnedPopups() };
-        const byIndex = new Map((state.elements ?? []).map((element) => [element.elementIndex.toString(), element]));
-        const observed = new Map<string, CuaWindowElement>();
-        for (const element of state.elements ?? []) {
-          if (element.elementToken) observed.set(element.elementToken, {
-            ...element, ...(element.frame ? { frame: { ...element.frame } } : {}),
-            ...(element.actions ? { actions: [...element.actions] } : {}),
-          });
-        }
-        observedElements.delete(observationKey);
-        observedElements.set(observationKey, observed);
-        while (observedElements.size > 64) observedElements.delete(observedElements.keys().next().value!);
-        const elements = (state.elements ?? []).flatMap((element) => {
-          if (!element.elementToken) return [];
-          const actions = Array.isArray(element.actions)
-            ? element.actions.filter((action): action is string => typeof action === "string" && action.length > 0)
-                .slice(0, 16).map((action) => action.slice(0, 40))
-            : [];
-          const parent = element.parentIndex === undefined ? undefined : byIndex.get(element.parentIndex.toString());
-          const bounds = state.windowBounds;
-          const frame = element.frame;
-          const left = bounds && frame ? Math.max(0, (frame.x - bounds.x) * fallback.width / bounds.width) : 0;
-          const top = bounds && frame ? Math.max(0, (frame.y - bounds.y) * fallback.height / bounds.height) : 0;
-          const right = bounds && frame ? Math.min(fallback.width, (frame.x + frame.w - bounds.x) * fallback.width / bounds.width) : 0;
-          const bottom = bounds && frame ? Math.min(fallback.height, (frame.y + frame.h - bounds.y) * fallback.height / bounds.height) : 0;
-          return [{
-            ref: element.elementToken,
-            ...(parent?.elementToken ? { parentRef: parent.elementToken } : {}),
-            ...(Number.isSafeInteger(element.depth) && element.depth >= 0 ? { depth: element.depth } : {}),
-            ...(typeof element.role === "string" && element.role ? { role: element.role.slice(0, 80) } : {}),
-            ...(typeof element.label === "string" && element.label.trim() ? { label: element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
-            ...(typeof element.enabled === "boolean" ? { enabled: element.enabled } : {}),
-            ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
-            ...(actions.length ? { actions } : {}),
-            ...(actions.includes("set_value") ? { canReplaceValue: true } : {}),
-            ...(right > left && bottom > top && [left, top, right, bottom].every(Number.isFinite)
-              ? { rect: { x: left, y: top, width: right - left, height: bottom - top } } : {}),
-          }];
+          if (element.enabled === false || ![left, top, right, bottom].every(Number.isFinite) || right <= left || bottom <= top) return [];
+          const label = normalizeAccessibleLabel(element.label);
+          return [{ ...(label ? { label } : {}), ...(element.role ? { role: element.role } : {}),
+            rect: { x: left, y: top, width: right - left, height: bottom - top } }];
         });
-        const hasTree = Array.isArray(state.elements);
-        const status = !accessibilityAvailable ? "unavailable" : !hasTree || state.truncated === true || state.elementsComplete === false || state.degraded === true || fallback.ownedPopups.length > 0 ? "partial" : "complete";
-        return {
-          status,
-          coverage: contentCoverage("window", accessibilityAvailable ? state.elements : undefined),
-          capturedAt: now().toISOString(),
-          ...(typeof state.appName === "string" ? { appName: state.appName.slice(0, 120) } : {}),
-          ...(typeof state.windowTitle === "string" ? { windowTitle: state.windowTitle.slice(0, 240) } : {}),
-          elements,
-          // Keep this same-call frame internal even for a complete tree: an
-          // unlabeled/custom control may still need pixels at the MCP boundary.
-          fallbackCapture: stageCapture({ ...fallback, capturedAt: now().toISOString() }, now),
-        };
-      };
-      const hitTarget = async (x: number, y: number, action?: "click" | "set_value") => {
-        const state = await driver.getWindowState({ pid, windowId, session, includeAccessibilityTree: true,
-          includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, maxElements: 512, maxDepth: 24, timeoutMs: 1500 });
-        imageFromWindowState(state, pid, windowId);
-        const bounds = state.windowBounds;
-        if (!bounds || bounds.width <= 0 || bounds.height <= 0) return undefined;
-        // Windows accessibility frames are screen coordinates, while the pill
-        // passes scaled screenshot pixels. Convert before hit-testing.
-        const screenX = bounds.x + x * bounds.width / state.screenshotWidth!;
-        const screenY = bounds.y + y * bounds.height / state.screenshotHeight!;
-        return elementAtScreenPoint(state.elements ?? [], screenX, screenY, action === undefined ? undefined
-          : (element) => action === "set_value" ? element.actions?.includes("set_value") === true
-            : (element.actions === undefined && !/^(?:Text|StaticText|Label)$/i.test(element.role ?? ""))
-              || element.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name)) === true);
-      };
-      const elementByToken = async (token: string, expected?: { role?: string; label?: string }) => {
-        const observed = observedElements.get(observationKey)?.get(token);
-        if (observed && ((expected?.role !== undefined && observed.role !== expected.role)
-          || (expected?.label !== undefined && observed.label?.replace(/[\r\n\t]+/g, " ").slice(0, 160) !== expected.label))) return undefined;
-        const identity = observed ? { role: observed.role, label: observed.label } : expected;
-        const state = await driver.getWindowState({ pid, windowId, session, includeAccessibilityTree: true,
-          includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, maxElements: 512, maxDepth: 24, timeoutMs: 1_500 });
-        const image = imageFromWindowState(state, pid, windowId);
-        const candidates = state.elements ?? [];
-        // elementToken is prefixed with something that changes on every independent
-        // getWindowState call (confirmed empirically: the same, unchanged control got a
-        // different full token on two back-to-back reads), while the suffix after the
-        // last ":" stayed identical both times. An exact match can therefore fail for
-        // the overwhelming majority of real calls even when the target control plainly
-        // still exists and is unchanged -- this was the actual cause behind every
-        // "stale or disabled" click failure tonight, not real staleness. Try the exact
-        // token first in case a future driver version makes it stable, then fall back
-        // to the empirically-stable suffix.
-        //
-        // The suffix alone is only the element's position in THIS walk's tree, not a
-        // real identity -- if the tree genuinely changed (an item was added/removed, a
-        // dialog opened) between the read the caller saw and this walk, the same
-        // suffix can now belong to a DIFFERENT control. Silently acting on it would be
-        // worse than the original "stale" error it replaced. When the caller supplies
-        // the role/label it actually saw (expectedRole/expectedLabel on the action),
-        // a suffix match is trusted only if it also matches those -- a real identity
-        // check, not just a position guess. Without hints, a suffix match is
-        // never trusted: uniqueness only proves that one control currently
-        // occupies the position, not that it is the control the caller saw.
-        let element = candidates.find((candidate) => candidate.elementToken === token);
-        if (!element) {
-          const suffix = token.includes(":") ? token.slice(token.lastIndexOf(":")) : undefined;
-          if (suffix) {
-            const suffixMatches = candidates.filter((candidate) => candidate.elementToken?.endsWith(suffix));
-            if (identity?.role !== undefined || identity?.label !== undefined) {
-              element = suffixMatches.find((candidate) =>
-                (identity.role === undefined || candidate.role === identity.role)
-                && (identity.label === undefined || candidate.label === identity.label)
-                && (!observed || JSON.stringify(candidate.frame) === JSON.stringify(observed.frame)));
-            }
-          }
-        }
-        if (!element) return undefined;
-        return { element, frame: { ...image, ...(state.windowBounds ? { windowBounds: { x: state.windowBounds.x, y: state.windowBounds.y, width: state.windowBounds.width, height: state.windowBounds.height } } : {}) } };
-      };
-      const elementAt = async (x: number, y: number) => (await hitTarget(x, y))?.elementToken;
-      const observedElementByToken = (token: string, expected?: { role?: string; label?: string }) => {
-        const observed = observedElements.get(observationKey)?.get(token);
-        if (!observed || (expected?.role !== undefined && observed.role !== expected.role)
-          || (expected?.label !== undefined && observed.label?.replace(/[\r\n\t]+/g, " ").slice(0, 160) !== expected.label)) return undefined;
-        return observed;
-      };
-      const describeAt = async (x: number, y: number): Promise<CuaStageTargetDescription | undefined> => {
-        const hit = await hitTarget(x, y);
-        if (!hit) return undefined;
-        const description: CuaStageTargetDescription = {};
-        if (typeof hit.label === "string" && hit.label.trim()) description.label = hit.label.replace(/[\r\n\t]+/g, " ").slice(0, 160);
-        if (typeof hit.role === "string" && hit.role.trim()) description.role = hit.role.slice(0, 40);
-        const frame = hit.frame;
-        if (frame && frame.w > 0 && frame.h > 0) description.rect = { x: frame.x, y: frame.y, width: frame.w, height: frame.h };
-        return description;
-      };
-      return await run({ driver, sdk, session, pid, windowId, capture, readStructure, captureTarget: describeAt, elementAt, elementAtPoint: hitTarget,
-        observedElementByToken, elementByToken });
-    } catch (error) {
-      if (cursorIdentity) await hideAgentCursor(driver, session);
-      // A genuine connection failure here means the cached connection (shared by
-      // every persistent-identity call, not just this one) is dead. This never
-      // retries the current call -- a click or type whose outcome is unknown must
-      // never be silently replayed here; that risk is owned by the operation-
-      // receipt system one layer up. It only makes sure every call AFTER this one
-      // gets a fresh connection instead of repeating the exact same failure
-      // forever, which is what happened before this was centralized.
-      if (persistent && isConnectionError(error)) await resetDeadRuntime().catch(() => undefined);
-      throw error;
-    } finally {
-      if (!persistent && started) {
-        try { await driver.endSession({ session }); } catch { /* preserve the primary operation result */ }
+        controlsTruncated = observed.structure.truncated;
+      } catch {
+        // A window without a usable UIA provider still returns its native frame.
       }
-      if (!persistent) await disposeRuntime(runtime);
-    }
+      return { frame: { ...imageFrame, controls,
+        ...(controlsTruncated ? { controlsTruncated: true as const } : {}),
+      }, ...(observed ? { observed } : {}) };
+    };
+    const captureNativeWindow = async (): Promise<CuaStageWindowFrame> => (await captureNativeWindowWithStructure()).frame;
+
+    const captureOwnedPopups = async () => {
+      const ownedPopups: NonNullable<CuaStageCapture["ownedPopups"]> = [];
+      let popupCaptureStatus: "complete" | "unavailable" = "complete";
+      try {
+        const popups = await manager.ownedPopups(pid, windowId.toString());
+        // The first list is the ownership snapshot for this observation. A
+        // second full popup enumeration before every screenshot serialized N
+        // helper round-trips without strengthening input safety (popup input
+        // independently rechecks ownership immediately before dispatch).
+        const captured = await Promise.all(popups.map(async (popup) => {
+          try {
+            const image = await manager.captureWindow(pid, popup.windowId);
+            return { dataUrl: image.dataUrl, width: image.width, height: image.height,
+              capturedAt: now().toISOString(), coordinateSpace: "popup-local" as const };
+          } catch {
+            popupCaptureStatus = "unavailable";
+            return undefined;
+          }
+        }));
+        ownedPopups.push(...captured.filter((popup): popup is NonNullable<typeof popup> => popup !== undefined));
+      } catch { popupCaptureStatus = "unavailable"; }
+      return { ownedPopups, popupCaptureStatus };
+    };
+
+    const capture = async (): Promise<CuaStageWindowFrame> => {
+      const [frame, popups] = await Promise.all([captureNativeWindow(), captureOwnedPopups()]);
+      return { ...frame, ...popups };
+    };
+
+    const readStructure = async (): Promise<CuaStageStructure> => {
+      const { frame, observed } = await captureNativeWindowWithStructure();
+      const capturedAt = frame.capturedAt ?? now().toISOString();
+      if (observed) {
+        const { structure, elements } = observed;
+        return {
+          status: structure.status === "partial" || structure.truncated ? "partial" : "complete",
+          coverage: contentCoverage("window", elements.map(({ mapped }) => mapped)),
+          capturedAt,
+          elements: elements.map(({ native, mapped }) => ({
+            ref: native.ref, depth: native.depth, role: native.role, label: normalizeAccessibleLabel(native.label) ?? "", enabled: native.enabled,
+            actions: mapped.actions, ...(native.actions?.setValue ? { canReplaceValue: true } : {}),
+            rect: { x: (native.rect.x - frame.windowBounds!.x) * frame.width / frame.windowBounds!.width,
+              y: (native.rect.y - frame.windowBounds!.y) * frame.height / frame.windowBounds!.height,
+              width: native.rect.width * frame.width / frame.windowBounds!.width,
+              height: native.rect.height * frame.height / frame.windowBounds!.height },
+          })),
+          fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now),
+        };
+      }
+      return { status: "unavailable", coverage: contentCoverage("window"), capturedAt,
+        elements: [], fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now) };
+    };
+
+    const hitTarget = async (x: number, y: number, action?: "click" | "set_value") => {
+      const { frame, observed } = await captureNativeWindowWithStructure();
+      const bounds = frame.windowBounds;
+      if (!bounds || !observed) return undefined;
+      if (bounds.width <= 0 || bounds.height <= 0) return undefined;
+      const screenX = bounds.x + x * bounds.width / frame.width;
+      const screenY = bounds.y + y * bounds.height / frame.height;
+      const elements = observed.elements.map(({ mapped }) => mapped);
+      return elementAtScreenPoint(elements, screenX, screenY, action === undefined ? undefined
+        : (element) => action === "set_value" ? element.actions?.includes("set_value") === true
+          : element.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name)) === true);
+    };
+
+    const elementByToken = async (token: string, expected?: { role?: string; label?: string }) => {
+      const observed = nativeObservedElements.get(observationKey)?.get(token);
+      if (!observed) return undefined;
+      const normalizedLabel = normalizeAccessibleLabel(observed.label) ?? "";
+      if ((expected?.role !== undefined && observed.role !== expected.role)
+        || (expected?.label !== undefined && normalizedLabel !== expected.label)) return undefined;
+      const { structure, elements } = await readNativeElements();
+      const current = structure.elements.find((candidate) => JSON.stringify(candidate.path) === JSON.stringify(observed.path)
+        && candidate.role === observed.role && candidate.label === observed.label
+        && candidate.className === observed.className && candidate.automationId === observed.automationId);
+      if (!current || current.enabled === false) return undefined;
+      const fresh = elements.find(({ native }) => native === current);
+      if (!fresh) return undefined;
+      const frame = await captureNativeFrame();
+      const rect = current.rect;
+      const mappedFrame = { x: (rect.x - frame.windowBounds!.x) * frame.width / frame.windowBounds!.width,
+        y: (rect.y - frame.windowBounds!.y) * frame.height / frame.windowBounds!.height,
+        w: rect.width * frame.width / frame.windowBounds!.width,
+        h: rect.height * frame.height / frame.windowBounds!.height };
+      return { element: { ...fresh.mapped, elementToken: token, frame: mappedFrame } as CuaWindowElement,
+        frame, nativeElement: current };
+    };
+
+    const elementAt = async (x: number, y: number) => (await hitTarget(x, y))?.elementToken;
+    const observedElementByToken = (token: string, expected?: { role?: string; label?: string }) => {
+      const observed = observedElements.get(observationKey)?.get(token);
+      if (!observed || (expected?.role !== undefined && observed.role !== expected.role)
+        || (expected?.label !== undefined && normalizeAccessibleLabel(observed.label) !== expected.label)) return undefined;
+      return observed;
+    };
+    const captureTarget = async (x: number, y: number): Promise<CuaStageTargetDescription | undefined> => {
+      // This description is used immediately before a coordinate click to
+      // decide whether the readable control label requires owner approval. A
+      // full accessibility-tree walk is unnecessary here: UIA's native
+      // ElementFromPoint is the exact target-resolution mechanism, and avoids
+      // sending thousands of unrelated controls just to inspect one point.
+      const [image, bounds] = await Promise.all([
+        manager.captureWindow(pid, windowId.toString()),
+        manager.windowRect(pid, windowId.toString()),
+      ]);
+      if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0 || x >= image.width || y >= image.height) {
+        throw new DesktopInputNotDispatchedError("Target coordinates must fall inside the current stage window snapshot.");
+      }
+      if (bounds.width <= 0 || bounds.height <= 0) return undefined;
+      const screenX = bounds.x + Math.floor((x + 0.5) * bounds.width / image.width);
+      const screenY = bounds.y + Math.floor((y + 0.5) * bounds.height / image.height);
+      let hit: NativePointControl;
+      try { hit = await manager.pointControl(screenX, screenY); }
+      catch { return undefined; }
+      const rect = {
+        x: (hit.rect.x - bounds.x) * image.width / bounds.width,
+        y: (hit.rect.y - bounds.y) * image.height / bounds.height,
+        width: hit.rect.width * image.width / bounds.width,
+        height: hit.rect.height * image.height / bounds.height,
+      };
+      return {
+        ...(normalizeAccessibleLabel(hit.label) ? { label: normalizeAccessibleLabel(hit.label)! } : {}),
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      };
+    };
+
+    return run({ driver, sdk, session, pid, windowId, captureFrame: captureNativeFrame, capture, readStructure, elementAt,
+      elementAtPoint: hitTarget, observedElementByToken, elementByToken, captureTarget });
   }
 
   async function capture(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageCapture> {
@@ -2186,20 +1901,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
   }
 
   async function readStructure(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageStructure> {
-    try {
-      return await withRegisteredWindow(name, async ({ readStructure: read }) => read(), cursorIdentity);
-    } catch (error) {
-      // read_structure never mutates anything, so retrying it carries none of the
-      // duplicate-action risk a click or type retry would. But only a genuine
-      // connection failure justifies the retry -- a business-logic failure (the
-      // window closed, a real accessibility error) must surface immediately, not
-      // be masked by a pointless reconnect-and-retry that will just fail the
-      // same way again for an unrelated reason.
-      if (!isConnectionError(error)) throw error;
-      await resetDeadRuntime();
-      return withRegisteredWindow(name, async ({ readStructure: read }) => read(), cursorIdentity)
-        .catch(() => { throw error; });
-    }
+    return withRegisteredWindow(name, async ({ readStructure: read }) => read(), cursorIdentity);
   }
 
   async function moveCursor(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<{ capture: CuaStageCapture; cursor: CuaStageCursorProof }> {
@@ -2217,11 +1919,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
 
   async function describeTarget(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
     if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0) throw new Error("Target coordinates must be non-negative whole screenshot pixels.");
-    return withRegisteredWindow(name, async ({ capture: captureWindow, captureTarget }) => {
-      const captured = await captureWindow();
-      if (x >= captured.width || y >= captured.height) throw new Error("Target coordinates must fall inside the current stage window snapshot.");
-      return captureTarget(x, y);
-    }, cursorIdentity);
+    return withRegisteredWindow(name, async ({ captureTarget }) => captureTarget(x, y), cursorIdentity);
   }
 
   /**
@@ -2240,7 +1938,8 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       const element = observedElementByToken(ref, expected);
       if (!element) return undefined;
       const description: CuaStageTargetDescription = {};
-      if (typeof element.label === "string" && element.label.trim()) description.label = element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160);
+      const label = normalizeAccessibleLabel(element.label);
+      if (label) description.label = label;
       if (typeof element.role === "string" && element.role.trim()) description.role = element.role.slice(0, 40);
       const rect = element.frame;
       if (rect && rect.w > 0 && rect.h > 0) description.rect = { x: rect.x, y: rect.y, width: rect.w, height: rect.h };
@@ -2272,13 +1971,14 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       const current = await manager.currentForegroundWindow().catch(() => undefined);
       const windows: CuaDesktopStructureWindow[] = [];
       const elements: CuaDesktopStructureElement[] = [];
+      let nativeElementsTruncated = false;
       const rankedVisible = [...visible].sort((left, right) => {
         const leftFrontmost = current && current.pid === left.pid && current.windowId === left.windowId ? 1 : 0;
         const rightFrontmost = current && current.pid === right.pid && current.windowId === right.windowId ? 1 : 0;
         if (leftFrontmost !== rightFrontmost) return rightFrontmost - leftFrontmost;
         return (right.width * right.height) - (left.width * left.height);
       });
-      for (let index = 0; index < rankedVisible.length && windows.length < MAX_DESKTOP_STRUCTURE_WINDOWS; index++) {
+      for (let index = 0; index < rankedVisible.length; index++) {
         const item = rankedVisible[index]!;
         if (/m9r(?:[- ]overlay)?|agent cursor overlay|cua cursor overlay/i.test(`${item.className ?? ""} ${item.title}`)) continue;
         const x = Number.isFinite(item.x) ? item.x! : 0;
@@ -2293,9 +1993,13 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         try {
           const structure = await manager.windowStructure(item.pid, item.windowId, { maxElements: 512, maxDepth: 24 });
           status = structure.status === "complete" ? "complete" : "partial";
+          const observedCoverage = contentCoverage("window", structure.elements.map((element) => ({
+            role: element.role,
+            actions: Object.entries(element.actions ?? {}).filter(([, enabled]) => enabled).map(([action]) => action),
+          })));
           coverage = structure.status === "complete"
-            ? { scope: "window", visibleViewport: "observed", scrollability: "unknown", offscreenContent: "unknown" }
-            : { scope: "window", visibleViewport: "observed", scrollability: "unknown", offscreenContent: "possible" };
+            ? observedCoverage
+            : { ...observedCoverage, offscreenContent: "possible" };
           for (const element of structure.elements) {
             const er = element.rect;
             const mapped = er ? { x: er.x - origin.x, y: er.y - origin.y, width: er.width, height: er.height } : undefined;
@@ -2303,241 +2007,70 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
             const publicElement: CuaDesktopStructureElement = {
               ref: elementRef, windowRef: ref,
               ...(mapped ? { rect: mapped } : {}),
-              depth: element.depth, role: element.role || undefined, label: element.label || undefined,
+              depth: element.depth, role: element.role || undefined, label: normalizeAccessibleLabel(element.label),
               enabled: element.enabled, ...(element.focused ? { selected: true } : {}),
               ...(element.actions ? { actions: Object.entries(element.actions).filter(([, enabled]) => enabled).map(([action]) => action) } : {}),
             };
             windowElements.push(publicElement);
             if (elements.length < MAX_DESKTOP_STRUCTURE_ELEMENTS) elements.push(publicElement);
+            else nativeElementsTruncated = true;
           }
         } catch {
           // Preserve the visible window even if one app's UIA provider fails.
           // Its exact screenshot remains available in the returned fallback.
         }
-        windows.push({ ref, appName: (item.className ?? "").slice(0, 120), title: item.title.slice(0, 240), rect,
+        windows.push({ ref, appName: (item.processName ?? item.className ?? "").slice(0, 120), title: item.title.slice(0, 240), rect,
           ...(current && current.pid === item.pid && current.windowId === item.windowId ? { frontmost: true } : {}),
-          minimized: false, onCurrentSpace: true, status, coverage, elements: windowElements });
+          minimized: false, status, coverage, elements: windowElements });
       }
       const shellElements = desktop?.elements.map((element) => ({
         ref: `desktop-shell:${element.ref}`, windowRef: "desktop-shell", rect: { x: element.rect.x - origin.x, y: element.rect.y - origin.y, width: element.rect.width, height: element.rect.height },
-        depth: element.depth, role: element.role, label: element.label, enabled: element.enabled,
+        depth: element.depth, role: element.role, label: normalizeAccessibleLabel(element.label) ?? "", enabled: element.enabled,
       } as CuaDesktopStructureElement)) ?? [];
-      const allElements = [...shellElements, ...elements].slice(0, MAX_DESKTOP_STRUCTURE_ELEMENTS);
-      return { scope: "desktop", status: desktop?.status === "partial" || windows.some((window) => window.status !== "complete") ? "partial" : "complete",
+      const combinedElements = [...shellElements, ...elements];
+      const allElements = combinedElements.slice(0, MAX_DESKTOP_STRUCTURE_ELEMENTS);
+      const allElementsTruncated = nativeElementsTruncated || combinedElements.length > allElements.length;
+      return { scope: "desktop", status: allElementsTruncated || desktop?.status === "partial" || windows.some((window) => window.status !== "complete") ? "partial" : "complete",
         coverage: aggregateDesktopCoverage(windows), capturedAt: captured.capturedAt, windows, elements: allElements,
-        shell: desktop ? { status: desktop.status, reason: desktop.truncated ? "Native desktop UIA tree was bounded and marked partial." : "Native desktop UIA tree captured." } : { status: "unavailable", reason: "Native desktop shell UIA was unavailable." },
+        shell: desktop ? { status: desktop.status,
+          reason: desktop.truncated || allElementsTruncated ? "Native desktop UIA structure reached its documented element bound; the screenshot remains available for the rest." : "Native desktop UIA tree captured.",
+          ...(desktop.truncated || allElementsTruncated ? { truncated: true as const } : {}) }
+          : { status: "unavailable", reason: "Native desktop shell UIA was unavailable." },
         fallbackCapture: captured };
-    } catch (nativeError) {
-      if (!allowCuaCompatibility) throw nativeError;
-    }
-    return withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
-      const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
-      const fallbackCapture = stageCapture(capture, now);
-      let shell: CuaDesktopStructure["shell"] = {
-        status: "visual-fallback" as const,
-        reason: "Native Windows UI Automation was unavailable; the same desktop capture remains the bounded visual fallback.",
-      };
-      let listed: Awaited<ReturnType<CuaDriverLike["listWindows"]>>;
-      try {
-        listed = await runtime.driver.listWindows({ onScreenOnly: true });
-      } catch {
-        return {
-          scope: "desktop" as const,
-          status: "unavailable" as const,
-          coverage: aggregateDesktopCoverage([]),
-          capturedAt: capture.capturedAt,
-          windows: [],
-          elements: [],
-          shell,
-          fallbackCapture,
-        };
-      }
-
-      const candidates = (listed.windows ?? []).filter((window): window is CuaWindowInfo => {
-        const bounds = window.bounds;
-        return window.isOnScreen === true && window.onCurrentSpace !== false && window.minimized !== true
-          && Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0
-          && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
-          && [bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
-          && bounds.width > 0 && bounds.height > 0
-          && !/m9r(?:[- ]overlay)?|agent cursor overlay|cua cursor overlay/i.test(`${window.appName} ${window.title}`);
-      }).slice(0, MAX_DESKTOP_STRUCTURE_WINDOWS);
-      const zIndexed = candidates.filter((window) => typeof window.zIndex === "bigint");
-      let frontmostWindowId: bigint | undefined;
-      if (zIndexed.length > 0 && zIndexed.every((window) => typeof window.zIndex === "bigint")) {
-        const highest = zIndexed.reduce((current, window) => window.zIndex! > current ? window.zIndex! : current, zIndexed[0]!.zIndex!);
-        if (zIndexed.filter((window) => window.zIndex === highest).length === 1) frontmostWindowId = zIndexed.find((window) => window.zIndex === highest)!.windowId;
-      }
-
-      const windows: CuaDesktopStructureWindow[] = [];
-      const elements: CuaDesktopStructureElement[] = [];
-      const fallbackControls: CuaStageTargetDescription[] = [];
-
-      // Native UIA is the structure-first shell and whole-screen route. The
-      // native response contains screen-space rectangles, so map them into the
-      // one exact Cua desktop capture before exposing them to the broker.
-      try {
-        const nativeStructure = await manager.desktopStructure({ maxElements: MAX_DESKTOP_STRUCTURE_ELEMENTS, maxDepth: 64 });
-        const nativeElements: CuaDesktopStructureElement[] = [];
-        for (const nativeElement of nativeStructure.elements) {
-          const rect = desktopRectInCapture(nativeElement.rect, screen, capture, nativeStructure.screen);
-          if (!rect) continue;
-          const publicElement: CuaDesktopStructureElement = {
-            ref: `desktop-shell:${nativeElement.ref}`,
-            windowRef: "desktop-shell",
-            rect,
-            depth: nativeElement.depth,
-            ...(nativeElement.role.trim() ? { role: nativeElement.role.slice(0, 80) } : {}),
-            ...(nativeElement.label.trim() ? { label: nativeElement.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
-            enabled: nativeElement.enabled,
-          };
-          nativeElements.push(publicElement);
-          fallbackControls.push({
-            ...(publicElement.label ? { label: publicElement.label } : {}),
-            ...(publicElement.role ? { role: publicElement.role } : {}),
-            rect,
-          });
-        }
-        elements.push(...nativeElements.slice(0, MAX_DESKTOP_STRUCTURE_ELEMENTS));
-        shell = {
-          status: nativeStructure.status,
-          reason: nativeStructure.truncated
-            ? "Native Windows UI Automation captured a bounded whole-desktop control tree; the tree was capped and the exact capture remains available for fallback."
-            : "Native Windows UI Automation captured the bounded whole-desktop control tree in the same observation cycle.",
-          ...(nativeElements.length ? { elements: nativeElements } : {}),
-          ...(nativeStructure.truncated ? { truncated: true as const } : {}),
-        };
-      } catch {
-        // Native UIA is optional at this boundary. Keep one bounded visual
-        // fallback rather than probing another route or failing observation.
-      }
-
-      for (let index = 0; index < candidates.length; index++) {
-        const window = candidates[index]!;
-        const windowRect = desktopRectInCapture(window.bounds, screen, capture);
-        if (!windowRect) continue;
-        const ref = `desktop-window-${index + 1}`;
-        const baseWindow = {
-          ref,
-          appName: window.appName.slice(0, 120),
-          title: window.title.slice(0, 240),
-          rect: windowRect,
-          ...(frontmostWindowId === window.windowId ? { frontmost: true } : {}),
-          ...(window.minimized !== undefined ? { minimized: window.minimized } : {}),
-          ...(window.onCurrentSpace !== undefined ? { onCurrentSpace: window.onCurrentSpace } : {}),
-        };
-        fallbackControls.push({ label: window.title.slice(0, 160) || window.appName.slice(0, 160), role: "desktop-window", rect: windowRect });
-        try {
-          const state = await runtime.driver.getWindowState({
-            pid: window.pid!,
-            windowId: window.windowId,
-            session: session.session,
-            includeAccessibilityTree: true,
-            includeScreenshot: false,
-            maxElements: 512,
-            maxDepth: 24,
-            timeoutMs: 900,
-          });
-          if (state.pid !== window.pid || state.windowId !== window.windowId) throw new Error("window identity changed");
-          const sourceElements = Array.isArray(state.elements) ? state.elements.slice(0, 512) : [];
-          const byIndex = new Map(sourceElements.map((element) => [String(element.elementIndex), element]));
-          const refByIndex = new Map<string, string>();
-          const remainingElements = Math.max(0, MAX_DESKTOP_STRUCTURE_ELEMENTS - elements.length);
-          const pending = sourceElements.filter((element) => typeof element.elementToken === "string").slice(0, remainingElements);
-          for (let elementIndex = 0; elementIndex < pending.length; elementIndex++) {
-            refByIndex.set(String(pending[elementIndex]!.elementIndex), `${ref}:element-${elementIndex + 1}`);
-          }
-          const windowElements: CuaDesktopStructureElement[] = [];
-          for (const element of pending) {
-            const actions = Array.isArray(element.actions)
-              ? element.actions.filter((action): action is string => typeof action === "string" && action.length > 0)
-                .slice(0, 16).map((action) => action.slice(0, 40))
-              : [];
-            const parent = element.parentIndex === undefined ? undefined : byIndex.get(String(element.parentIndex));
-            const rect = element.frame ? desktopRectInCapture({ x: element.frame.x, y: element.frame.y, width: element.frame.w, height: element.frame.h }, screen, capture) : undefined;
-            const publicElement: CuaDesktopStructureElement = {
-              ref: refByIndex.get(String(element.elementIndex))!,
-              windowRef: ref,
-              ...(rect ? { rect } : {}),
-              ...(parent?.elementToken && refByIndex.has(String(parent.elementIndex)) ? { parentRef: refByIndex.get(String(parent.elementIndex))! } : {}),
-              ...(Number.isSafeInteger(element.depth) && element.depth >= 0 ? { depth: element.depth } : {}),
-              ...(typeof element.role === "string" && element.role ? { role: element.role.slice(0, 80) } : {}),
-              ...(typeof element.label === "string" && element.label.trim() ? { label: element.label.replace(/[\r\n\t]+/g, " ").slice(0, 160) } : {}),
-              ...(typeof element.enabled === "boolean" ? { enabled: element.enabled } : {}),
-              ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
-              ...(actions.length ? { actions } : {}),
-              ...(actions.includes("set_value") ? { canReplaceValue: true } : {}),
-            };
-            windowElements.push(publicElement);
-            elements.push(publicElement);
-            if (rect && (publicElement.label || publicElement.role)) {
-              fallbackControls.push({
-                ...(publicElement.label ? { label: publicElement.label } : {}),
-                ...(publicElement.role ? { role: publicElement.role } : {}),
-                rect,
-              });
-            }
-          }
-          const complete = Array.isArray(state.elements) && state.truncated !== true && state.elementsComplete !== false
-            && state.degraded !== true;
-          windows.push({ ...baseWindow, status: complete ? "complete" : "partial", coverage: contentCoverage("window", state.elements), elements: windowElements });
-        } catch {
-          windows.push({ ...baseWindow, status: "unavailable", coverage: contentCoverage("window"), elements: [] });
-        }
-        if (elements.length >= MAX_DESKTOP_STRUCTURE_ELEMENTS) break;
-      }
-      const controls = fallbackControls.slice(0, 200);
-      const capped = fallbackControls.length > controls.length;
-      const boundedFallback: CuaStageCapture = {
-        ...fallbackCapture,
-        ...(controls.length ? { controls } : {}),
-        ...(capped ? { controlsTruncated: true as const } : {}),
-      };
+    } catch (error) {
       return {
-        scope: "desktop" as const,
-        status: shell.status === "complete" && windows.every((window) => window.status === "complete") && !capped
-          ? "complete" as const : "partial" as const,
-        coverage: aggregateDesktopCoverage(windows),
-        capturedAt: capture.capturedAt,
-        windows,
-        elements,
-        shell,
-        fallbackCapture: boundedFallback,
+        scope: "desktop",
+        status: "unavailable",
+        coverage: aggregateDesktopCoverage([]),
+        capturedAt: captured.capturedAt,
+        windows: [],
+        elements: [],
+        shell: { status: "unavailable", reason: `Native desktop UI Automation failed; the current screenshot remains available. ${error instanceof Error ? error.message : String(error)}` },
+        fallbackCapture: captured,
+      };
+    }
+  }
+  async function describeDesktopTarget(name: string, x: number, y: number, cursorIdentity: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
+    return withOwnerDesktop(name, cursorIdentity, async ({ capture }) => {
+      if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Desktop coordinates must fall inside the latest desktop screenshot.");
+      const origin = capture.origin ?? { x: 0, y: 0 };
+      let control: NativePointControl;
+      try { control = await (deps.pointControl ?? manager.pointControl)(origin.x + x, origin.y + y); }
+      catch { return undefined; }
+      const label = normalizeAccessibleLabel(control.label);
+      return {
+        ...(label ? { label } : {}),
+        rect: { x: control.rect.x - origin.x, y: control.rect.y - origin.y,
+          width: control.rect.width, height: control.rect.height },
       };
     });
   }
-
-  async function describeDesktopTarget(name: string, x: number, y: number, cursorIdentity: CuaAgentCursorIdentity): Promise<CuaStageTargetDescription | undefined> {
-    return withOwnerDesktop(name, cursorIdentity, async ({ runtime, session, capture }) => {
-      if (!validPoint(x, y, capture)) throw new Error("Target coordinates must fall inside the latest desktop screenshot.");
-      const size = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
-      const point = desktopPointOnScreen(x, y, capture, size);
-      const { state, shellControl } = await resolveOwnerWindowPoint(runtime, session, point, true);
-      if (shellControl) return { label: shellControl.label, role: "shell-control", rect: shellControl.rect };
-      // Native controls have meaningful accessibility names even when OCR cannot
-      // describe an icon. Identify the smallest named control before resorting
-      // to visual regions; otherwise a normal Start/taskbar click asks for money
-      // approval merely because an OCR region was absent.
-      const hit = (state?.elements ?? []).filter((element) => {
-        const frame = element.frame;
-        return element.enabled !== false && typeof element.label === "string" && element.label.trim()
-          && frame && frame.w > 0 && frame.h > 0 && point.x >= frame.x && point.y >= frame.y
-          && point.x < frame.x + frame.w && point.y < frame.y + frame.h;
-      }).sort((a, b) => a.frame!.w * a.frame!.h - b.frame!.w * b.frame!.h)[0];
-      if (hit) return { label: hit.label!.replace(/[\r\n\t]+/g, " ").slice(0, 160), role: hit.role?.slice(0, 40),
-        rect: { x: hit.frame!.x, y: hit.frame!.y, width: hit.frame!.w, height: hit.frame!.h } };
-      const result = await runtime.driver.parseVisualRegions({
-        captureId: capture.captureId,
-        options: { kinds: [runtime.sdk.VisualRegionKind.Text, runtime.sdk.VisualRegionKind.Icon], minConfidence: 0.35, maxRegions: 128 },
-      });
-      return desktopTargetAt(result, x, y);
-    });
-  }
-
   async function moveDesktopCursor(name: string, x: number, y: number, identity: CuaAgentCursorIdentity) {
     const result = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture);
       await inspectOwnerDesktop(name, identity);
+      // The overlay is presentation only. A missing/late cursor must not
+      // prevent a correctly resolved native click from being dispatched.
       const cursor = await moveOwnerCursor(runtime, session, point, true);
       await inspectOwnerDesktop(name, identity);
       return { capture: stageCapture(capture, now), cursor };
@@ -2551,8 +2084,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     const result = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
-      await clearNativeInputSelection(name);
-      const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, undefined, true);
+      const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, undefined, false);
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, point);
       await inspectOwnerDesktop(name, identity);
@@ -2564,11 +2096,35 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         // whether the app opened. Never bind keyboard input to the taskbar.
         return { status: "unverified" as const, summary: "Windows acknowledged exact shell control invocation; verify the returned capture." };
       }
+      if ((options.button === undefined || options.button === "left") && (options.count ?? 1) === 1) {
+        // UIA's point hit-test is authoritative for a coordinate action. A
+        // smallest-rectangle search can select an overlapping sibling (for
+        // example, a popup suggestion over a page control), so only invoke the
+        // exact live hit if it belongs to the HWND resolved from this point.
+        let control: Awaited<ReturnType<typeof manager.pointControl>> | undefined;
+        try { control = await manager.pointControl(point.screenPoint.x, point.screenPoint.y); }
+        catch { /* an inspection miss has dispatched no input; physical fallback remains available */ }
+        if (control?.windowPid === point.target.pid && control.windowId === point.target.windowId.toString()) {
+          try {
+            const invoked = await manager.pointControl(point.screenPoint.x, point.screenPoint.y, control);
+            if (invoked.invoked) {
+              rememberDesktopInputTarget(name, identity, point.target);
+              return { status: "unverified" as const,
+                summary: "Native UI Automation invoked the exact control under the observed point; the refreshed desktop capture is the separate effect check." };
+            }
+          } catch (error) {
+            // Retry through physical input only when the native layer proved
+            // the semantic attempt sent nothing. An uncertain result must be
+            // observed, never replayed.
+            if (!(error instanceof DesktopInputNotDispatchedError)) throw error;
+          }
+        }
+      }
       // Element tokens are observation metadata, not an input transport. The
       // native sender owns the actual click and uses the already verified
       // window-local point; this keeps semantic clicks from silently falling
       // back into the vendored Cua action endpoint.
-      const outcome = await driverInputAction(runtime.driver, "click", {
+      const outcome = await driverInputAction("click", {
         pid: point.target.pid,
         window_id: Number(point.target.windowId),
         x: point.localPoint.x, y: point.localPoint.y,
@@ -2577,7 +2133,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         session: session.session,
       }, "Cua Driver could not click the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
+        nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
             await manager.sendClick(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
@@ -2585,19 +2141,16 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
             });
           }),
       });
-      // Only a driver-confirmed click can establish where later keyboard input
-      // should go. Returning an unverified click is truthful; remembering its
-      // HWND would let a follow-up type/hotkey act on an unconfirmed focus.
-      if (point.element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(point.element.role ?? "")) {
-        // A click can be unverified while the accessibility field itself is
-        // still a valid exact target. Remember the field only; typing will
-        // re-inspect its token and never rely on click focus.
-        rememberDesktopInputTarget(name, identity, { ...point.target, field: {
-          ...point.screenPoint, label: point.element.label, role: point.element.role,
-        } });
-      }
-      else if (outcome.status === "confirmed") rememberDesktopInputTarget(name, identity, point.target);
-      else forgetDesktopInputTarget(name, identity);
+      // SendInput acceptance is not semantic app confirmation, but it does
+      // establish the exact window the owner-visible click targeted. Preserve
+      // that HWND so a subsequent key/type action can independently revalidate
+      // it and acquire the normal foreground lease. Never infer that the app
+      // changed state from this bookkeeping.
+      const editable = point.element?.actions?.includes("set_value")
+        && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(point.element.role ?? "");
+      rememberDesktopInputTarget(name, identity, editable ? { ...point.target, field: {
+        ...point.screenPoint, label: point.element?.label, role: point.element?.role,
+      } } : point.target);
       return outcome;
     });
     invalidateDesktopCaptures();
@@ -2631,7 +2184,8 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         await moveOwnerCursor(runtime, session, point);
         await inspectOwnerDesktop(name, identity);
         forgetDesktopInputTarget(name, identity);
-        return nativeReplaceTextAtScreenPoint(point.target.pid, point.target.windowId, point.screenPoint.x, point.screenPoint.y, text);
+        return nativeReplaceTextAtScreenPoint(point.target.pid, point.target.windowId, point.screenPoint.x, point.screenPoint.y, text,
+          { session: session.session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
       });
       invalidateDesktopCaptures();
       return { capture: await captureOwnerDesktop(name, identity, true), outcome };
@@ -2653,10 +2207,10 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
           });
           await inspectOwnerDesktop(name, identity);
         }
-        return await deliverTextToExactWindow({ runtime, session: session.session, pid: selected.pid,
+        return await deliverTextToExactWindow({ session: session.session, pid: selected.pid,
           windowId: selected.windowId, selected, text, delayMs, preferForeground: options.confirmFocusForeground,
           deliveryMode: options.deliveryMode,
-          nativeForeground: nativeStageInput(name, selected.pid, selected.windowId, () => manager.sendText(selected.pid, selected.windowId.toString(), text)),
+          nativeForeground: nativeStageInput(selected.pid, selected.windowId, () => manager.sendText(selected.pid, selected.windowId.toString(), text)),
           signal: options.signal });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
@@ -2671,18 +2225,17 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
-      const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
-      const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, screen);
+      const point = await resolveOwnerDesktopPoint(undefined, session, x, y, capture);
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, point);
       await inspectOwnerDesktop(name, identity);
       const amount = Math.min(50, Math.max(1, Math.round(options.amount ?? 3)));
-      const outcome = await driverInputAction(runtime.driver, "scroll", {
+      const outcome = await driverInputAction("scroll", {
         pid: point.target.pid, window_id: Number(point.target.windowId), x: point.localPoint.x, y: point.localPoint.y,
         direction, by: "line", amount, session: session.session,
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
+        nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
             await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
           }),
@@ -2699,17 +2252,16 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(x, y, capture)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
-      const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
-      const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, screen);
+      const point = await resolveOwnerDesktopPoint(undefined, session, x, y, capture);
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, point);
       await inspectOwnerDesktop(name, identity);
-      return driverInputAction(runtime.driver, "scroll", {
+      return driverInputAction("scroll", {
         pid: point.target.pid, window_id: Number(point.target.windowId), x: point.localPoint.x, y: point.localPoint.y,
         direction: scroll.direction, by: scroll.by, amount: scroll.amount, session: session.session,
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, point.target.pid, point.target.windowId, async () => {
+        nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
             const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
             await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y,
               (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount,
@@ -2725,23 +2277,22 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     const outcome = await withOwnerDesktop(name, identity, async ({ runtime, session, capture }) => {
       if (!validPoint(fromX, fromY, capture) || !validPoint(toX, toY, capture)) throw new DesktopInputNotDispatchedError("Both drag points must fall inside the latest desktop screenshot.");
       forgetDesktopInputTarget(name, identity);
-      const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
-      const start = await resolveOwnerDesktopPoint(runtime, session, fromX, fromY, capture, screen);
-      const end = await resolveOwnerDesktopPoint(runtime, session, toX, toY, capture, screen);
+      const start = await resolveOwnerDesktopPoint(undefined, session, fromX, fromY, capture);
+      const end = await resolveOwnerDesktopPoint(undefined, session, toX, toY, capture);
       if (start.target.pid !== end.target.pid || start.target.windowId !== end.target.windowId) {
         throw new DesktopInputNotDispatchedError("A background drag must stay inside one exact window; no drag was sent.");
       }
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, start);
       await inspectOwnerDesktop(name, identity);
-      const outcome = await driverInputAction(runtime.driver, "drag", {
+      const outcome = await driverInputAction("drag", {
         pid: start.target.pid, window_id: Number(start.target.windowId),
         from_x: start.localPoint.x, from_y: start.localPoint.y,
         to_x: end.localPoint.x, to_y: end.localPoint.y,
         duration_ms: options.durationMs ?? 500, steps: 10, session: session.session,
       }, "Cua Driver could not drag on the owner's current desktop.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, start.target.pid, start.target.windowId, async () => {
+        nativeForeground: nativeStageInput(start.target.pid, start.target.windowId, async () => {
             const fromScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), start.localPoint.x, start.localPoint.y, capture.width, capture.height);
             const toScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), end.localPoint.x, end.localPoint.y, capture.width, capture.height);
             await manager.sendDrag(start.target.pid, start.target.windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
@@ -2760,11 +2311,11 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       await inspectOwnerDesktop(name, identity);
       const selected = await verifiedDesktopInputTarget(runtime, name, identity);
       try {
-        return driverInputAction(runtime.driver, "press_key", {
+        return await driverInputAction("press_key", {
           pid: selected.pid, window_id: Number(selected.windowId), key, session: session.session,
         }, "Cua Driver could not press the requested key in the selected window.", {
           preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-          nativeForeground: nativeStageInput(name, selected.pid, selected.windowId, () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), [key])),
+          nativeForeground: nativeStageInput(selected.pid, selected.windowId, () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), [key])),
         });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
@@ -2780,11 +2331,11 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       await inspectOwnerDesktop(name, identity);
       const selected = await verifiedDesktopInputTarget(runtime, name, identity);
       try {
-        return driverInputAction(runtime.driver, "hotkey", {
+        return await driverInputAction("hotkey", {
           pid: selected.pid, window_id: Number(selected.windowId), keys, session: session.session,
         }, "Cua Driver could not send the key combination to the selected window.", {
           preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-          nativeForeground: nativeStageInput(name, selected.pid, selected.windowId, () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), keys)),
+          nativeForeground: nativeStageInput(selected.pid, selected.windowId, () => manager.sendKeyCombo(selected.pid, selected.windowId.toString(), keys)),
         });
       } catch (error) {
         forgetDesktopInputTarget(name, identity);
@@ -2797,61 +2348,40 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
 
   async function listWindowOptions(ownedPid?: number, onScreenOnly = ownedPid === undefined, sessionName?: string): Promise<CuaStageWindowOption[]> {
     if (ownedPid !== undefined && (!Number.isSafeInteger(ownedPid) || ownedPid < 1)) throw new Error("Invalid owned application process.");
-    try {
-      return await listWindowOptionsOnce(ownedPid, onScreenOnly, sessionName);
-    } catch (error) {
-      // This is the window-enumeration call launch()'s up-to-60-attempt polling
-      // loop depends on. Before this fix, a connection that died mid-session kept
-      // being reused here forever -- every launch failed until some unrelated
-      // read_structure call happened to reset the cache first. Read-only, so a
-      // retry here carries no duplicate-action risk, only on a genuine
-      // connection failure, never on an unrelated one.
-      if (!isConnectionError(error)) throw error;
-      await resetDeadRuntime();
-      return listWindowOptionsOnce(ownedPid, onScreenOnly, sessionName);
-    }
+    return listWindowOptionsOnce(ownedPid, onScreenOnly, sessionName);
   }
 
-  async function listWindowOptionsOnce(ownedPid: number | undefined, onScreenOnly: boolean, sessionName?: string): Promise<CuaStageWindowOption[]> {
-    const runtime = await agentRuntime();
-    const { driver } = runtime;
-    // Window enumeration is read-only. A named stage gets a short explicit
-    // Cua session so the native host can apply the same lifecycle guard as
-    // other stage reads; global launch polling intentionally stays sessionless.
-    // transport. Starting and ending a named session for every launch poll
-    // repeatedly cold-started Cua and made ordinary app discovery needlessly
-    // slow. Agent cursor sessions remain explicit and persistent in
-    // ensureAgentSession; this path must not create a throwaway one.
-    const session = sessionName ? safeSessionName(sessionName) : undefined;
-    if (session) await driver.startSession({ session });
-    try {
-      const result = await driver.listWindows({ onScreenOnly });
-      return result.windows
-      .filter((window) => Number.isSafeInteger(window.pid) && (window.pid ?? 0) > 0 && window.pid !== process.pid
-        && typeof window.windowId === "bigint" && window.windowId > BigInt(0)
-        && (ownedPid === undefined ? (!onScreenOnly || window.isOnScreen === true) : window.pid === ownedPid)
-        && (!onScreenOnly || window.minimized !== true)
-        && Number.isFinite(window.bounds.width) && Number.isFinite(window.bounds.height)
-        && (window.minimized === true && !onScreenOnly || window.bounds.width >= 20 && window.bounds.height >= 20)
-        && (window.title.trim().length > 0 || window.appName.trim().length > 0)
-        && !/m9r[- ]overlay/i.test(`${window.appName} ${window.title}`)
+  async function listWindowOptionsOnce(ownedPid: number | undefined, onScreenOnly: boolean, _sessionName?: string): Promise<CuaStageWindowOption[]> {
+    // App discovery and launch verification belong to M9R's native owner-side
+    // window inventory. The old implementation loaded and queried the Cua
+    // daemon on each launch path, so an overlay startup/inventory failure could
+    // masquerade as an app-launch failure and stretch launch latency by tens of
+    // seconds. The native list is already HWND/PID-bound and filters cloaked,
+    // minimized, and non-visible windows at the OS boundary.
+    const windows = ownedPid === undefined
+      ? await manager.listVisibleWindows()
+      : await manager.listOwnedWindowsForProcess(ownedPid);
+    return windows
+      .filter((window) => window.pid !== process.pid
+        && (!onScreenOnly || (window.width >= 20 && window.height >= 20))
+        && (window.title.trim().length > 0 || Boolean(window.processName?.trim()) || Boolean(window.className?.trim()))
+        && !/m9r[- ]overlay|agent cursor overlay|cua cursor overlay/i.test(`${window.processName ?? ""} ${window.className ?? ""} ${window.title}`)
         && !/^m9r(?: overlay)?$/i.test(window.title.trim()))
-      .slice(0, MAX_WINDOW_OPTIONS)
-      .map((window) => ({
-        pid: window.pid!,
-        windowId: window.windowId.toString(),
-        appName: window.appName.slice(0, 80),
-        title: (window.title.trim().length > 0 ? window.title : window.appName).replace(/[\r\n\t]+/g, " ").slice(0, 160),
-        width: Math.trunc(window.bounds.width),
-        height: Math.trunc(window.bounds.height),
-        ...(typeof window.isOnScreen === "boolean" ? { isOnScreen: window.isOnScreen } : {}),
-        ...(typeof window.minimized === "boolean" ? { minimized: window.minimized } : {}),
-        ...(typeof window.onCurrentSpace === "boolean" ? { onCurrentSpace: window.onCurrentSpace } : {}),
-        ...(typeof window.zIndex === "bigint" ? { zIndex: window.zIndex.toString() } : {}),
-      }));
-    } finally {
-      if (session) await driver.endSession({ session }).catch(() => undefined);
-    }
+      .map((window) => {
+        const appName = window.processName?.trim() || window.className?.trim() || "Windows application";
+        const title = window.title.trim() || appName;
+        return {
+          pid: window.pid,
+          windowId: window.windowId,
+          appName: appName.slice(0, 80),
+          title: title.replace(/[\r\n\t]+/g, " ").slice(0, 160),
+          width: Math.trunc(window.width),
+          height: Math.trunc(window.height),
+          isOnScreen: true,
+          minimized: false,
+          ...(Number.isSafeInteger(window.zOrder) ? { zIndex: BigInt(window.zOrder!).toString() } : {}),
+        };
+      });
   }
 
   async function listVisibleWindows(options: { onScreenOnly?: boolean } = {}): Promise<CuaStageWindowOption[]> {
@@ -2883,7 +2413,13 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     let rect: CuaStageWindowBounds;
     try { rect = await manager.windowRect(pid, windowId.toString()); }
     catch (error) {
-      if (!fallbackBounds) throw error;
+      if (!fallbackBounds) {
+        if (error instanceof DesktopInputNotDispatchedError) throw error;
+        throw new DesktopInputNotDispatchedError(
+          `The target window bounds could not be refreshed; no pointer input was sent. ${error instanceof Error ? error.message : String(error)}`,
+          "target-identity",
+        );
+      }
       rect = fallbackBounds;
     }
     return {
@@ -2893,19 +2429,40 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
   }
 
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAtPoint }) => {
-      const before = await captureWindow();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
+      const before = await captureFrame();
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
-      if (!options.confirmFocusForeground && options.button === undefined && options.count === undefined
-        && await nativeControl(name, "click", { x, y, imageWidth: before.width, imageHeight: before.height })) return { capture: stageCapture(await captureWindow(), now),
-        outcome: { status: "unverifiable", summary: "Routed the click to the exact native child control; application effect requires verification." } };
-      await clearNativeInputSelection(name);
-      const element = sdk.ClickPosition.Element ? await elementAtPoint(x, y, "click") : undefined;
-      // Accessibility data supplies the semantic target metadata; the actual
-      // input is always an exact screen-point SendInput dispatch.
-      const outcome = await driverInputAction(driver, "click", {
+      // A coordinate click means the observed point, not the smallest
+      // accessibility rectangle that overlaps it. Overlapping UIA siblings
+      // (autocomplete popups, menus, embedded browser views) can make a tree
+      // bounding-box heuristic activate a different control than the agent
+      // selected. First let UIA hit-test and activate the exact live control at
+      // that screen point (a headless action); if it has no semantic action,
+      // the owner-visible route falls through to native pointer input.
+      if ((options.button === undefined || options.button === "left") && (options.count ?? 1) === 1) {
+        const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
+        let control: NativePointControl | undefined;
+        try { control = await manager.pointControl(screen.x, screen.y); }
+        catch { /* an inspection miss sends nothing; the owner-visible fallback remains available */ }
+        if (control?.pid === pid && control.windowPid === pid && control.windowId === windowId.toString()) {
+          try {
+            const invoked = await manager.pointControl(screen.x, screen.y, control);
+            if (invoked.invoked) {
+              return { capture: stageCapture(await captureWindow(), now), outcome: {
+                status: "unverified" as const,
+                summary: "Native UI Automation activated the exact control at the observed point; the refreshed window capture is the separate effect check.",
+              } };
+            }
+          } catch (error) {
+            // A semantic invocation can only fall through when native code
+            // proves it dispatched no input. Unknown outcomes are never replayed.
+            if (!(error instanceof DesktopInputNotDispatchedError)) throw error;
+          }
+        }
+      }
+      const outcome = await driverInputAction("click", {
         pid,
         window_id: Number(windowId),
         x, y,
@@ -2914,7 +2471,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         session,
       }, "Cua Driver could not click the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
             await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
@@ -2922,12 +2479,10 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
             });
           }),
       });
-      if (cursorIdentity) {
-        if (element?.actions?.includes("set_value") && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(element.role ?? "")) {
-          const point = cursorScreenPoint(x, y, before);
-          rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId, field: { ...point, label: element.label, role: element.role } });
-        }
-      }
+      // A coordinate click has no stable semantic field identity. Do not infer
+      // one from an overlapping UIA rectangle: keyboard delivery follows the
+      // OS focus established by the click, and ref-based field actions retain
+      // their exact identity through clickElement/replaceElement.
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -2941,8 +2496,8 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
   }
 
   async function pressKey(name: string, key: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
-      const before = await captureWindow();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
+      const before = await captureFrame();
       const selected = cursorIdentity
         ? fieldStillInThisWindow(desktopInputTargets.get(desktopInputKey(name, cursorIdentity)), pid, windowId)
         : undefined;
@@ -2950,22 +2505,22 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         const point = desktopPointInWindow(selected.field, before);
         await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, before);
       }
-      const outcome = await driverInputAction(driver, "press_key", {
+      const outcome = await driverInputAction("press_key", {
         pid, window_id: Number(windowId), key, session,
       }, "Cua Driver could not press the requested key in the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         // Every key name reaching this point was already validated upstream
         // (task-stage-actions.ts's validKey/KEY_NAMES) against exactly the
         // set our own native vk_for_key_name mapping covers.
-        nativeForeground: nativeStageInput(name, pid, windowId, () => manager.sendKeyCombo(pid, windowId.toString(), [key])),
+        nativeForeground: nativeStageInput(pid, windowId, () => manager.sendKeyCombo(pid, windowId.toString(), [key])),
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
 
   async function hotkey(name: string, keys: string[], cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof | CuaStageWindowClosedProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
-      const before = await captureWindow();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
+      const before = await captureFrame();
       const selected = cursorIdentity
         ? fieldStillInThisWindow(desktopInputTargets.get(desktopInputKey(name, cursorIdentity)), pid, windowId)
         : undefined;
@@ -2973,11 +2528,11 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         const point = desktopPointInWindow(selected.field, before);
         await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, before);
       }
-      const outcome = await driverInputAction(driver, "hotkey", {
+      const outcome = await driverInputAction("hotkey", {
         pid, window_id: Number(windowId), keys, session,
       }, "Cua Driver could not send the requested key combination to the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, windowId, () => manager.sendKeyCombo(pid, windowId.toString(), keys)),
+        nativeForeground: nativeStageInput(pid, windowId, () => manager.sendKeyCombo(pid, windowId.toString(), keys)),
       });
       try { return { capture: stageCapture(await captureWindow(), now), outcome }; }
       catch (captureFailure) {
@@ -3003,7 +2558,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
   // resolve the app's current owned popup and dispatch straight to its own
   // pid/windowId through the same native SendInput path as the app window.
   async function withRegisteredPopup<T>(nameInput: string, run: (input: {
-    driver: CuaDriverLike; session: string; pid: number; popupWindowId: bigint;
+    driver?: CuaDriverLike; session: string; pid: number; popupWindowId: bigint;
     capture: () => Promise<CuaStageCapture>;
   }) => Promise<T>): Promise<T> {
     const inspected = await manager.inspectStage(nameInput);
@@ -3018,40 +2573,42 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
     // the one almost always meant by "the popup" when exactly one is expected
     // (a single error dialog, a single Save-As box).
     const popupWindowId = BigInt(popups[popups.length - 1]!.windowId);
-    const runtime = await createRuntime(nameInput);
-    const { driver } = runtime;
     const session = safeSessionName(stage.name);
-    let started = false;
-    try {
-      await driver.startSession({ session });
-      started = true;
-      const capture = async (): Promise<CuaStageCapture> => {
-        const state = await driver.getWindowState({ pid, windowId: popupWindowId, session, includeAccessibilityTree: true,
-          includeScreenshot: true, maxImageDimension: MAX_IMAGE_DIMENSION, maxElements: 256, maxDepth: 16, timeoutMs: 1_500 });
-        const verified = (await manager.ownedPopups(pid, windowId.toString())).some((p) => BigInt(p.windowId) === popupWindowId);
-        if (!verified) throw new DesktopInputNotDispatchedError("The popup window closed or changed during this action.");
-        const image = imageFromWindowState(state, pid, popupWindowId);
-        return stageCapture(image, now);
-      };
-      return await run({ driver, session, pid, popupWindowId, capture });
-    } finally {
-      if (started) { try { await driver.endSession({ session }); } catch { /* preserve the primary operation result */ } }
-      await disposeRuntime(runtime);
-    }
+    const capture = async (): Promise<CuaStageCapture> => {
+      const stillOwned = (await manager.ownedPopups(pid, windowId.toString())).some((popup) => BigInt(popup.windowId) === popupWindowId);
+      if (!stillOwned) throw new DesktopInputNotDispatchedError("The popup window closed or changed before input; no input was sent.", "target-identity");
+      const [image, bounds, structure] = await Promise.all([
+        manager.captureWindow(pid, popupWindowId.toString()),
+        manager.windowRect(pid, popupWindowId.toString()),
+        manager.windowStructure(pid, popupWindowId.toString(), { maxElements: 4096, maxDepth: 64 }).catch(() => undefined),
+      ]);
+      const controls = structure?.elements.flatMap((element) => {
+        const left = Math.max(0, (element.rect.x - bounds.x) * image.width / bounds.width);
+        const top = Math.max(0, (element.rect.y - bounds.y) * image.height / bounds.height);
+        const right = Math.min(image.width, (element.rect.x + element.rect.width - bounds.x) * image.width / bounds.width);
+        const bottom = Math.min(image.height, (element.rect.y + element.rect.height - bounds.y) * image.height / bounds.height);
+        return [left, top, right, bottom].every(Number.isFinite) && right > left && bottom > top
+          ? [{ ...(element.label ? { label: element.label } : {}), ...(element.role ? { role: element.role } : {}),
+            rect: { x: left, y: top, width: right - left, height: bottom - top } }]
+          : [];
+      });
+      return stageCapture({ ...image, ...(controls ? { controls, ...(structure?.truncated ? { controlsTruncated: true as const } : {}) } : {}) }, now);
+    };
+    return run({ driver: agentRuntimeReady?.driver, session, pid, popupWindowId, capture });
   }
 
   async function clickPopup(name: string, x: number, y: number, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredPopup(name, async ({ driver, session, pid, popupWindowId, capture }) => {
       const before = await capture();
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the current popup window snapshot.");
-      const outcome = await driverInputAction(driver, "click", {
+      const outcome = await driverInputAction("click", {
         pid, window_id: Number(popupWindowId), x, y,
         ...(options.button ? { button: options.button === "right" ? "right" : options.button === "middle" ? "middle" : "left" } : {}),
         ...(options.count ? { count: options.count } : {}),
         session,
       }, "Cua Driver could not click the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, popupWindowId, async () => {
+        nativeForeground: nativeStageInput(pid, popupWindowId, async () => {
             const screen = await localToScreenPoint(pid, popupWindowId, x, y, before.width, before.height);
             await manager.sendClick(pid, popupWindowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
@@ -3065,11 +2622,11 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
 
   async function pressKeyPopup(name: string, key: string, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredPopup(name, async ({ driver, session, pid, popupWindowId, capture }) => {
-      const outcome = await driverInputAction(driver, "press_key", {
+      const outcome = await driverInputAction("press_key", {
         pid, window_id: Number(popupWindowId), key, session,
       }, "Cua Driver could not press the requested key in the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, popupWindowId, () => manager.sendKeyCombo(pid, popupWindowId.toString(), [key])),
+        nativeForeground: nativeStageInput(pid, popupWindowId, () => manager.sendKeyCombo(pid, popupWindowId.toString(), [key])),
       });
       return { capture: await capture(), outcome };
     });
@@ -3077,11 +2634,11 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
 
   async function hotkeyPopup(name: string, keys: string[], options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
     return withRegisteredPopup(name, async ({ driver, session, pid, popupWindowId, capture }) => {
-      const outcome = await driverInputAction(driver, "hotkey", {
+      const outcome = await driverInputAction("hotkey", {
         pid, window_id: Number(popupWindowId), keys, session,
       }, "Cua Driver could not send the requested key combination to the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, popupWindowId, () => manager.sendKeyCombo(pid, popupWindowId.toString(), keys)),
+        nativeForeground: nativeStageInput(pid, popupWindowId, () => manager.sendKeyCombo(pid, popupWindowId.toString(), keys)),
       });
       return { capture: await capture(), outcome };
     });
@@ -3096,8 +2653,8 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       throw new DesktopInputNotDispatchedError(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
     }
     const delayMs = normalizeTypeDelayMs(options.delayMs);
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAtPoint }) => {
-      const before = await captureWindow();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementAtPoint, elementByToken }) => {
+      const before = await captureFrame();
       // "replace" mode never actually replaced anything -- it discarded the
       // remembered field and fell through to the generic append path
       // (`type_text`), even though the schema requires an exact point for it and
@@ -3116,8 +2673,30 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
           throw new DesktopInputNotDispatchedError("The field at the given point could not be confirmed as the same one you observed; no text was sent.");
         }
         if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, options.x, options.y, before);
+        const selected = await elementByToken(element.elementToken, { role: element.role, label: element.label });
+        if (!selected?.nativeElement) {
+          throw new DesktopInputNotDispatchedError("The observed text field changed before replacement; no text was sent. Re-observe the field and retry.", "target-identity");
+        }
+        if (selected.nativeElement.actions?.setValue) {
+          const semantic = await manager.invokeWindowElement(pid, windowId.toString(), {
+            path: selected.nativeElement.path,
+            action: "setValue",
+            expectedRole: selected.nativeElement.role,
+            expectedLabel: selected.nativeElement.label,
+            expectedClassName: selected.nativeElement.className,
+            expectedAutomationId: selected.nativeElement.automationId,
+            text,
+          });
+          if (semantic.dispatched) {
+            return { capture: stageCapture(await captureWindow(), now), outcome: {
+              status: "unverified" as const,
+              summary: `Native UI Automation replaced the exact observed field value via ${semantic.mechanism ?? "the value pattern"}; the refreshed window capture is the separate effect check.`,
+            } };
+          }
+        }
         const screen = await localToScreenPoint(pid, windowId, options.x, options.y, before.width, before.height, before.windowBounds);
-        const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text);
+        const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text,
+          { session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
         return { capture: stageCapture(await captureWindow(), now), outcome };
       }
       // A remembered field from a window that is no longer this one (e.g. the
@@ -3131,18 +2710,18 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
         const point = desktopPointInWindow(selected.field, before);
         await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, before);
       }
-      const outcome = await deliverTextToExactWindow({ runtime: { sdk, driver }, session, pid, windowId,
-        text, selected, nativeInput: () => nativeControl(name, "type", undefined, { text }),
+      const outcome = await deliverTextToExactWindow({ session, pid, windowId,
+        text, selected,
         delayMs, preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode,
-        nativeForeground: nativeStageInput(name, pid, windowId, () => manager.sendText(pid, windowId.toString(), text)),
+        nativeForeground: nativeStageInput(pid, windowId, () => manager.sendText(pid, windowId.toString(), text)),
         signal: options.signal });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
 
   async function scroll(name: string, xInput: number | undefined, yInput: number | undefined, direction: "up" | "down", cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
-      const before = await captureWindow();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
+      const before = await captureFrame();
       // A scroll targets one already-exact window; unlike a click or a drag,
       // there is nothing ambiguous about defaulting to its center when no
       // point was given -- scrolling the window itself is what was meant.
@@ -3151,14 +2730,12 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       const amount = Math.min(50, Math.max(1, Math.round(options.amount ?? 3)));
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
-      if (!options.confirmFocusForeground && await nativeControl(name, "scroll", { x, y, imageWidth: before.width, imageHeight: before.height }, { direction })) return { capture: stageCapture(await captureWindow(), now),
-        outcome: { status: "unverifiable", summary: "Posted wheel input to the exact native child control; application effect requires verification." } };
-      const outcome = await driverInputAction(driver, "scroll", {
+      const outcome = await driverInputAction("scroll", {
         pid, window_id: Number(windowId), x, y,
         direction, by: "line", amount, session,
       }, "Cua Driver could not scroll the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
             await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount, "vertical");
           }),
@@ -3168,18 +2745,18 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
   }
 
   async function drag(name: string, fromX: number, fromY: number, toX: number, toY: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageDragOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
-      const before = await captureWindow();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
+      const before = await captureFrame();
       if (!validPoint(fromX, fromY, before) || !validPoint(toX, toY, before)) {
         throw new DesktopInputNotDispatchedError("Both drag points must fall inside the current stage window snapshot.");
       }
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, fromX, fromY, before);
-      const outcome = await driverInputAction(driver, "drag", {
+      const outcome = await driverInputAction("drag", {
         pid, window_id: Number(windowId), from_x: fromX, from_y: fromY, to_x: toX, to_y: toY,
         duration_ms: options.durationMs ?? 500, steps: 10, session,
       }, "Cua Driver could not drag in the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(pid, windowId, async () => {
             const fromScreen = await localToScreenPoint(pid, windowId, fromX, fromY, before.width, before.height, before.windowBounds);
             const toScreen = await localToScreenPoint(pid, windowId, toX, toY, before.width, before.height, before.windowBounds);
             await manager.sendDrag(pid, windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
@@ -3190,39 +2767,70 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
   }
 
   function elementCursorPoint(element: CuaWindowElement, frame: CuaStageWindowFrame): { x: number; y: number } | undefined {
-    const bounds = frame.windowBounds;
     const rect = element.frame;
-    if (!bounds || !rect || bounds.width <= 0 || bounds.height <= 0 || frame.width <= 0 || frame.height <= 0) return undefined;
-    const x = Math.floor((rect.x + rect.w / 2 - bounds.x) * frame.width / bounds.width);
-    const y = Math.floor((rect.y + rect.h / 2 - bounds.y) * frame.height / bounds.height);
+    // `elementByToken` re-resolves native UIA refs and maps their absolute
+    // screen rectangle into this exact window screenshot's local pixel space.
+    // Subtracting the window origin here a second time made refs on any window
+    // whose top/left was nonzero resolve outside the screenshot and fail before
+    // dispatch. Keep this conversion local to the ref path; coordinate actions
+    // still convert local screenshot pixels to screen space at the sender.
+    if (!rect || frame.width <= 0 || frame.height <= 0) return undefined;
+    const x = Math.floor(rect.x + rect.w / 2);
+    const y = Math.floor(rect.y + rect.h / 2);
     return validPoint(x, y, frame) ? { x, y } : undefined;
   }
 
   async function clickElement(name: string, ref: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementByToken }) => {
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementByToken }) => {
       const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
       if (!selected?.element.elementToken || selected.element.enabled === false) {
         throw new DesktopInputNotDispatchedError(options.expectedRole !== undefined || options.expectedLabel !== undefined
           ? "The accessibility element could not be confirmed as the same control you observed (role/label did not match); no click was sent."
           : "The accessibility element is stale or disabled; no click was sent.");
       }
-      // Confirmed live against the real driver: a collapsed menu item/tree node/combo
-      // box commonly advertises only "expand" (never "invoke"/"click"/"press"), and a
-      // selectable row commonly advertises only "select"/"toggle" -- restricting this
-      // to click/invoke/press alone rejected those real, legitimate click targets.
-      if (selected.element.actions && !selected.element.actions.some((action) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(action))) throw new DesktopInputNotDispatchedError("The accessibility element does not advertise a click action; no click was sent.");
+      // UIA action metadata describes which semantic patterns are available;
+      // it is not a veto on a physical click at the exact, freshly revalidated
+      // screen point. Some controls expose only focus/scroll or no patterns at
+      // all while remaining clickable. Try the semantic route when the native
+      // identity is strong enough, then use the exact point through the normal
+      // owner-preview input lease when UIA reports no activation pattern.
       const point = elementCursorPoint(selected.element, selected.frame);
       const selectedElementToken = selected.element.elementToken;
       if (!selectedElementToken) throw new DesktopInputNotDispatchedError("The accessibility element is missing its driver token; no click was sent.");
       if (!point) throw new DesktopInputNotDispatchedError("The accessibility element has no usable screen point; no click was sent.", "target-identity");
       if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
-      await clearNativeInputSelection(name);
-      const outcome = await driverInputAction(driver, "click", {
+      if (selected.nativeElement && typeof manager.invokeWindowElement === "function"
+        && selected.nativeElement.role.trim()
+        && (selected.nativeElement.label.trim() || selected.nativeElement.automationId.trim())) {
+        let semantic: Awaited<ReturnType<typeof manager.invokeWindowElement>>;
+        try {
+          semantic = await manager.invokeWindowElement(pid, windowId.toString(), {
+            path: selected.nativeElement.path,
+            action: "activate",
+            expectedRole: selected.nativeElement.role,
+            expectedLabel: selected.nativeElement.label,
+            expectedClassName: selected.nativeElement.className,
+            expectedAutomationId: selected.nativeElement.automationId,
+          });
+        } catch (error) {
+          if (error instanceof DesktopInputNotDispatchedError) throw error;
+          // The semantic request can fail after the provider begins an Invoke
+          // call. Preserve uncertainty and never replay it as a coordinate click.
+          throw error;
+        }
+        if (semantic.dispatched) {
+          return {
+            capture: stageCapture(await captureWindow(), now),
+            outcome: { status: "unverified", summary: `Native UI Automation dispatched ${semantic.mechanism ?? "the control action"}; the refreshed window capture is the separate effect check.` },
+          };
+        }
+      }
+      const outcome = await driverInputAction("click", {
         pid, window_id: Number(windowId), x: point.x, y: point.y, button: "left", count: 1, session,
       }, "Cua Driver could not click the selected accessibility element.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, point.x, point.y, selected.frame.width, selected.frame.height, selected.frame.windowBounds);
             await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {});
           }),
@@ -3238,18 +2846,37 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
 
   async function replaceElement(name: string, ref: string, text: string, cursorIdentity?: CuaAgentCursorIdentity,
     options: CuaStageInputOptions & { expectedRole?: string; expectedLabel?: string } = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementByToken }) => {
-      options.signal?.throwIfAborted();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementByToken }) => {
+      assertNotAbortedBeforeInput(options.signal);
       const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
-      if (!selected?.element.elementToken || selected.element.enabled === false || !selected.element.actions?.includes("set_value")) {
-        throw new DesktopInputNotDispatchedError("The accessibility element is stale, disabled, could not be confirmed as the same control, or does not support value replacement; no text was sent.");
+      if (!selected?.element.elementToken || selected.element.enabled === false
+        || (!selected.nativeElement && !selected.element.actions?.includes("set_value"))) {
+        throw new DesktopInputNotDispatchedError("The accessibility element is stale, disabled, could not be confirmed as the same control, or does not support text replacement; no text was sent.");
       }
       const point = elementCursorPoint(selected.element, selected.frame);
-      if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
       if (!point) throw new DesktopInputNotDispatchedError("The selected accessibility field has no usable point; no text was sent.");
-      const before = await captureWindow();
+      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
+      if (selected.nativeElement && typeof manager.invokeWindowElement === "function") {
+        const semantic = await manager.invokeWindowElement(pid, windowId.toString(), {
+          path: selected.nativeElement.path,
+          action: "setValue",
+          expectedRole: selected.nativeElement.role,
+          expectedLabel: selected.nativeElement.label,
+          expectedClassName: selected.nativeElement.className,
+          expectedAutomationId: selected.nativeElement.automationId,
+          text,
+        });
+        if (semantic.dispatched) {
+          return {
+            capture: stageCapture(await captureWindow(), now),
+            outcome: { status: "unverified", summary: "Native UI Automation set the exact observed value; the refreshed window capture is the separate effect check." },
+          };
+        }
+      }
+      const before = await captureFrame();
       const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
-      const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text);
+      const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text,
+        { session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -3270,19 +2897,19 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
 
   async function scrollDelta(name: string, xInput: number | undefined, yInput: number | undefined, deltaX: number, deltaY: number, unit: "pixel" | "line" | "page", cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}): Promise<CuaStageActionProof> {
     const scroll = scrollDeltaAmount(deltaX, deltaY, unit);
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
-      const before = await captureWindow();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
+      const before = await captureFrame();
       // Same reasoning as scroll(): this targets one already-exact window,
       // so an omitted point defaults to its center rather than being required.
       const x = xInput ?? Math.floor(before.width / 2);
       const y = yInput ?? Math.floor(before.height / 2);
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
-      const outcome = await driverInputAction(driver, "scroll", {
+      const outcome = await driverInputAction("scroll", {
         pid, window_id: Number(windowId), x, y, direction: scroll.direction, by: scroll.by, amount: scroll.amount, session,
       }, "Cua Driver could not scroll the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
-        nativeForeground: nativeStageInput(name, pid, windowId, async () => {
+        nativeForeground: nativeStageInput(pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
             await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y,
               (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount,
@@ -3366,6 +2993,7 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
       if (!Array.isArray(path) || path.length === 0 || path.some((part) => typeof part !== "string" || !part.trim())) {
         throw new DesktopInputNotDispatchedError("The menu path is empty or invalid; no menu action was sent.", "target-identity");
       }
+      let completedSegments = 0;
       try {
         // UIA menu invocation is resolved afresh at each level. This avoids
         // holding a stale COM element across a menu opening and works for
@@ -3378,66 +3006,56 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
           if (!match?.rect) throw new DesktopInputNotDispatchedError(`No enabled menu control named “${segment}” was found in the exact window; no menu action was sent.`, "target-identity");
           const x = Math.floor(match.rect.x + match.rect.width / 2);
           const y = Math.floor(match.rect.y + match.rect.height / 2);
-          await manager.pointControl(x, y, { label: match.label, pid, windowId: windowId.toString(), windowPid: pid,
+          // `pointControl(expected)` re-resolves this exact accessible control
+          // and invokes it in one native request. Calling it twice used to
+          // activate every menu segment twice, often toggling the menu closed.
+          const result = await manager.pointControl(x, y, { label: match.label, pid, windowId: windowId.toString(), windowPid: pid,
             rect: match.rect, invoked: false });
-          await manager.pointControl(x, y, { label: match.label, pid, windowId: windowId.toString(), windowPid: pid,
-            rect: match.rect, invoked: true });
+          if (!result.invoked) {
+            if (completedSegments > 0) throw new DesktopInputOutcomeUnknownError(
+              `Menu path stopped after ${completedSegments} segment(s); inspect the current menu before retrying.`);
+            throw new DesktopInputNotDispatchedError(`Windows did not confirm menu segment “${segment}”; inspect the window before retrying.`, "driver-refused");
+          }
+          completedSegments++;
         }
         const outcome: CuaStageActionOutcome = { status: "unverified", summary: "Native UI Automation invoked each menu path segment; the refreshed capture is the semantic verification." };
         return { capture: stageCapture(await captureWindow(), now), outcome };
       } catch (error) {
-        if (!allowCuaCompatibility) throw error;
+        if (completedSegments > 0 && !(error instanceof DesktopInputOutcomeUnknownError)) {
+          throw new DesktopInputOutcomeUnknownError(
+            `Menu path partially dispatched ${completedSegments} segment(s); inspect the current menu before retrying. ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        if (error instanceof DesktopInputOutcomeUnknownError) throw error;
+        if (error instanceof DesktopInputNotDispatchedError) throw error;
+        throw new DesktopInputNotDispatchedError(
+          `Native menu invocation did not dispatch input. ${error instanceof Error ? error.message : String(error)}`,
+          "driver-refused",
+        );
       }
-      const outcome = actionOutcome(await driver.invokeMenu({ pid, windowId, path, session },
-        options.signal ? { signal: options.signal } : undefined), "Cua Driver could not invoke the selected application menu.");
-      return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
-  }
-
-  function clipboardValue(result: ToolResult): unknown {
-    const encoded = result.structuredJson ?? result.rawJson;
-    if (!encoded) return undefined;
-    try { return JSON.parse(encoded) as unknown; } catch { return undefined; }
   }
 
   async function clipboardRead(name: string, includeText: boolean, cursorIdentity?: CuaAgentCursorIdentity,
     options: CuaStageInputOptions = {}) {
-    return withRegisteredWindow(name, async ({ driver, session, capture: captureWindow }) => {
+    return withRegisteredWindow(name, async ({ capture: captureWindow }) => {
       options.signal?.throwIfAborted();
-      try {
-        const text = await manager.clipboardRead();
-        if (includeText) {
-          return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const, summary: "Native clipboard text was read." }, clipboard: { text } };
-        }
-        return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const, summary: "Native clipboard availability was read." }, clipboard: { available: true } };
-      } catch (nativeError) {
-        if (!allowCuaCompatibility) throw nativeError;
-      }
-      const result = await driver.clipboardRead({ includeText, session }, options.signal ? { signal: options.signal } : undefined);
-      const outcome = actionOutcome(result, "Cua Driver could not read the shared clipboard.");
-      return { capture: stageCapture(await captureWindow(), now), outcome, clipboard: clipboardValue(result) };
+      const text = includeText ? await manager.clipboardRead() : undefined;
+      return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const,
+        summary: includeText ? "Native clipboard text was read." : "Native clipboard availability was read." },
+        clipboard: includeText ? { text } : { available: true } };
     }, cursorIdentity);
   }
 
   async function clipboardWrite(name: string, text: string, cursorIdentity?: CuaAgentCursorIdentity,
     payload?: { imagePath?: string; filePath?: string }, options: CuaStageInputOptions = {}) {
-    return withRegisteredWindow(name, async ({ driver, session, capture: captureWindow }) => {
+    return withRegisteredWindow(name, async ({ capture: captureWindow }) => {
       options.signal?.throwIfAborted();
-      if (!payload?.imagePath && !payload?.filePath) {
-        try {
-          await manager.clipboardWrite(text);
-          return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const, summary: "Native clipboard text was written." } };
-        } catch (nativeError) {
-          if (!allowCuaCompatibility) throw nativeError;
-        }
-      } else if (!allowCuaCompatibility) {
-        throw new DesktopInputNotDispatchedError("Native clipboard supports text only; no clipboard payload was written.", "driver-refused");
-      }
-      const result = await driver.clipboardWrite({ ...(payload?.imagePath ? { imagePath: payload.imagePath }
-        : payload?.filePath ? { filePath: payload.filePath } : { text }), session },
-      options.signal ? { signal: options.signal } : undefined);
-      const outcome = actionOutcome(result, "Cua Driver could not write the shared clipboard.");
-      return { capture: stageCapture(await captureWindow(), now), outcome };
+      if (payload?.imagePath || payload?.filePath) throw new DesktopInputNotDispatchedError(
+        "The native stage clipboard currently accepts text only; no clipboard payload was written.", "native-dispatch-unavailable");
+      await manager.clipboardWrite(text);
+      return { capture: stageCapture(await captureWindow(), now), outcome: { status: "unverified" as const,
+        summary: "Native clipboard text was written." } };
     }, cursorIdentity);
   }
 
@@ -3449,7 +3067,14 @@ async function driverInputAction(_driver: CuaDriverLike, name: string, args: Rec
 
   async function closeAgentCursor(cursorIdentity: CuaAgentCursorIdentity): Promise<void> {
     const details = agentCursorDetails(cursorIdentity);
-    if (!agentRuntimePromise || !agentSessions.has(details.key)) return;
+    // The input target registry is owned by the logical agent identity, not by
+    // the optional cursor process. A target may have been remembered while the
+    // cursor overlay was absent; revoking/closing that agent must clear the
+    // target even when there is no overlay session to dispose.
+    if (!agentRuntimePromise || !agentSessions.has(details.key)) {
+      forgetAgentDesktopInputTargets(cursorIdentity);
+      return;
+    }
     details.session = agentSessions.get(details.key)!.session;
     const runtime = await agentRuntimePromise;
     try {

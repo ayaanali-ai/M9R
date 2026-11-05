@@ -21,7 +21,7 @@ import { readManagedWebBrokerIdentity, type RuntimeBuildIdentity } from "./runti
 import { dirname } from "node:path";
 import { platform } from "node:os";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
-import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
+import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction } from "./web-broker-core";
 import type { MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { isStageAppReference } from "./task-stage-apps";
@@ -427,15 +427,6 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (!accepted.ok) return accepted;
     if (!persistProtocolLedger()) return { ok: false, error: "could not persist AWARE policy state; browser action is refused" };
     return accepted;
-  }
-  function principalForAction(value: unknown): string | null {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-    const request = value as Record<string, unknown>;
-    if (typeof request.agent !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(request.agent)) return null;
-    const memberOwner = request.owner === undefined ? ownerId : request.owner;
-    if (typeof memberOwner !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(memberOwner)) return null;
-    const principalId = `agent:${memberOwner}/${request.agent}`;
-    return principalId.length <= 128 ? principalId : null;
   }
   let roomMode: RoomMode = "watch";
   try { if (options.modeFile) { const saved = readFileSync(options.modeFile, "utf8").trim() as RoomMode; if (ROOM_MODES.includes(saved)) roomMode = saved; } } catch { /* no saved mode yet */ }
@@ -932,34 +923,10 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       if (!persist()) return;
       return reply(res, 200, { ok: true, revoked });
     }
-    if (req.method !== "POST" || (req.url !== "/cmd" && req.url !== "/batch")) return reply(res, 404, { ok: false, error: "not found" });
-    if (req.headers.origin) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
-    if (!sameSecret(req.headers["x-m9r-key"] as string | undefined, options.key)) {
-      return reply(res, 401, { ok: false, error: "missing or wrong key" });
-    }
-    const body = await readBody(req);
-    if (body === null) return reply(res, 413, { ok: false, error: "request too large" });
-    let parsed: WebRequest | WebBatchRequest;
-    try {
-      parsed = JSON.parse(body) as WebRequest;
-    } catch {
-      return reply(res, 400, { ok: false, error: "invalid json" });
-    }
-    const principalId = principalForAction(parsed);
-    if (!principalId) return reply(res, 400, { ok: false, error: "AWARE participant identity is missing or invalid" });
-    // AWARE membership enforcement is disabled on the local /cmd path by owner decision (2026-09-30):
-    // it started blocking every local agent with no owner-facing way to admit them, and the owner has
-    // not asked for this gate at all -- it was never on the requested work list. The protocol ledger
-    // code (packages/web-protocol-placeholder) stays in the tree for whenever it's actually built out
-    // and proven, but nothing here calls authorizeAction to block dispatch until that happens.
-    // The extension-backed /cmd and /batch doors are retired. Native desktop
-    // control is the supported browser/app route now, so never wait for a
-    // WebSocket extension that is intentionally not installed. Keep these
-    // endpoints as an explicit compatibility response for stale callers.
-    return reply(res, 410, {
-      ok: false,
-      error: "The extension-backed browser route is retired; use m9r_stage_action (or m9r_computer_observe/action on an app-window) instead.",
-    });
+    // /cmd and /batch were the browser-extension command door. There is no
+    // extension transport in the product; unknown routes end here without
+    // parsing a body or waiting for a browser connection.
+    return reply(res, 404, { ok: false, error: "not found" });
   });
 
   await new Promise<void>((resolve, reject) => {

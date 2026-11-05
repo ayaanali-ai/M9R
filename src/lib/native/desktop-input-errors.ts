@@ -23,3 +23,15 @@ export class DesktopInputNotDispatchedError extends Error {
     this.code = code;
   }
 }
+
+/** The OS accepted some input in a multi-event sequence, or the native helper
+ * could not prove whether it did. Callers must observe and reconcile instead
+ * of automatically replaying the same physical action. */
+export class DesktopInputOutcomeUnknownError extends Error {
+  readonly dispatchState = "uncertain" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "DesktopInputOutcomeUnknownError";
+  }
+}

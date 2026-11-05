@@ -972,7 +972,6 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         rect: window.rect,
         ...(window.frontmost === true ? { frontmost: true } : {}),
         ...(typeof window.minimized === "boolean" ? { minimized: window.minimized } : {}),
-        ...(typeof window.onCurrentSpace === "boolean" ? { onCurrentSpace: window.onCurrentSpace } : {}),
         ...(window.status === "complete" || window.status === "partial" || window.status === "unavailable" ? { status: window.status } : {}),
         ...(publicContentCoverage(window.coverage) ? { coverage: publicContentCoverage(window.coverage) } : {}),
         elements: windowElements,
