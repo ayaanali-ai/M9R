@@ -512,7 +512,21 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         : stored !== null && typeof stored === "object" && !Array.isArray(stored);
       if (!valid) throw new Error(`M9R local state at ${statePath} is invalid (${key}); the original file was preserved.`);
     }
-    return normalizeStoredScopes(root, { ...defaults, ...parsed } as StoreState);
+    const state = normalizeStoredScopes(root, { ...defaults, ...parsed } as StoreState);
+    // A provider turn can be paused or canceled while a native request is still
+    // in flight. Such a request must remain non-replayable, but it must not stay
+    // "running" forever and block later completion or claim reconciliation.
+    const terminalTasks = new Set(state.tasks.filter((task) => task.resultSummary
+      || ["paused", "canceled", "failed", "completed"].includes(task.receipt?.state ?? "")
+      || task.lifecycle?.state === "completed" || task.lifecycle?.state === "failed").map((task) => task.id));
+    const reconciledAt = now().toISOString();
+    for (const operation of state.stageOperations) {
+      if (operation.state === "running" && terminalTasks.has(operation.taskId)) {
+        operation.state = "uncertain";
+        operation.updatedAt = reconciledAt;
+      }
+    }
+    return state;
   }
 
 

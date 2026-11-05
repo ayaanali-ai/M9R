@@ -1,4 +1,4 @@
-import { isLogicalContinuation, isExplicitNewWork, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
+import { isLogicalContinuation, shouldReusePausedTask, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -452,7 +452,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
   }
 
   function ownerTurnPrompt(profile: ManagedProviderConnectionProfile, taskId: string, text: string): string {
-    const previous = isExplicitNewWork(text) ? undefined : pausedOwnerTask(profile);
+    const previous = shouldReusePausedTask(text) ? pausedOwnerTask(profile) : undefined;
     const task = deps.store.prepareLogicalTaskContext?.(taskId, previous?.id, isLogicalContinuation(text));
     if (deps.store.prepareLogicalTaskContext && !task) throw new Error("M9R could not preserve the logical task handoff; no provider turn was started.");
     // Connection bootstrap instructions are added once by runTask after the

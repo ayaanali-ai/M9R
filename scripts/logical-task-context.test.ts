@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createLocalStore } from "../src/lib/native/local-store";
-import { logicalTaskHandoff } from "../src/lib/native/logical-task-context";
+import { logicalTaskHandoff, shouldReusePausedTask } from "../src/lib/native/logical-task-context";
 import { codexWorkerArgs, writeWebMcpConfig } from "../src/lib/native/web-live-sessions";
 
 test("logical handoff survives store reload and never replays the paused receipt", () => {
@@ -26,6 +26,21 @@ test("logical handoff survives store reload and never replays the paused receipt
     assert.equal(store.prepareLogicalTaskContext(third.id, first.id, true), undefined, "a consumed handoff cannot be replayed");
     assert.ok(logicalTaskHandoff(task).length < 10000);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("paused work is carried only by explicit continuation or redirect wording", () => {
+  assert.equal(shouldReusePausedTask("Continue where you left off"), true);
+  assert.equal(shouldReusePausedTask("Try that again"), true);
+  assert.equal(shouldReusePausedTask("Actually, use Chrome instead"), true);
+  assert.equal(shouldReusePausedTask("No, use the existing Chrome window"), true);
+  assert.equal(shouldReusePausedTask("Open Calculator and compute 17 times 23"), false);
+  assert.equal(shouldReusePausedTask("Open Chrome and search YouTube"), false);
+  assert.equal(shouldReusePausedTask("Start a new task: inspect the browser"), false);
+  // Pill routing mentions are part of the stored message body in some paths.
+  // They must not make an unrelated new request inherit the latest paused work.
+  assert.equal(shouldReusePausedTask("@codex go to Chrome and search YouTube"), false);
+  assert.equal(shouldReusePausedTask("@codex continue where you left off"), true);
+  assert.equal(shouldReusePausedTask("@codex actually, use Chrome instead"), true);
 });
 
 test("legacy Codex thread selectors cannot resume a provider and MCP keeps internal identity", () => {

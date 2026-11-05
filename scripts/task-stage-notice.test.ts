@@ -11,7 +11,7 @@ import { runHookRequest } from "../src/lib/native/hook-run";
 const SESSION = "claude-session-stage-proof";
 const STAGE = "agent-0123456789abcdef01234567";
 
-test("task delivery describes both stage modes without silently creating a background desktop", async () => {
+test("task delivery describes actual stage modes and typed dispatch recovery", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-hook-task-stage-"));
   let received: { token?: string; taskId?: string } | undefined;
   const server = createServer(async (request, response) => {
@@ -56,10 +56,13 @@ test("task delivery describes both stage modes without silently creating a backg
     assert.match(context, new RegExp(task.id));
     assert.match(context, /owner-preview/);
     assert.match(context, /delivery has not started desktop work/);
-    assert.match(context, /desktop-wide view/);
-    assert.match(context, /same mode on every m9r_stage_action call/);
-    assert.match(context, /Use mode "background" only when the task explicitly asks/);
-    assert.match(context, /Use m9r_stage_app to open a normal installed app/);
+    assert.match(context, /view "app" for the selected app window and view "desktop" for desktop-wide inspection or interaction/);
+    assert.match(context, /continue from that exact result instead of assuming the app was already open/);
+    assert.match(context, /background[\s\S]*never creates or switches a Windows virtual desktop/);
+    assert.match(context, /A fresh capture by itself does not establish whether the preceding input was sent/);
+    assert.match(context, /never blindly replay a possibly delivered action/);
+    assert.doesNotMatch(context, /isolated Windows desktop/);
+    assert.match(context, /Preserve existing windows and tabs unless the user asks to change them/);
     assert.equal(received, undefined);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

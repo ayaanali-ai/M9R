@@ -15,7 +15,7 @@ import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { prepareTaskStageNotice } from "./task-stage-notice";
 import { sessionHasUnfinishedDelivery } from "./task-delivery-pump";
-import { isExplicitNewWork, isLogicalContinuation, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
+import { shouldReusePausedTask, isLogicalContinuation, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
 import type { Task } from "./inbox-core";
 
 class DeferredDelivery extends Error {
@@ -106,7 +106,7 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
   // prepareLogicalTaskContext() is idempotent (a task that already has a logicalContext is
   // returned unchanged), so this is safe to call on every delivery attempt, including retries.
   if (task.origin === "human_typed" && !task.logicalContext) {
-    const previous = isExplicitNewWork(task.goal) ? undefined : pausedCodexTask(store, taskId, taskCwd);
+    const previous = shouldReusePausedTask(task.goal) ? pausedCodexTask(store, taskId, taskCwd) : undefined;
     const withContext = store.prepareLogicalTaskContext(taskId, previous?.id, isLogicalContinuation(task.goal));
     if (withContext) task = withContext;
   }

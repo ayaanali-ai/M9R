@@ -128,7 +128,7 @@ test("stopping an agent drops its queued follow-up, so the very next message run
     gated!.release();
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // A fresh message C should run next, not the stale queued B.
+    // A fresh message C should run next, not stale queued B or unrelated paused A context.
     gated!.holdOpen();
     const third = await owner.deliver("codex", "C: do the real next thing");
     assert.equal(third.ok, true);
@@ -136,8 +136,8 @@ test("stopping an agent drops its queued follow-up, so the very next message run
 
     // Tasks are assigned sequential ids (T1=A, T2=B, T3=C) in a fresh store.
     const taskC = store.getTask?.("T3");
-    assert.equal(taskC?.logicalContext?.workId, "T1");
-    assert.equal(taskC?.logicalContext?.control, "redirect");
+    assert.equal(taskC?.logicalContext?.workId, "T3");
+    assert.equal(taskC?.logicalContext?.control, "new-task");
     assert.equal(taskC?.logicalContext?.latestInstruction, "C: do the real next thing");
     assert.equal(taskC?.goal, "C: do the real next thing", "C must have been delivered as the third task");
     assert.ok(["queued", "done"].includes(taskC?.delivery?.state ?? ""), "sanity: C actually reached provider delivery");

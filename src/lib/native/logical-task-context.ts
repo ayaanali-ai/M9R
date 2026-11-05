@@ -13,19 +13,36 @@ export const COMPLETION_DISCIPLINE =
   + "step is destructive or ambiguous, or a hard error blocks it) and say exactly what that "
   + "blocker is. Ending the provider turn alone never completes M9R work, and is never itself "
   + "evidence you were blocked.";
+
+function directiveText(text: string): string {
+  // Pill messages may include the recipient mention in the task body. Strip
+  // that routing prefix before deciding whether the owner explicitly meant to
+  // continue paused work; otherwise "@codex continue" is misread as new work.
+  return text.trim().replace(/^@[\w-]+\s*(?::\s*)?/, "").trim();
+}
+
 export function isLogicalContinuation(text: string): boolean {
-  const trimmed = text.trim();
+  const trimmed = directiveText(text);
   // The strict "continue/resume [task/work]" grammar missed ordinary natural
   // follow-ups that mean the same thing -- "try that again", "finish the
   // remaining steps", "keep going", "pick up where you left off" -- which
   // then lost their carried-forward remainingWork/priorOutcome purely
   // because of phrasing, not because the owner meant something different.
-  if (/^(?:continue|resume)(?:\s+(?:(?:the|my)\s+)?(?:(?:paused|previous)\s+)?(?:M9R\s+)?(?:task|work))?(?:[.!])?$/i.test(trimmed)) return true;
+  if (/^(?:continue|resume)\b/i.test(trimmed)) return true;
   return /^(?:keep going|keep on|carry on|go on|pick up where (?:you|it) left off|finish (?:the\s+)?(?:remaining|rest of the)\s*(?:steps|work|task)?|try (?:that|it) again|(?:please\s+)?retry|where were (?:you|we))\b/i.test(trimmed);
 }
 
 export function isExplicitNewWork(text: string): boolean {
-  return /^(?:new\s+(?:task|work)|(?:start|begin)\s+(?:a\s+)?new\s+(?:task|work)|separate\s+task)\b/i.test(text.trim());
+  return /^(?:new\s+(?:task|work)|(?:start|begin)\s+(?:a\s+)?new\s+(?:task|work)|separate\s+task)\b/i.test(directiveText(text));
+}
+
+/** A paused task is reused only when the owner explicitly continues or redirects it. */
+export function shouldReusePausedTask(text: string): boolean {
+  const trimmed = directiveText(text);
+  if (!trimmed || isExplicitNewWork(trimmed)) return false;
+  if (isLogicalContinuation(trimmed)) return true;
+  return /^(?:no\b|nope\b|actually\b|instead\b|rather\b|change (?:that|the plan)\b|redirect\b|don't\s+do\b|do\s+not\s+do\b|stop\s+and\s+(?:do|go)\b|scratch\s+that\b|forget\s+that\b)/i.test(trimmed)
+    || /\b(?:instead of|change the plan to|replace that with|do this instead)\b/i.test(trimmed);
 }
 
 export function nextLogicalTaskContext(task: Task, previous?: Task, continuation = false): LogicalTaskContext {

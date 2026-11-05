@@ -142,7 +142,7 @@ blanket “M9R blocked because another agent is using input.”
 
 Every action binds an exact target revision, dispatches at most once for that
 operation ID, and records a receipt. A stale HWND/tab/frame/element, changed
-virtual desktop, or changed page revision triggers refresh/rebase. Postconditions
+surface binding, or changed page revision triggers refresh/rebase. Postconditions
 are checked with a fresh observation. Receipts distinguish claimed, committed,
 aborted, stale, conflicted, and expired work.
 
@@ -637,4 +637,28 @@ verified before candidate acceptance or installation.
 These commits are source changes only. Runtime promotion remains gated on the
 full build, candidate provenance, acceptance, install, and live verification
 matrix in XIV.14–15.
+
+### Verified implementation ledger (2026-11-04)
+
+The following source phases were committed on `codex/final-polish-rebirth`:
+
+- `612599e1` binds desktop stages to owner-visible HWNDs and removes the
+  unused Windows virtual-desktop stage implementation and its obsolete proof
+  harness/UI transport.
+- `3539d614` resolves app launches to exact owner windows, including packaged
+  app identity and the `ApplicationFrameHost` window used by packaged apps.
+- `d2df0d13` routes production desktop input through M9R native actions and
+  removes the extension-dependent computer-use tool route. CUA remains only
+  for cursor presentation.
+- The continuation/context phase updates explicit paused-work reuse, reconciles
+  interrupted in-flight stage receipts without replaying input, and corrects
+  task-stage guidance for same-desktop background routing and typed dispatch
+  outcomes. Its commit and final candidate provenance are recorded after the
+  phase is committed and rebuilt.
+
+On the resulting source tree, verification completed with TypeScript typecheck,
+Rust formatting/build/tests, and the expanded JavaScript suite: 2,416 tests
+passed across 200 files, with zero failures. These results establish source
+checks only; no owner-machine task, install, acceptance, or runtime promotion
+has occurred in this phase.
 
