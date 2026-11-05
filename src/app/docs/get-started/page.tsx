@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 
 const TROUBLESHOOTING = [
   ["Command not found", <>Use the commands exactly as shown: <code>npx m9r-cli ...</code>. Check that Node.js 18 or newer and npm are installed, then open a new terminal.</>],
-  ["Browser work is unavailable", <>Run <code>npx m9r-cli web setup --broker-only</code> and then <code>npx m9r-cli doctor</code>. Browser work uses the native desktop runtime; no extension or Developer mode is required.</>],
+  ["Start the broker at login", <>On Windows, run <code>npx m9r-cli web setup --broker-only</code> to register the local broker for login startup. This is optional and does not install a browser extension.</>],
   ["An agent is missing", <>Install the provider CLI, sign in to its own app, and run <code>npx m9r-cli connect</code> again. M9R does not sign in to providers for you.</>],
   ["The connection looks offline", <>Run <code>npx m9r-cli doctor</code>. If it reports that no connection exists, run <code>npx m9r-cli connect</code> again and approve the browser request.</>],
   ["I want to undo this", <>Run <code>npx m9r-cli web uninstall</code> to remove the M9R-owned broker login task, or <code>npx m9r-cli disconnect</code> to revoke the hosted connection and remove its local token.</>],
@@ -23,12 +23,13 @@ export default function GetStarted() {
   return (
     <ReferencePage
       title={<>Make the<br />connection.</>}
-      intro="Use the supported two-command path first. The source-checkout broker and standalone engine are optional."
+      intro="Connect the agents you use and verify the connection. Broker login startup is optional."
     >
       <Panel id="quick-start" title="Quick start" heading="Quick start" status="Any terminal">
         <p>Install Node.js 18 or newer, keep the provider apps you want signed in, then run these commands from any terminal:</p>
-        <code className={d.pre}>{"npx m9r-cli connect\nnpx m9r-cli web setup --broker-only\nnpx m9r-cli doctor"}</code>
-        <p className={d.small}><code>connect</code> finds Claude Code, Codex, and OpenCode and opens one browser approval. <code>web setup --broker-only</code> starts the broker-owned native desktop runtime. <code>doctor</code> confirms the connection.</p>
+        <code className={d.pre}>{"npx m9r-cli connect\nnpx m9r-cli doctor"}</code>
+        <p className={d.small}><code>connect</code> finds Claude Code, Codex, and OpenCode and opens one browser approval. <code>doctor</code> confirms the connection.</p>
+        <p className={d.small}>Optional on Windows: run <code>npx m9r-cli web setup --broker-only</code> if you want the local broker registered to start at login.</p>
         <p className={d.small}>No browser extension, unpacked folder, or Developer mode is required. The runtime works with the exact owner-visible browser window and other desktop apps.</p>
       </Panel>
 
@@ -40,7 +41,7 @@ export default function GetStarted() {
       <ReferenceGuide />
 
       <Panel wide id="standalone-engine" title="Engine" heading="Optional standalone engine" status="Not required">
-        <p>The self-contained Windows engine is a separate distribution and is not required for the supported browser setup. Use it only when a versioned release is published from the <a href="https://github.com/ayaanali-ai/M9R/releases?q=m9r-engine">M9R engine releases</a>. Verify the adjacent SHA-256 file before running its installer. Do not pipe downloaded code directly into PowerShell.</p>
+        <p>The self-contained Windows engine is a separate distribution and is not required for the standard setup. Use it only when a versioned release is published from the <a href="https://github.com/ayaanali-ai/M9R/releases?q=m9r-engine">M9R engine releases</a>. Verify the adjacent SHA-256 file before running its installer. Do not pipe downloaded code directly into PowerShell.</p>
       </Panel>
 
       <Panel wide id="troubleshooting" title="Troubleshooting" heading="If something isn’t connecting." status={`${TROUBLESHOOTING.length} common fixes`}>

@@ -71,7 +71,7 @@ export default function AgentsPage() {
 
           <section id="browser">
             <h2>Browser and desktop work</h2>
-            <p>Browser work uses the native desktop runtime. No browser extension, unpacked folder, or Developer mode is required:</p>
+            <p>Browser and app work use the native desktop runtime. No browser extension, unpacked folder, or Developer mode is required. On Windows, register broker login startup only if you want it:</p>
             <InstallCommand command="npx m9r-cli web setup --broker-only" />
             <p className="lp-agents-note">
               The broker observes and controls the exact owner-visible browser
@@ -100,7 +100,7 @@ export default function AgentsPage() {
             <table className="lp-agents-table">
               <tbody>
                 <tr><td><code>npx m9r-cli connect</code></td><td>Connect every supported agent CLI on this machine, one time, human-approved</td></tr>
-                <tr><td><code>npx m9r-cli web setup --broker-only</code></td><td>Start or repair the native desktop broker</td></tr>
+                <tr><td><code>npx m9r-cli web setup --broker-only</code></td><td>Optionally register the local broker to start at Windows login</td></tr>
                 <tr><td><code>npx m9r-cli doctor</code></td><td>Check the connection and API reachability</td></tr>
                 <tr><td><code>npx m9r-cli rules</code></td><td>Fetch what the workspace currently remembers</td></tr>
                 <tr><td><code>npx m9r-cli inbox</code></td><td>Pull pending instructions from the workspace</td></tr>

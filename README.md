@@ -1,33 +1,27 @@
 # M9R
 
-M9R makes browser work multiplayer: people and provider-neutral agents coordinate on the same owner-approved web task.
+M9R lets people and provider-neutral agents coordinate while working through native desktop and browser controls on the owner's computer.
 
 ## What M9R does
 
-M9R connects people and agents across providers through shared tasks, messages, and owner-controlled browser access. It does not replace provider agents, pool their credentials, or unify their quotas and data policies.
+M9R connects people and agents across providers through shared tasks, messages, and owner-controlled access to desktop apps and browsers. It does not replace provider agents, pool their credentials, or unify their quotas and data policies.
 
 ## Start the open-web demo
 
-The supported setup is two commands from any terminal on Windows 10/11:
+Connect from any terminal on Windows 10/11:
 
 ```powershell
 npx m9r-cli connect
-npx m9r-cli web setup
-```
-
-`connect` finds the Claude Code, Codex, and OpenCode CLIs already installed on
-the machine and opens one browser approval. `web setup` installs the managed
-browser extension, starts the local broker, and opens the browser extension
-page so you can load that one folder. After setup, verify the connection with:
-
-```powershell
+npx m9r-cli web setup --broker-only  # optional: start the local broker at login
 npx m9r-cli doctor
 ```
 
-Do not also run the development broker script or load a second extension copy;
-those are manual troubleshooting paths, not additional installs. See the
-[Windows setup guide](docs/INSTALL_EXTENSION.md) for the one-time browser step
-and current provider limitations.
+`connect` finds the Claude Code, Codex, and OpenCode CLIs already installed on
+the machine and opens one browser approval. No browser extension is installed:
+browser and app work use M9R's native desktop controls. The optional
+`--broker-only` command registers the local broker to start at Windows login.
+See [legacy setup cleanup](docs/INSTALL_EXTENSION.md) only if removing an older
+extension-based installation.
 
 The owner grants access per site. M9R coordinates approved page reads and actions through the local broker; it does not bypass sign-in, CAPTCHAs, site rules, or provider limits. Password and selected sensitive-field types are blocked, but ordinary page content may still be sensitive and can be shared with the agent/provider you choose. This is an early local workflow, not universal browser compatibility or a guarantee that every action succeeds.
 
@@ -35,7 +29,7 @@ Each agent must already be installed and authorized. Account access, quotas, and
 
 ## What is proven today
 
-Implemented in the current code path, with automated tests: the local web broker and its per-site claims and owner approvals; the browser extension's presence overlay, message bar and thread pill; agents on one computer messaging each other from their own terminals, with approvals for agent-started work; and the M9R Web setup and CLI.
+Implemented in the current code path, with automated tests: the local broker, native desktop observation and action tools, agents on one computer messaging each other from their own terminals, approvals for agent-started work, and the M9R CLI.
 
 Not yet proven end to end: provider-attributed live completion, meaning a third-party agent finishing a whole shared task under its own provider account with M9R coordinating it. That is a separate release gate and is not claimed here. Provider availability and quotas can prevent a turn from completing, and cross-machine sharing between different people is not built yet.
 

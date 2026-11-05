@@ -1542,8 +1542,8 @@ async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
       deps.err(`Local web broker could not be installed: ${error instanceof Error ? error.message : "unknown error"}. The approved agent connections remain saved.`);
     }
   }
-  if (!startupApproved) deps.out("Local broker login startup skipped. Browser actions require explicit web setup.");
-  deps.out("Browser extension next step: npx m9r-cli web setup. Follow its instructions to install the unpacked extension in Chrome.");
+  if (!startupApproved) deps.out("Local broker login startup skipped. To enable it later on Windows, run npx m9r-cli web setup --broker-only.");
+  deps.out("Browser-extension transport is retired. Browser and desktop work use M9R's native desktop controls; no extension install is required.");
   // Only human-approved connections reach this point. Machine sync remains
   // disabled when secure local storage is unavailable or minting fails.
   if (deps.writeSecretFile) {

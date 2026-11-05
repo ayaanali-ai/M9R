@@ -4,7 +4,7 @@ export const SIGNUP_URL = "/auth?mode=signup";
 
 export const COMMANDS = [
   { id: "connect", title: "Connect your agents", command: "npx m9r-cli connect", detail: "Find the Claude Code, Codex, and OpenCode CLIs already on this machine and open one human approval.", preview: false },
-  { id: "web-setup", title: "Add browser work", command: "npx m9r-cli web setup", detail: "Install the managed browser extension, start the local broker, and load the one extension folder in Chrome or Edge.", preview: false },
+  { id: "web-setup", title: "Keep desktop work ready", command: "npx m9r-cli web setup --broker-only", detail: "Optionally start M9R's local broker at Windows login. Browser and app work use native desktop controls; no extension install is needed.", preview: false },
   { id: "doctor", title: "Check what is ready", command: "npx m9r-cli doctor", detail: "Confirm the saved connection and API reachability after setup.", preview: false },
   { id: "disconnect", title: "Disconnect hosted access", command: "npx m9r-cli disconnect", detail: "Revoke the connection and remove its local token and temporary state.", preview: false },
 ] as const;
@@ -12,8 +12,8 @@ export const COMMANDS = [
 export const MANUAL_STEPS = [
   ["Keep your providers ready.", "Install Node.js 18 or newer and the agent CLIs you want to use. Keep each provider app signed in; M9R never handles those logins."],
   ["Approve once.", "The connect command opens one browser approval for the providers it detects. Approve it, then let the command finish."],
-  ["Load one extension folder.", "The web setup command opens the browser extension page. Turn on Developer mode and load the copied managed folder once."],
-  ["Verify the connection.", "Run doctor if anything looks offline. Do not start the development broker or load a second extension copy."],
+  ["Use the native desktop route.", "M9R observes and controls the owner-visible browser and apps through its local desktop runtime. It does not install a browser extension."],
+  ["Verify the connection.", "Run doctor if anything looks offline. On Windows, broker-only setup can register the local broker to start at login."],
 ] as const;
 
 export const FAQS = [

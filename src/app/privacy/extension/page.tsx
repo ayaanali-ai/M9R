@@ -23,8 +23,9 @@ export default function RetiredExtensionPage() {
           unpacked extension folders, or a second browser profile.
         </p>
         <p>
-          For setup, use <code>npx m9r-cli connect</code>, then{" "}
-          <code>npx m9r-cli web setup --broker-only</code>. See the{" "}
+          For setup, use <code>npx m9r-cli connect</code>. On Windows, run{" "}
+          <code>npx m9r-cli web setup --broker-only</code> only if you want the{" "}
+          local broker registered to start at login. See the{" "}
           <Link href="/docs/get-started">getting-started guide</Link> for the
           supported path.
         </p>

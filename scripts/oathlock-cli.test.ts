@@ -116,7 +116,7 @@ test("multiple scoped profiles require explicit selection even when a legacy tok
   assert.equal(await run(["whoami", "--agent-kind", "opencode"], deps), 0);
 });
 
-test("connect skips login startup without consent and still explains extension setup", async () => {
+test("connect skips login startup without consent and explains the native desktop route", async () => {
   let installed = 0;
   const { deps, out } = makeDeps({ files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "test-token" }) },
     router: () => jsonResponse(200, { agentKind: "codex", authenticated: true, lastUsedAt: "2030-01-01T00:00:00Z" }),
@@ -124,7 +124,8 @@ test("connect skips login startup without consent and still explains extension s
   });
   assert.equal(await run(["connect", "--agents", "codex"], deps), 0);
   assert.equal(installed, 0);
-  assert.match(out.join("\n"), /npx m9r-cli web setup/);
+  assert.match(out.join("\n"), /npx m9r-cli web setup --broker-only/);
+  assert.match(out.join("\n"), /Browser-extension transport is retired/);
   deps.confirm = async () => true;
   assert.equal(await run(["connect", "--agents", "codex", "--no-autostart"], deps), 0);
   assert.equal(installed, 0);

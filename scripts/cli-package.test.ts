@@ -151,14 +151,15 @@ test("packaged broker updater parses both legacy BOM and BOM-free ownership reco
   assert.deepEqual(parseBrokerUpdateRecord(Buffer.from(`\uFEFF${JSON.stringify(expected)}`, "utf8"), "web broker install"), expected);
 });
 
-test("built MCP package includes the web broker, turn scheduler, powers, and page-notes runtime dependencies", () => {
+test("built MCP package includes native desktop broker and page-notes runtime dependencies", () => {
   for (const name of ["web-broker-client.js", "web-broker-core.js", "turn-scheduler-core.js", "web-broker-server.js", "web-ui-bridge.js", "web-powers-core.js", "page-notes-core.js", "page-notes-store.js"]) {
     assert.ok(existsSync(resolve(distDir, name)), `missing packaged MCP dependency ${name}`);
   }
   const mcpEntry = readFileSync(resolve(distDir, "m9r-mcp.js"), "utf8");
   const mcpServer = readFileSync(resolve(distDir, "mcp-server.js"), "utf8");
   assert.match(mcpEntry, /\.\/web-broker-client\.js/);
-  assert.match(mcpServer, /m9r_web_scroll/);
+  assert.match(mcpServer, /registerComputerUseTools/);
+  assert.doesNotMatch(mcpServer, /m9r_web_scroll/, "retired extension-backed web tools must not return to the packaged MCP server");
   assert.match(mcpServer, /\.\/page-notes-store\.js/);
 });
 
@@ -282,6 +283,82 @@ test("retired extension updater refuses without changing the existing installati
   }
 });
 
+test("retired extension setup and compatibility alias refuse without creating M9R state", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-extension-setup-retired-"));
+  const home = join(temporaryRoot, "home");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  try {
+    const cli = resolve(distDir, "m9r.js");
+    for (const args of [["web", "setup", "--dry-run"], ["setup", "--web", "--dry-run"]]) {
+      const result = spawnSync(process.execPath, [cli, ...args], {
+        cwd: repoRoot,
+        env: { ...process.env, HOME: home, USERPROFILE: home, M9R_HOME: m9rHome },
+        encoding: "utf8",
+      });
+      if (result.error) throw result.error;
+      assert.equal(result.status, 2, result.stderr || result.stdout);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr ?? "", /browser-extension and provider-hook setup is retired/i);
+      assert.equal(existsSync(m9rHome), false, "retired setup must not create broker, extension, or provider state");
+    }
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("legacy web uninstall removes only extension files matching their recorded hashes", { skip: process.platform !== "win32" }, () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-legacy-web-uninstall-"));
+  const home = join(temporaryRoot, "home");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  const extensionPath = join(temporaryRoot, "legacy-extension");
+  const ownedFile = join(extensionPath, "owned.js");
+  const editedFile = join(extensionPath, "edited.js");
+  const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+  const put = (path: string, value: string) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, value);
+  };
+  try {
+    put(ownedFile, "M9R-installed-content");
+    put(editedFile, "owner-edited-content");
+    put(join(m9rHome, "web-setup-manifest.json"), JSON.stringify({
+      version: 1,
+      configs: [],
+      extensionPath,
+      extensionFiles: [
+        { path: ownedFile, hash: sha256("M9R-installed-content") },
+        { path: editedFile, hash: sha256("pre-edit-content") },
+      ],
+      extensionDirectories: [extensionPath],
+      brokerConfigPath: join(m9rHome, "web-broker.json"),
+      brokerConfigHash: "no-owned-broker-config",
+      identityBootstrap: "not-installed",
+      browsers: ["chrome"],
+    }, null, 2));
+
+    const result = spawnSync(process.execPath, [resolve(distDir, "m9r.js"), "web", "uninstall", "--yes"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        APPDATA: join(home, "AppData", "Roaming"),
+        LOCALAPPDATA: join(home, "AppData", "Local"),
+        CODEX_HOME: join(home, ".codex"),
+        M9R_HOME: m9rHome,
+      },
+      encoding: "utf8",
+    });
+    if (result.error) throw result.error;
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(existsSync(ownedFile), false, "an unchanged M9R-owned extension file should be removed");
+    assert.equal(readFileSync(editedFile, "utf8"), "owner-edited-content", "a user-edited file must be preserved");
+    assert.equal(existsSync(join(m9rHome, "web-setup-manifest.json")), false, "the completed legacy ownership record should be removed");
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("retired isolated-browser CLI refuses without opening a profile", () => {
   const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-isolated-browser-retired-"));
   const home = join(temporaryRoot, "home");
@@ -348,7 +425,11 @@ test("packed CLI entry boots the terminal runtime without printing a pairing sec
 
 test("packed CLI runtime uses the compiled mission runner for connected providers", { timeout: 20_000 }, async () => {
   const port = 43_121;
-  const workspace = mkdtempSync(resolve(tmpdir(), "oathlock-cli-runtime-"));
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "oathlock-cli-runtime-"));
+  const workspace = join(temporaryRoot, "workspace");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(m9rHome, { recursive: true });
   const localTokenPath = resolve(workspace, ".m9r", "agents", "codex", "local.json");
   mkdirSync(dirname(localTokenPath), { recursive: true });
   // The token only exercises provider discovery. ACP is disabled for this
@@ -362,7 +443,7 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
     // metadata sync from the OS home directory, independently of cwd.
     // Do not let startup recovery discover or launch the developer's globally
     // installed provider CLIs while this packaging test is running.
-    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
+    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, M9R_HOME: m9rHome, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -407,6 +488,7 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
       await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
     }
     await removeTempWorkspace(workspace);
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 

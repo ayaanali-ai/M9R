@@ -61,7 +61,7 @@ const FAQS = [
   },
   {
     q: "How do I start?",
-    a: "Run npx m9r-cli connect, then npx m9r-cli web setup to connect the agents and browser you already use.",
+    a: "Run npx m9r-cli connect. M9R uses native desktop controls for browser and app work; on Windows, web setup --broker-only optionally registers the local broker to start at login.",
   },
 ];
 
