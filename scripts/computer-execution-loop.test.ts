@@ -7,7 +7,12 @@ import { createLocalStore } from "../src/lib/native/local-store";
 import type { WebBrokerClient } from "../src/lib/native/web-broker-client";
 import type { ComputerUseTarget, ComputerUseResult } from "../src/lib/native/computer-use-contract";
 
-type Payload = { target: ComputerUseTarget; result: ComputerUseResult; observation: { elements: { ref: string }[]; controls: { ref: string }[] }; content?: unknown };
+type Payload = { target: ComputerUseTarget; result: ComputerUseResult; observation: {
+  elements: { ref: string }[];
+  controls: { ref: string; label?: string }[];
+  structure?: { status: string };
+  capture?: unknown;
+}; content?: unknown };
 type Handler = (input: Record<string, unknown>) => Promise<{ structuredContent: Payload; content?: { type: string }[] }>;
 const ref = `e${"a".repeat(24)}_1`;
 
@@ -25,8 +30,7 @@ function fixture() {
   let structureCoverage: Record<string, unknown> | undefined;
   let activeTaskId = "T1";
   let clockMs: number | undefined;
-  const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString(),
-    structure: { status: "complete", capturedAt: new Date().toISOString(), elements: [{ ref: "uia:post-action", role: "Button", label: "Action", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }] } });
+  const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString() });
   const web: Pick<WebBrokerClient, "prepareTaskStage" | "taskStageAction"> = {
     prepareTaskStage: async () => ({ ok: true }),
     async taskStageAction(_token, _taskId, input, _mode, operationId) {
@@ -116,6 +120,21 @@ test("desktop observation exposes only the bounded scroll-coverage contract", as
       { scope: "window", visibleViewport: "observed", scrollability: "indicated", offscreenContent: "possible" });
     assert.equal(JSON.stringify(observed.observation).includes("must-not-leak"), false);
     assert.equal(JSON.stringify(observed.observation).includes("\"max\""), false);
+  } finally { f.close(); }
+});
+
+test("post-action pixel captures are paired with a fresh accessibility structure read", async () => {
+  const f = fixture(); try {
+    const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+    const structureReadsBefore = f.calls.filter((call) => call.kind === "read_structure").length;
+    const result = await f.call("m9r_computer_action", { action: click(observed.target, "post-action-uia-refresh", observed.observation.controls[0]!.ref) });
+
+    assert.equal(f.calls.filter((call) => call.kind === "read_structure").length, structureReadsBefore + 1,
+      "the changed surface must be re-read after the action instead of returning pixels as if they were a structured observation");
+    assert.equal(result.observation.structure?.status, "partial");
+    assert.equal(result.observation.controls.some((control: { label?: string }) => control.label === "Action"), true,
+      "fresh semantic controls remain available for the next decision");
+    assert.ok(result.observation.capture, "the refreshed tree retains its same-read screenshot fallback");
   } finally { f.close(); }
 });
 

@@ -786,26 +786,30 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       if (!deps.web.prepareTaskStage) throw new Error("The owner-launched desktop stage broker cannot prepare a target.");
       const prepared = await deps.web.prepareTaskStage(input.token, input.taskId, input.mode, undefined, input.bindForeground ? { bindForeground: true } : undefined);
       if (!prepared.ok) throw new Error(prepared.error ?? "The desktop stage could not be prepared.");
-      if (input.representation === "structured") {
-        const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "read_structure", view: input.view }, input.mode);
-        if (response.ok) {
-          mutationRevision = stageMutationRevision(response) ?? mutationRevision;
-          const candidate = recordOf(response.result);
-          structure = candidate && (typeof candidate.status === "string" || candidate.scope === "desktop" || Array.isArray(candidate.elements))
-            ? candidate : undefined;
-          const sameCallFallback = recordOf(structure?.fallbackCapture);
-          if (sameCallFallback && typeof sameCallFallback.dataUrl === "string") capture = sameCallFallback;
-        }
+    }
+    // A post-action screenshot is not a post-action accessibility observation.
+    // Read the structured tree whenever the same response did not already carry
+    // one, and prefer read_structure's paired fallback capture so names, bounds,
+    // and pixels describe the same fresh surface.
+    if (input.representation === "structured" && !structure) {
+      const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "read_structure", view: input.view }, input.mode);
+      if (response.ok) {
+        mutationRevision = stageMutationRevision(response) ?? mutationRevision;
+        const candidate = recordOf(response.result);
+        structure = candidate && (typeof candidate.status === "string" || candidate.scope === "desktop" || Array.isArray(candidate.elements))
+          ? candidate : undefined;
+        const sameCallFallback = recordOf(structure?.fallbackCapture);
+        if (sameCallFallback && typeof sameCallFallback.dataUrl === "string") capture = sameCallFallback;
       }
-      if (input.representation === "visual" || !structure) {
-        const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "capture", view: input.view }, input.mode);
-        if (!response.ok) {
-          if (!structure) throw new Error(response.error ?? "The desktop capture failed.");
-        } else {
-          mutationRevision = stageMutationRevision(response) ?? mutationRevision;
-          capture = stageCapture(response);
-          structure = recordOf(capture?.structure) ?? structure;
-        }
+    }
+    if (input.representation === "visual" || (!structure && !capture)) {
+      const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "capture", view: input.view }, input.mode);
+      if (!response.ok) {
+        if (!structure && !capture) throw new Error(response.error ?? "The desktop capture failed.");
+      } else {
+        mutationRevision = stageMutationRevision(response) ?? mutationRevision;
+        capture = stageCapture(response);
+        structure = recordOf(capture?.structure) ?? structure;
       }
     }
     structure = recordOf(structure ?? capture?.structure);
