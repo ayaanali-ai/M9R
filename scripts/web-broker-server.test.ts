@@ -509,10 +509,9 @@ test("retired /cmd and /batch routes fail immediately without waiting for an ext
         method: "POST", headers, body: JSON.stringify({ agent: "claude", provider: "claude-code", sessionId: "retired-route", action: "snapshot" }),
       });
       const body = await response.json() as { ok?: boolean; error?: string };
-      assert.equal(response.status, 410);
+      assert.equal(response.status, 404);
       assert.equal(body.ok, false);
-      assert.match(body.error ?? "", /extension-backed browser route is retired/i);
-      assert.match(body.error ?? "", /m9r_stage_action/i);
+      assert.match(body.error ?? "", /^not found$/i);
       assert.ok(Date.now() - started < 500, `${path} must fail without the extension readiness wait`);
     }
   } finally {
