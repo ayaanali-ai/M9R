@@ -650,15 +650,18 @@ The following source phases were committed on `codex/final-polish-rebirth`:
 - `d2df0d13` routes production desktop input through M9R native actions and
   removes the extension-dependent computer-use tool route. CUA remains only
   for cursor presentation.
-- The continuation/context phase updates explicit paused-work reuse, reconciles
-  interrupted in-flight stage receipts without replaying input, and corrects
-  task-stage guidance for same-desktop background routing and typed dispatch
-  outcomes. Its commit and final candidate provenance are recorded after the
-  phase is committed and rebuilt.
+- `b8a82f54` updates explicit paused-work reuse, reconciles interrupted
+  in-flight stage receipts without replaying input, and corrects task-stage
+  guidance for same-desktop background routing and typed dispatch outcomes.
 
 On the resulting source tree, verification completed with TypeScript typecheck,
 Rust formatting/build/tests, and the expanded JavaScript suite: 2,416 tests
 passed across 200 files, with zero failures. These results establish source
 checks only; no owner-machine task, install, acceptance, or runtime promotion
 has occurred in this phase.
+
+The remaining release gates in XIV.14–15 are still explicit: build a candidate
+from the final committed source, have the owner/Claude review it, then run the
+owner-machine acceptance and installation steps only after that review. A
+successful source test suite or candidate build is not live-task verification.
 
