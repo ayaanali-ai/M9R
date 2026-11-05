@@ -97,7 +97,6 @@ foreach ($runtimeFile in @(
     (Join-Path $cuaRuntime 'bin\cua-cursor-theme.exe'),
     (Join-Path $cuaRuntime 'bin\cua_driver_sdk.dll'),
     (Join-Path $cuaRuntime 'bin\cua_driver_node_runtime.node'),
-    (Join-Path $cuaRuntime 'bin\cua_driver_abi.h'),
     (Join-Path $root 'cli\THIRD_PARTY_NOTICES.md'),
     (Join-Path $root 'cli\licenses\MIT-Cua.txt'),
     (Join-Path $root 'cli\licenses\MPL-2.0.txt'),

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { publishRuntimeBuild, verifyRuntimeBuildManifest, writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
+import { CUA_DRIVER_ARCHIVE_ASSETS, CUA_DRIVER_RUNTIME_ASSETS } from "./cua-runtime-assets.mjs";
 
 // Git for Windows ships its own GNU tar earlier on PATH than the real Windows System32 bsdtar.
 // GNU tar misparses a bare "C:\..." path as a remote "host:path" spec and cannot read .zip
@@ -298,11 +299,10 @@ if (process.platform === "win32") {
   if (archiveHash !== cuaDriverArchiveSha256) {
     throw new Error(`Cua Driver ${cuaDriverVersion} Windows archive checksum mismatch: ${archiveHash}. Refusing to package an unverified daemon.`);
   }
-  const expectedEntries = ["cua-driver.exe", "cua-cursor-theme.exe", "cua-driver-uia.exe", "cua_driver_sdk.dll", "cua_driver_node_runtime.node", "cua_driver_abi.h"];
   const archiveEntries = spawnSync(systemTarExe, ["-tf", archivePath], { encoding: "utf8", windowsHide: true });
   if (archiveEntries.status !== 0) throw new Error(`Could not list the verified Cua Driver archive: ${archiveEntries.stderr || archiveEntries.stdout}`);
   const entries = archiveEntries.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
-  if (JSON.stringify(entries) !== JSON.stringify([...expectedEntries].sort())) {
+  if (JSON.stringify(entries) !== JSON.stringify([...CUA_DRIVER_ARCHIVE_ASSETS].sort())) {
     throw new Error(`Cua Driver ${cuaDriverVersion} archive contents changed; review before packaging. Found: ${entries.join(", ")}`);
   }
   const extractedRoot = join(work, `cua-driver-${cuaDriverVersion}-windows`);
@@ -312,7 +312,7 @@ if (process.platform === "win32") {
   if (extraction.status !== 0) throw new Error(`Could not extract verified Cua Driver ${cuaDriverVersion} Windows files.`);
   const binaryRoot = join(cuaRuntimeRoot, "bin");
   mkdirSync(binaryRoot, { recursive: true });
-  for (const asset of expectedEntries) {
+  for (const asset of CUA_DRIVER_RUNTIME_ASSETS) {
     const source = join(extractedRoot, asset);
     if (!existsSync(source)) throw new Error(`Verified Cua Driver archive is missing ${asset}.`);
     copyFileSync(source, join(binaryRoot, asset));
