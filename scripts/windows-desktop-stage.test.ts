@@ -173,14 +173,17 @@ test("stage compaction reclaims dormant empty preview entries but preserves acti
   const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const emptyPreview = (name: string, taskId?: string) => ({ name, roomDesktopId: uuid(name.length + 1), anchor: null, roomWindowId: null,
     ...(taskId ? { agentAssignment: { handle: "codex", sessionTag: "1234abcd", taskId } } : {}), registeredAt: "2026-10-30T10:00:00.000Z" });
-  const anchoredPreview = (name: string, pid: number) => ({ name, roomDesktopId: uuid(name.length + 2),
-    anchor: { pid, windowId: String(pid) }, roomWindowId: uuid(name.length + 100), registeredAt: "2026-10-30T10:00:00.000Z" });
+  const anchoredPreview = (name: string, pid: number, taskId?: string) => ({ name, roomDesktopId: uuid(name.length + 2),
+    anchor: { pid, windowId: String(pid) }, roomWindowId: uuid(name.length + 100),
+    ...(taskId ? { agentAssignment: { handle: "codex", sessionTag: "1234abcd", taskId } } : {}),
+    registeredAt: "2026-10-30T10:00:00.000Z" });
   writeFileSync(join(root, "windows-stages.json"), JSON.stringify({ version: 6, stages: [
     emptyPreview("preview-agent-empty"),
     emptyPreview("preview-agent-finished", "finished-task"),
     emptyPreview("preview-agent-active", "active-task"),
     anchoredPreview("preview-agent-live-window", 7_777),
     anchoredPreview("preview-agent-dead-window", 9_000),
+    anchoredPreview("preview-agent-active-dead-window", 9_001, "active-task"),
     { name: "manual-empty-stage", roomDesktopId: uuid(999), anchor: null, roomWindowId: null, registeredAt: "2026-10-30T10:00:00.000Z" },
   ] }), "utf8");
   const manager = createWindowsDesktopStageManager({
@@ -193,7 +196,7 @@ test("stage compaction reclaims dormant empty preview entries but preserves acti
   await manager.ensureStage("preview-agent-new-session");
 
   const names = manager.list().map((stage) => stage.name).sort();
-  assert.deepEqual(names, ["manual-empty-stage", "preview-agent-active", "preview-agent-live-window", "preview-agent-new-session"]);
+  assert.deepEqual(names, ["manual-empty-stage", "preview-agent-active", "preview-agent-active-dead-window", "preview-agent-live-window", "preview-agent-new-session"]);
 }));
 
 test("creates an owner-visible stage as local metadata without issuing native window operations", async () => withRoot(async (root) => {

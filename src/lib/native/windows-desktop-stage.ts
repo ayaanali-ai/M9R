@@ -178,9 +178,14 @@ function withoutStaleOwnerPreviewStages(
 ): WindowsStageRecord[] {
   return stages.filter((stage) => {
     if (!stage.name.startsWith(OWNER_PREVIEW_STAGE_PREFIX)) return true;
-    if (stage.anchor) return alive(stage.anchor.pid);
     const taskId = stage.agentAssignment?.taskId;
-    if (taskId) return taskActive(taskId);
+    // A task may intentionally close its current app before selecting or
+    // launching the next one. Preserve that active stage identity even when
+    // the old HWND's process has exited; launch recovery clears only the dead
+    // anchor while retaining the in-flight assignment and coordination IDs.
+    if (taskId && taskActive(taskId)) return true;
+    if (stage.anchor) return alive(stage.anchor.pid);
+    if (taskId) return false;
     // Cursor priming can create a stage before there is an app/window to bind.
     // Preserve the short prepare→assign handoff, but don't retain empty session
     // records indefinitely after the task has moved on or the provider closed.
