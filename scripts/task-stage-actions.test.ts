@@ -15,7 +15,7 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
   assert.deepEqual(parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "search terms" }),
     { kind: "type_then_enter", view: "app", text: "search terms" });
   assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", text: "search terms" }), /exact app view/);
-  assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "x".repeat(501) }), /Invalid stage input text/);
+  assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "x".repeat(5_001) }), /Invalid stage input text/);
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
   assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
@@ -25,7 +25,8 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
 test("type-then-Enter is one exact app-stage batch and reports a typed pre-dispatch refusal on step two as partial", async () => {
   const identity = { handle: "codex", sessionId: "session" };
   const calls: string[] = [];
-  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() } };
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const } };
   const driver = {
     typeText: async (_name: string, text: string, _identity: unknown, options?: unknown) => {
       calls.push(`type:${text}:${JSON.stringify(options)}`); return proof;
@@ -116,6 +117,33 @@ test("explicit app view targets the selected window while remaining in owner-pre
   }
   assert.deepEqual(calls, ["app capture", "app click", "app type"]);
   assert.throws(() => parseTaskStageAction({ kind: "capture", view: "other-user-window" }), /Invalid stage action view/);
+});
+
+test("text and save shortcuts stay on the selected app while modal controls stay on its popup", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const } };
+  const driver = {
+    typeText: async (...args: unknown[]) => { calls.push({ method: "typeText", args }); return proof; },
+    hotkey: async (...args: unknown[]) => { calls.push({ method: "hotkey", args }); return proof; },
+    capturePopup: async (...args: unknown[]) => { calls.push({ method: "capturePopup", args }); return proof.capture; },
+    clickPopup: async (...args: unknown[]) => { calls.push({ method: "clickPopup", args }); return proof; },
+    pressKeyPopup: async (...args: unknown[]) => { calls.push({ method: "pressKeyPopup", args }); return proof; },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+
+  await runTaskStageAction(driver, "selected-app", { kind: "type", view: "app", text: "M9R demo preparation" }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "hotkey", view: "app", keys: ["Control", "S"] }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "capture", view: "popup" }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "click", view: "popup", x: 20, y: 12 }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "press_key", view: "popup", key: "Enter" }, identity);
+
+  assert.deepEqual(calls.map(({ method }) => method), ["typeText", "hotkey", "capturePopup", "clickPopup", "pressKeyPopup"]);
+  assert.equal(calls[0]?.args[0], "selected-app", "text is sent through the specifically selected app window");
+  assert.equal(calls[1]?.args[0], "selected-app", "the save shortcut is sent through that same app window");
+  assert.deepEqual(calls[2]?.args, ["selected-app"], "the modal is captured from the selected app's owned popup");
+  assert.equal(calls[3]?.args[0], "selected-app", "popup coordinates are dispatched to the owned popup route");
+  assert.equal(calls[4]?.args[0], "selected-app", "popup confirmation keys are dispatched to the owned popup route");
 });
 
 test("owner-preview app actions preserve semantic delivery until foreground is explicit", async () => {
