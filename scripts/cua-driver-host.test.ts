@@ -15,6 +15,7 @@ test("the installed CLI and engine SDK package records stay aligned with the pin
   const rootLock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as { packages: Record<string, { version?: string; resolved?: string; integrity?: string; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> }> };
   const cliPackage = JSON.parse(readFileSync(new URL("../cli/package.json", import.meta.url), "utf8")) as { dependencies: Record<string, string> };
   const cliLock = JSON.parse(readFileSync(new URL("../cli/package-lock.json", import.meta.url), "utf8")) as { packages: Record<string, { version?: string; resolved?: string; integrity?: string; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> }> };
+  const cliNotices = readFileSync(new URL("../cli/THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
   const rootSdk = rootLock.packages["node_modules/@trycua/cua-driver"];
   const cliSdk = cliLock.packages["node_modules/@trycua/cua-driver"];
 
@@ -23,6 +24,9 @@ test("the installed CLI and engine SDK package records stay aligned with the pin
   assert.equal(cliLock.packages[""]?.dependencies?.["@trycua/cua-driver"], CUA_DRIVER_VERSION);
   assert.equal(rootSdk?.version, CUA_DRIVER_VERSION);
   assert.deepEqual(cliSdk, rootSdk);
+  assert.ok(cliNotices.includes(`| \x60@trycua/cua-driver\x60 | ${CUA_DRIVER_VERSION} |`));
+  assert.ok(cliNotices.includes(`| \x60@trycua/cua-driver-win32-x64-msvc\x60 | ${CUA_DRIVER_VERSION} |`));
+  assert.ok(cliNotices.includes(`| Cua Driver Windows standalone host, UI helper, and cursor-theme helper | ${CUA_DRIVER_VERSION} |`));
   const driverPackages = Object.keys(rootLock.packages).filter((name) => name.startsWith("node_modules/@trycua/cua-driver"));
   assert.ok(driverPackages.length > 1, "expected the pinned SDK and its platform packages in the root lockfile");
   for (const packageName of driverPackages) assert.deepEqual(cliLock.packages[packageName], rootLock.packages[packageName], packageName);
