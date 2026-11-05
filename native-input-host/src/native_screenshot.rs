@@ -11,7 +11,7 @@ use windows::Win32::{
     Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteObject, GetDC, GetDIBits,
         GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-        HGDIOBJ, SRCCOPY,
+        HBITMAP, HDC, HGDIOBJ, SRCCOPY,
     },
     Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS},
     UI::WindowsAndMessaging::GetWindowRect,
@@ -29,7 +29,9 @@ pub struct NativeWindowCapture {
 
 #[cfg(windows)]
 fn png_data_url(width: u32, height: u32, bgra: &[u8]) -> Result<String, String> {
-    let mut rgba = Vec::with_capacity(bgra.len());
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(bgra.len())
+        .map_err(|error| format!("Windows could not allocate PNG pixels: {error}"))?;
     for px in bgra.chunks_exact(4) {
         rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
     }
@@ -44,6 +46,25 @@ fn png_data_url(width: u32, height: u32, bgra: &[u8]) -> Result<String, String> 
             .map_err(|error| error.to_string())?;
     }
     Ok(format!("data:image/png;base64,{}", BASE64.encode(bytes)))
+}
+
+#[cfg(windows)]
+fn invalid_gdi_object(object: HGDIOBJ) -> bool {
+    object.0.is_null() || object.0 as isize == -1
+}
+
+/// Restore the memory DC's prior bitmap before GetDIBits. Win32 requires the
+/// bitmap passed to GetDIBits to be deselected from every DC.
+#[cfg(windows)]
+fn deselect_capture_bitmap(memory: HDC, bitmap: HBITMAP, previous: HGDIOBJ) -> Result<(), String> {
+    if invalid_gdi_object(previous) {
+        return Err("Windows could not select the capture bitmap into its memory context".into());
+    }
+    let displaced = unsafe { SelectObject(memory, previous) };
+    if displaced.0 != bitmap.0 {
+        return Err("Windows could not deselect the capture bitmap before reading pixels".into());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -100,6 +121,14 @@ pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
         return Err("Windows could not allocate a capture bitmap".into());
     }
     let previous = unsafe { SelectObject(memory, HGDIOBJ(bitmap.0)) };
+    if invalid_gdi_object(previous) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            ReleaseDC(Some(hwnd), source);
+        }
+        return Err("Windows could not select the capture bitmap into its memory context".into());
+    }
     let painted = unsafe { PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(0)).as_bool() };
     let copied = if painted {
         true
@@ -119,6 +148,14 @@ pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
         },
         ..Default::default()
     };
+    if let Err(error) = deselect_capture_bitmap(memory, bitmap, previous) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            ReleaseDC(Some(hwnd), source);
+        }
+        return Err(error);
+    }
     let read = if copied {
         unsafe {
             GetDIBits(
@@ -135,9 +172,6 @@ pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
         0
     };
     unsafe {
-        if !previous.0.is_null() {
-            SelectObject(memory, previous);
-        }
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
         ReleaseDC(Some(hwnd), source);
@@ -199,6 +233,15 @@ pub fn capture_desktop() -> Result<NativeWindowCapture, String> {
     }
     let width_u = width as u32;
     let height_u = height as u32;
+    let pixel_bytes = (width_u as usize)
+        .checked_mul(height_u as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "Windows returned virtual-screen bounds too large to capture".to_owned())?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(pixel_bytes).map_err(|error| {
+        format!("Windows could not allocate the virtual-screen capture buffer: {error}")
+    })?;
+    pixels.resize(pixel_bytes, 0);
     let source = unsafe { GetDC(None) };
     if source.0.is_null() {
         return Err("Windows returned no virtual-screen device context".into());
@@ -219,6 +262,16 @@ pub fn capture_desktop() -> Result<NativeWindowCapture, String> {
         return Err("Windows could not allocate a virtual-screen capture bitmap".into());
     }
     let previous = unsafe { SelectObject(memory, HGDIOBJ(bitmap.0)) };
+    if invalid_gdi_object(previous) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            ReleaseDC(None, source);
+        }
+        return Err(
+            "Windows could not select the virtual-screen bitmap into its memory context".into(),
+        );
+    }
     let copied = unsafe {
         BitBlt(
             memory,
@@ -245,7 +298,14 @@ pub fn capture_desktop() -> Result<NativeWindowCapture, String> {
         },
         ..Default::default()
     };
-    let mut pixels = vec![0u8; width_u as usize * height_u as usize * 4];
+    if let Err(error) = deselect_capture_bitmap(memory, bitmap, previous) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            ReleaseDC(None, source);
+        }
+        return Err(error);
+    }
     let read = if copied {
         unsafe {
             GetDIBits(
@@ -262,9 +322,6 @@ pub fn capture_desktop() -> Result<NativeWindowCapture, String> {
         0
     };
     unsafe {
-        if !previous.0.is_null() {
-            SelectObject(memory, previous);
-        }
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
         let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
         ReleaseDC(None, source);

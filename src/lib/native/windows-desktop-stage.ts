@@ -590,7 +590,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return semanticAction;
   }
 
-  async function captureWindow(pid: number, windowId: string): Promise<{ dataUrl: string; width: number; height: number }> {
+  async function captureWindow(pid: number, windowId: string): Promise<{ dataUrl: string; width: number; height: number; originX: number; originY: number }> {
     assertWindows();
     assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
@@ -599,10 +599,13 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const result = await invokeNative({ op: "captureWindow", pid, windowId });
     const capture = result.capture;
     if (!result.ok || !capture || typeof capture.dataUrl !== "string" || !/^data:image\/png;base64,/.test(capture.dataUrl)
-      || !Number.isSafeInteger(capture.width) || capture.width < 1 || !Number.isSafeInteger(capture.height) || capture.height < 1) {
+      || !Number.isSafeInteger(capture.width) || capture.width < 1 || !Number.isSafeInteger(capture.height) || capture.height < 1
+      || typeof capture.originX !== "number" || !Number.isSafeInteger(capture.originX)
+      || typeof capture.originY !== "number" || !Number.isSafeInteger(capture.originY)) {
       throw new Error(result.error ?? "Windows could not capture the target window.");
     }
-    return capture;
+    return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height,
+      originX: capture.originX, originY: capture.originY };
   }
 
   /** Capture the owner's visible virtual screen directly with Win32 GDI. */

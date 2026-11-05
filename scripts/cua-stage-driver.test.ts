@@ -124,6 +124,7 @@ test("native window capture owns its dimensions instead of inheriting retired Cu
   await registerStage(root);
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=";
   const state = { pid: 4321, windowId: BigInt(windowId), screenshotWidth: 1, screenshotHeight: 1,
+    windowBounds: { x: 100, y: 50, width: 1, height: 1 },
     images: [{ mimeType: "image/png", dataBase64: png }] };
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
@@ -143,7 +144,7 @@ test("app captures expose bounded accessibility targets in screenshot coordinate
     elements: [{ label: "Search\nfield", role: "Edit", enabled: true, frame: { x: 120, y: 70, w: 200, h: 40 } },
       { label: "Disabled", enabled: false, frame: { x: 120, y: 70, w: 200, h: 40 } }] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, state, calls: [] }) as never });
-  assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 10, y: 10, width: 100, height: 20 } }]);
+  assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 20, y: 20, width: 200, height: 40 } }]);
 }));
 
 test("structure completeness does not imply offscreen content is absent", async () => withRoot(async (root) => {
@@ -312,12 +313,19 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
       if (["currentDesktop", "createDesktop", "inspectDesktop", "activateDesktop", "moveWindowToDesktop"].includes(String(request.op))) {
         return { ok: false, error: "Windows desktop operations are retired." };
       }
+      const matchingWindow = fixture.windows?.find((window) => Number(window.pid) === Number(request.pid)
+        && String(window.windowId) === String(request.windowId));
+      const captureBounds = matchingWindow?.bounds as { x?: number; y?: number; width?: number; height?: number } | undefined
+        ?? fixture.state?.windowBounds as { x?: number; y?: number; width?: number; height?: number } | undefined
+        ?? { x: 100, y: 50, width: 200, height: 100 };
       if (request.op === "captureWindow") {
         const state = fixture.state;
         const image = (state?.images as Array<{ dataBase64?: string }> | undefined)?.[0]?.dataBase64 ?? imageData;
         return { ok: true, capture: {
           dataUrl: `data:image/png;base64,${image}`,
-          width: Number(state?.screenshotWidth ?? 200), height: Number(state?.screenshotHeight ?? 100),
+          width: Number(captureBounds.width ?? state?.screenshotWidth ?? 200),
+          height: Number(captureBounds.height ?? state?.screenshotHeight ?? 100),
+          originX: Number(captureBounds.x ?? 100), originY: Number(captureBounds.y ?? 50),
         } };
       }
       if (request.op === "captureDesktop") {
@@ -327,11 +335,7 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
           originX: 0, originY: 0 } };
       }
       if (request.op === "windowRect") {
-        const matchingWindow = fixture.windows?.find((window) => Number(window.pid) === Number(request.pid)
-          && String(window.windowId) === String(request.windowId));
-        const listedBounds = matchingWindow?.bounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
-        const rect = listedBounds ?? fixture.state?.windowBounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
-        return { ok: true, rect: rect ?? { x: 100, y: 50, width: 400, height: 200 } };
+        return { ok: true, rect: captureBounds };
       }
       if (request.op === "inspectDesktopStructure") {
         const source = (fixture.state?.elements as Array<Record<string, unknown>> | undefined) ?? [];
@@ -642,7 +646,7 @@ function makeSdk(options: {
     screenshotFrameValid: true,
     screenshotWidth: 200,
     screenshotHeight: 100,
-    windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    windowBounds: { x: 100, y: 50, width: 200, height: 100 },
     images: [{ mimeType: "image/png", dataBase64: imageData }],
     ...options.state,
   };
@@ -691,7 +695,7 @@ test("moves and verifies Cua's ghost cursor through the typed exact-window API",
   const identity = { handle: "codex", sessionId: "cursor-move" };
   await driver.showAgentCursor("stage", identity);
   const result = await driver.moveCursor("stage", 42, 24, identity);
-  assert.deepEqual(result.cursor, { x: 42, y: 24, screenX: 184, screenY: 98, enabled: true, visible: true });
+  assert.deepEqual(result.cursor, { x: 42, y: 24, screenX: 142, screenY: 74, enabled: true, visible: true });
   const move = calls.find((call) => call.method === "moveCursor")?.value as {
     x: number; y: number; target: { input?: { pid?: number; windowId?: bigint } }; session: string;
   };
@@ -1397,8 +1401,8 @@ test("targets click at exact window-local coordinates through native foreground 
   const click = nativeFixture(root).calls.find((call) => call.op === "sendClick");
   assert.equal(click?.pid, 4321);
   assert.equal(click?.windowId, windowId);
-  assert.equal(click?.x, 185);
-  assert.equal(click?.y, 99);
+  assert.equal(click?.x, 142);
+  assert.equal(click?.y, 74);
   assert.equal(calls.some((call) => call.method === "click"), false, "app input does not pass through Cua Driver");
 }));
 
@@ -1500,15 +1504,15 @@ test("scroll and drag use native screen coordinates and validate bounds before d
   await driver.scroll("stage", 42, 24, "down");
   const native = nativeFixture(root).calls;
   const scroll = native.find((call) => call.op === "sendScroll");
-  assert.equal(scroll?.x, 185);
-  assert.equal(scroll?.y, 99);
+  assert.equal(scroll?.x, 142);
+  assert.equal(scroll?.y, 74);
   assert.equal(scroll?.amount, -3);
   assert.equal(scroll?.pid, 4321);
   assert.equal(scroll?.windowId, windowId);
   await driver.drag("stage", 10, 20, 100, 80);
   const drag = native.find((call) => call.op === "sendDrag");
   assert.deepEqual({ fromX: drag?.fromX, fromY: drag?.fromY, toX: drag?.toX, toY: drag?.toY },
-    { fromX: 121, fromY: 91, toX: 301, toY: 211 });
+    { fromX: 110, fromY: 70, toX: 200, toY: 130 });
   assert.equal(drag?.pid, 4321);
   assert.equal(drag?.windowId, windowId);
   const callsBeforeInvalid = native.filter((call) => call.op === "sendDrag").length;
@@ -1562,7 +1566,7 @@ test("native UI Automation click dispatch is headless and reports verification s
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
     loadSdk: async () => makeSdk({ testRoot: root, calls, state: { elements: [{ role: "Button", label: "Open", enabled: true,
-      actions: ["invoke"], frame: { x: 120, y: 70, w: 60, h: 24 } }] } }) as never });
+      actions: ["invoke"], frame: { x: 120, y: 58, w: 60, h: 24 } }] } }) as never });
 
   const result = await driver.click("stage", 20, 10, undefined, { deliveryMode: "background" });
   assert.equal(result.outcome.status, "unverified");
@@ -1639,7 +1643,7 @@ test("replace-mode text uses exact UI Automation ValuePattern before physical fa
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
     loadSdk: async () => makeSdk({ testRoot: root, calls, state: { elements: [{ role: "Edit", label: "Search", enabled: true,
-      actions: ["set_value"], frame: { x: 120, y: 70, w: 120, h: 30 } }] } }) as never });
+      actions: ["set_value"], frame: { x: 120, y: 58, w: 120, h: 30 } }] } }) as never });
 
   const result = await driver.typeText("stage", "new value", undefined, { mode: "replace", x: 20, y: 10 });
   assert.equal(result.outcome.status, "unverified");

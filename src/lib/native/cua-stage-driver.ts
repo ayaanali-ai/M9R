@@ -866,6 +866,10 @@ function desktopPointInWindow(screenPoint: { x: number; y: number }, frame: CuaS
   return { x: localX, y: localY };
 }
 
+function boundsAtWindowCapture(image: { width: number; height: number; originX: number; originY: number }): CuaStageWindowBounds {
+  return { x: image.originX, y: image.originY, width: image.width, height: image.height };
+}
+
 function stageCapture(capture: { dataUrl: string; width: number; height: number; captureId?: string; controls?: CuaStageTargetDescription[]; capturedAt?: string;
   controlsTruncated?: true; ownedPopups?: CuaStageCapture["ownedPopups"]; popupCaptureStatus?: CuaStageCapture["popupCaptureStatus"] }, now: () => Date): CuaStageCapture {
   return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height,
@@ -1509,8 +1513,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { target: { pid, windowId }, localPoint: { x: screenPoint.x - origin.x, y: screenPoint.y - origin.y },
         shellControl, nativeKeyboardWindow: selected.keyboardWindow, state: undefined };
     }
-    const [image, bounds] = await Promise.all([manager.captureWindow(pid, windowId.toString()), manager.windowRect(pid, windowId.toString())]);
-    const frame: CuaStageWindowFrame = { ...image, windowBounds: bounds };
+    const image = await manager.captureWindow(pid, windowId.toString());
+    const frame: CuaStageWindowFrame = { ...image, windowBounds: boundsAtWindowCapture(image) };
     const localPoint = desktopPointInWindow(screenPoint, frame);
     let elements: CuaWindowElement[] = [];
     if (includeAccessibilityTree) {
@@ -1726,12 +1730,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     };
 
     const captureNativeFrame = async (): Promise<CuaStageWindowFrame> => {
-      const [image, bounds] = await Promise.all([
-        manager.captureWindow(pid, windowId.toString()),
-        manager.windowRect(pid, windowId.toString()),
-      ]);
+      const image = await manager.captureWindow(pid, windowId.toString());
       return { dataUrl: image.dataUrl, width: image.width, height: image.height,
-        windowBounds: bounds, capturedAt: now().toISOString(), stageName: stage.name,
+        windowBounds: boundsAtWindowCapture(image), capturedAt: now().toISOString(), stageName: stage.name,
         identityKey: cursorDetails?.key ?? session };
     };
 
@@ -1869,10 +1870,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // full accessibility-tree walk is unnecessary here: UIA's native
       // ElementFromPoint is the exact target-resolution mechanism, and avoids
       // sending thousands of unrelated controls just to inspect one point.
-      const [image, bounds] = await Promise.all([
-        manager.captureWindow(pid, windowId.toString()),
-        manager.windowRect(pid, windowId.toString()),
-      ]);
+      const image = await manager.captureWindow(pid, windowId.toString());
+      const bounds = boundsAtWindowCapture(image);
       if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0 || x >= image.width || y >= image.height) {
         throw new DesktopInputNotDispatchedError("Target coordinates must fall inside the current stage window snapshot.");
       }
@@ -2586,11 +2585,11 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     const capture = async (): Promise<CuaStageCapture> => {
       const stillOwned = (await manager.ownedPopups(pid, windowId.toString())).some((popup) => BigInt(popup.windowId) === popupWindowId);
       if (!stillOwned) throw new DesktopInputNotDispatchedError("The popup window closed or changed before input; no input was sent.", "target-identity");
-      const [image, bounds, structure] = await Promise.all([
+      const [image, structure] = await Promise.all([
         manager.captureWindow(pid, popupWindowId.toString()),
-        manager.windowRect(pid, popupWindowId.toString()),
         manager.windowStructure(pid, popupWindowId.toString(), { maxElements: 4096, maxDepth: 64 }).catch(() => undefined),
       ]);
+      const bounds = boundsAtWindowCapture(image);
       const controls = structure?.elements.flatMap((element) => {
         const left = Math.max(0, (element.rect.x - bounds.x) * image.width / bounds.width);
         const top = Math.max(0, (element.rect.y - bounds.y) * image.height / bounds.height);
