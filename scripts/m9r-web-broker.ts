@@ -3,9 +3,9 @@
  * owner pipe and native desktop/browser routes; the legacy browser-extension
  * transport is intentionally not enabled by this production entry point.
  *
- * The former isolated agent-chrome CDP daemon is not started or exposed by
- * this entry point. Chrome automation goes through the native desktop/UIA
- * route (nativeDesktopRoute) against the owner's own signed-in window.
+ * No isolated browser daemon or extension transport is part of this entry
+ * point. Browser automation goes through the native desktop/UIA route
+ * (nativeDesktopRoute) against the owner's own signed-in window.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";

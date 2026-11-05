@@ -126,6 +126,8 @@ extension, by default, for any user. What shipped (read before touching browser 
    first gate) was enough to trigger `ensureReady()` on the isolated daemon. Fixed by building `browserTransport`
    only when `M9R_ENABLE_ISOLATED_BROWSER=1` is set (it is not, by default); `m9r_browser_tabs` is now gated the
    same way `m9r_browser_open` already was (`e4375dcf`), since it has nothing to report without a transport.
+   Follow-up cleanup item 3 removes the dormant `agent-chrome`/CDP profile implementation and its old CLI. There is
+   no environment-variable opt-in or supported isolated-profile route remaining.
    **Verify this is still true before any future change to `m9r-web-broker.ts` or `web-broker-server.ts`:** run
    the installed broker and `curl`/`Invoke-RestMethod` its `/web/status` with the broker key from
    `~/.m9r/web-broker.key`; it must read `"browserTransport":"native-desktop"`, never `"agent-chrome"`.
@@ -264,12 +266,10 @@ movement mid-action, a new owner message mid-task, and parallel agents on separa
   — the earlier wording ("must never") is superseded; see Phase 3.1 for why and the exact gate that still protects it
   (`driverInputAction`'s `options.deliveryMode === "background" && options.preferForeground` throws immediately —
   only the post-refusal recovery path is new).
-- **The isolated CDP browser profile and the browser extension are never a default route, for any user, under any
-  circumstance, without the owner explicitly asking first.** This was tested live and explicitly rejected twice
-  (2026-11-02). `M9R_ENABLE_ISOLATED_BROWSER=1` is the only way to turn the isolated daemon back on; it is not set
-  in the installed runtime. Do not add a fallback that silently switches to it, do not re-register `m9r_browser_open`
-  / `m9r_browser_tabs` without the same gate, and do not build a new code path that constructs
-  `createBrowserDaemon(() => launchAgentChrome(...))` anywhere else without the same env-var gate.
+- **The isolated CDP browser profile and the browser extension are retired.** Cleanup item 3 removes the dormant
+  isolated-profile runtime and its `m9r web chrome setup/start` command; there is no environment-variable opt-in.
+  Browser work uses the owner's visible browser window through the native desktop stage. Do not restore the retired
+  runtime or add a fallback to a separate profile. `m9r_browser_open` and `m9r_browser_tabs` remain unregistered.
 - Keep money holds. Canceled tasks stay canceled.
 - Do not change the pill's visual design. Do not edit the "New idea" section of the Source of Truth without the owner.
 

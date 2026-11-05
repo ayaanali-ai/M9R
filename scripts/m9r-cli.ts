@@ -3443,6 +3443,10 @@ async function ensureLocalBrokerAutostart(): Promise<{ ok: boolean; message: str
 }
 
 async function runWebCli(args: string[]): Promise<number> {
+  if (args[0] === "chrome") {
+    process.stderr.write("The dedicated isolated M9R Chrome profile is retired. Use m9r web stage to control the owner's browser window through native desktop control.\n");
+    return 2;
+  }
   if (args[0] === "broker-update") return runManagedBrokerUpdate(args.slice(1));
   if (args[0] === "stage") {
     if (args[1] === "approve-app") throw new Error("Per-app catalog approvals are retired. Resolve installed apps by name; grant computer control once per agent.");

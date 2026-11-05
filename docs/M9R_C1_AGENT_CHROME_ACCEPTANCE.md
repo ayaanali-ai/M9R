@@ -1,5 +1,8 @@
 # C1 — Agent-owned Chrome
 
+> Historical acceptance record. The dedicated isolated Agent Chrome profile and its setup/start command were retired
+> on 2026-11-05; this document records the former implementation and is not a current setup guide.
+
 **Status: signed off.** Synthetic live input and the no-banner check pass outside the restricted command sandbox, and an owner-authenticated GitHub session survived an M9R channel restart in the same isolated profile.
 
 ## Verified

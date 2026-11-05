@@ -71,19 +71,25 @@ function fixture() {
     close: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-test("m9r_browser_open is not registered unless the owner explicitly opts into the isolated browser", () => {
+test("isolated-browser tools remain unregistered even if the retired opt-in variable is set", () => {
   const temp = resolve(".test-tmp"); mkdirSync(temp, { recursive: true });
   const root = mkdtempSync(join(temp, "execution-loop-default-"));
   const store = createLocalStore(root);
   const token = store.issueIdentity("codex", "codex", "execution-loop-default").token;
   const identity = store.verifyIdentity(token)!;
   const handlers = new Map<string, Handler>();
+  const priorOptIn = process.env.M9R_ENABLE_ISOLATED_BROWSER;
   try {
+    process.env.M9R_ENABLE_ISOLATED_BROWSER = "1";
     registerComputerUseTools({ registerTool(name: string, _descriptor: unknown, handler: Handler) { handlers.set(name, handler); } } as never,
       { store, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => "T1" });
-    assert.equal(handlers.has("m9r_browser_open"), false, "the agent must not be able to see or call the isolated-browser tool by default");
-    assert.equal(handlers.has("m9r_browser_tabs"), false, "listing isolated-browser tabs has nothing to report when the isolated browser is off, so it is gated the same way");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    assert.equal(handlers.has("m9r_browser_open"), false, "the retired isolated-browser launch tool must not be registered");
+    assert.equal(handlers.has("m9r_browser_tabs"), false, "the retired isolated-browser tab tool must not be registered");
+  } finally {
+    if (priorOptIn === undefined) delete process.env.M9R_ENABLE_ISOLATED_BROWSER;
+    else process.env.M9R_ENABLE_ISOLATED_BROWSER = priorOptIn;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function click(target: ComputerUseTarget, operationId = "click-one", elementRef = ref) {

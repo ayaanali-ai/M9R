@@ -899,14 +899,15 @@ test("native owner brokers report the native route as ready without an extension
   try {
     const response = await ownerRequest(broker.port, key, "/web/status");
     assert.equal(response.status, 200);
-    assert.deepEqual(response.body, {
+    const status = response.body as Record<string, unknown>;
+    assert.deepEqual(status, {
       ok: true,
       broker: "ready",
       browserTransport: "native-desktop",
       browserReady: true,
-      extensionConnected: false,
-      extensionReady: false,
     });
+    assert.equal("extensionConnected" in status, false);
+    assert.equal("extensionReady" in status, false);
   } finally {
     await broker.close();
   }

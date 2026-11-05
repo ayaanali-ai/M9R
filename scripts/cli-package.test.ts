@@ -282,6 +282,29 @@ test("retired extension updater refuses without changing the existing installati
   }
 });
 
+test("retired isolated-browser CLI refuses without opening a profile", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-isolated-browser-retired-"));
+  const home = join(temporaryRoot, "home");
+  const m9rHome = join(home, ".m9r");
+  try {
+    const cli = resolve(distDir, "m9r.js");
+    for (const action of ["setup", "start"]) {
+      const result = spawnSync(process.execPath, [cli, "web", "chrome", action], {
+        cwd: repoRoot,
+        env: { ...process.env, HOME: home, USERPROFILE: home, M9R_HOME: m9rHome },
+        encoding: "utf8",
+      });
+      if (result.error) throw result.error;
+      assert.equal(result.status, 2, result.stderr || result.stdout);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr ?? "", /dedicated isolated M9R Chrome profile is retired/i);
+      assert.equal(existsSync(m9rHome), false, `${action} must not create an isolated profile or M9R state`);
+    }
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("built mission bridge runtime has no unresolved monorepo source imports", () => {
   const bridgeRuntime = readFileSync(resolve(distDir, "bridge-runtime.js"), "utf8");
   assert.doesNotMatch(bridgeRuntime, /\.\.\/\.\.\/\.\.\/src\/lib\//);

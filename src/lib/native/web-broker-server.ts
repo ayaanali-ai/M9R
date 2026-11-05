@@ -178,8 +178,6 @@ export interface WebBrokerServerOptions {
     primeCursorForOwner?(taskId: string): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
   agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">;
-  /** @deprecated Retained only so stale callers fail closed; production never starts a browser transport. */
-  browserTransport?: unknown;
   /** Production owner broker has a native desktop route; no extension handshake is required. */
   nativeDesktopRoute?: boolean;
   key: string;
