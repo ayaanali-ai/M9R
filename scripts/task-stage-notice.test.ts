@@ -61,6 +61,10 @@ test("task delivery describes actual stage modes and typed dispatch recovery", a
     assert.match(context, /background[\s\S]*never creates or switches a Windows virtual desktop/);
     assert.match(context, /A fresh capture by itself does not establish whether the preceding input was sent/);
     assert.match(context, /never blindly replay a possibly delivered action/);
+    assert.match(context, /latest, newest, or most recent[\s\S]*authoritative source[\s\S]*search rank and first-visible position alone are not proof/);
+    assert.match(context, /an ad, preview, loading state, or unrelated queued item does not satisfy it/);
+    assert.match(context, /Report the observed title\/date and distinguish verified results from missing evidence/);
+    assert.doesNotMatch(context, /YouTube|Spotify/);
     assert.doesNotMatch(context, /isolated Windows desktop/);
     assert.match(context, /Preserve existing windows and tabs unless the user asks to change them/);
     assert.equal(received, undefined);
