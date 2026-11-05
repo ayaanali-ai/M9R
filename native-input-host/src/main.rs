@@ -1,8 +1,6 @@
-use m9r_native_input_host::{
-    error_response, parse_click_request, read_frame, write_arrival_and_wait_for_ack, write_frame,
-};
+use m9r_native_input_host::{read_frame, write_frame};
 use serde_json::{json, Value};
-use std::io::{stdin, stdout, Read, Write};
+use std::io::{stdin, stdout, Read};
 
 const MAX_DESKTOP_STAGE_REQUEST_BYTES: u64 = 16 * 1024;
 
@@ -38,71 +36,32 @@ mod stage_cli_tests {
     }
 }
 
-fn process_message<R: Read, W: Write>(raw: &[u8], input: &mut R, output: &mut W) -> Value {
-    let parsed = match serde_json::from_slice::<Value>(raw) {
-        Ok(value) => value,
-        Err(_) => return error_response(None, "invalid native input message"),
-    };
-    let request_id = parsed.get("requestId").and_then(Value::as_str);
-    let request = match parse_click_request(&parsed) {
-        Ok(request) => request,
-        Err(error) => return error_response(request_id, error),
-    };
-    let mut sequence = 0u64;
-    let mut report_progress = |x: f64, y: f64, arrived: bool| {
-        sequence = sequence.saturating_add(1);
-        if arrived {
-            return write_arrival_and_wait_for_ack(
-                input,
-                output,
-                &request.request_id,
-                sequence,
-                x,
-                y,
-            );
-        }
-        let bytes = match serde_json::to_vec(&json!({
-            "type":"progress", "requestId":request.request_id, "sequence":sequence,
-            "phase":"moving", "x":x, "y":y
-        })) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        };
-        write_frame(output, &bytes).is_ok()
-    };
-    let click_result =
-        m9r_native_input_host::click_visible_chrome_tab(&request, &mut report_progress);
-    drop(report_progress);
-    match click_result {
-        Ok(()) => {
-            json!({ "type":"result", "requestId":request.request_id, "ok":true, "arrivalSequence":sequence })
-        }
-        Err(error) => error_response(Some(&request.request_id), error),
-    }
-}
-
 /// Keep one native helper alive for the lifetime of the broker.  The old
 /// `--desktop-stage-json` mode intentionally exits after one request, which
 /// makes every UIA read and every native action pay a process-start cost.  The
 /// persistent mode uses the same bounded binary framing as the input host and
 /// returns one JSON response per request without changing the operation
 /// contract.
-fn run_desktop_stage_server() {
+fn run_desktop_stage_server() -> Result<(), String> {
     let mut input = stdin().lock();
     let mut output = stdout().lock();
     loop {
         let raw = match read_frame(&mut input) {
             Ok(Some(frame)) => frame,
-            Ok(None) => return,
-            Err(_) => return,
+            // The persistent stage host is stopped by its owner with an
+            // explicit process kill. EOF before that is an unexpected pipe
+            // closure; returning success hid helper loss as exit code 0 and
+            // made an in-flight desktop request look like an unexplained
+            // no-op.
+            Ok(None) => return Err("persistent desktop-stage input closed unexpectedly".into()),
+            Err(error) => return Err(format!("desktop-stage request framing failed: {error}")),
         };
         if raw.len() as u64 > MAX_DESKTOP_STAGE_REQUEST_BYTES {
             let response =
                 json!({"ok":false,"error":"desktop stage request is invalid or too large"});
             let bytes = serde_json::to_vec(&response).expect("static response serializes");
-            if write_frame(&mut output, &bytes).is_err() {
-                return;
-            }
+            write_frame(&mut output, &bytes)
+                .map_err(|error| format!("could not write invalid-request response: {error}"))?;
             continue;
         }
         let request_id = serde_json::from_slice::<Value>(&raw)
@@ -113,6 +72,15 @@ fn run_desktop_stage_server() {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             });
+        if let Some(request_id) = request_id.as_deref() {
+            let started = serde_json::to_vec(&json!({ "type":"started", "requestId":request_id }))
+                .map_err(|error| {
+                    format!("could not encode desktop-stage start acknowledgement: {error}")
+                })?;
+            write_frame(&mut output, &started).map_err(|error| {
+                format!("could not write desktop-stage start acknowledgement: {error}")
+            })?;
+        }
         let mut response = if has_agent_context(|name| std::env::var_os(name)) {
             json!({"ok":false,"error":"agent context cannot change owner desktop stages"})
         } else {
@@ -131,17 +99,19 @@ fn run_desktop_stage_server() {
         }
         let bytes = match serde_json::to_vec(&response) {
             Ok(bytes) => bytes,
-            Err(_) => return,
+            Err(error) => return Err(format!("could not encode desktop-stage response: {error}")),
         };
-        if write_frame(&mut output, &bytes).is_err() {
-            return;
-        }
+        write_frame(&mut output, &bytes)
+            .map_err(|error| format!("could not write desktop-stage response: {error}"))?;
     }
 }
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--desktop-stage-server") {
-        run_desktop_stage_server();
+        if let Err(error) = run_desktop_stage_server() {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--desktop-stage-json") {
@@ -180,21 +150,6 @@ fn main() {
         return;
     }
 
-    let mut input = stdin().lock();
-    let mut output = stdout().lock();
-    loop {
-        let frame = match read_frame(&mut input) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => return,
-            Err(_) => return,
-        };
-        let response = process_message(&frame, &mut input, &mut output);
-        let bytes = match serde_json::to_vec(&response) {
-            Ok(bytes) => bytes,
-            Err(_) => return,
-        };
-        if write_frame(&mut output, &bytes).is_err() {
-            return;
-        }
-    }
+    eprintln!("m9r-native-input-host requires --desktop-stage-server or --desktop-stage-json; the browser native-messaging route is retired");
+    std::process::exit(2);
 }

@@ -1,59 +1,63 @@
 # Current Cua dependency inventory
 
-Captured from `codex/final-polish-rebirth` at `d98c0f5c` on 2026-11-03. This is an inventory, not an approval to keep the dependency.
+**Updated:** 2026-11-04
+**Status:** source audit; live package behavior still requires owner-machine verification.
 
-## Cursor presentation (retain temporarily behind one adapter)
+## Production dependency boundary
 
-- `src/lib/native/cua-stage-driver.ts`: runtime/session creation, cursor enable/disable, cursor motion, cursor state, cursor visibility confirmation, and cursor teardown.
-- `src/lib/native/cua-driver-host.ts`: starts the private Cua host process and connects the cursor client.
+The Cua runtime remains only for the labeled cursor overlay. It creates the
+presentation session, moves/shows/hides that cursor, reports its position and
+visibility, and shuts the presentation session down. A cursor failure must not
+dispatch, retry, or block a desktop action.
 
-These calls are presentation-only and may remain temporarily. They must not be used as a permission, targeting, or dispatch dependency.
+The source calls in `src/lib/native/cua-stage-driver.ts` are limited to cursor
+session and cursor presentation methods. Its `callTool("move_cursor", ...)`
+uses are cursor-only. No Cua `click`, `pressKey`, `hotkey`, `typeText`, `scroll`,
+`drag`, window discovery, window snapshot, screenshot, or accessibility method
+is an input or observation route in the production desktop path.
 
-## Perception supplied by the native host in production
+The `@trycua/cua-driver` package, host process, cursor adapter, and runtime
+assets remain because the cursor itself is still Cua-owned. Removing those
+would remove the existing visible agent cursor; this inventory does not claim
+the cursor replacement artwork is implemented.
 
-- `windows-desktop-stage.ts` owns `desktopStructure`, `windowStructure`, `captureDesktop`,
-  `captureWindow`, `listVisibleWindows`, HWND/process-generation validation, and
-  exact foreground/window geometry.
-- `cua-stage-driver.ts` uses those native calls first for desktop and app-window
-  observations, including popup captures and point resolution.
-- The old Cua observation path remains only as an explicit `M9R_ENABLE_CUA_COMPAT=1`
-  rollback/test adapter when a native seam is unavailable. Production stages do not
-  set that flag.
+## M9R-owned perception and window identity
 
-The native host currently supplies desktop-wide UIA structure, window metadata, HWND/process-generation validation, hit testing, popups, and window geometry, but not the complete exact-window observation/screenshot contract required to remove these calls safely.
+- `native-input-host/src/shell_accessibility.rs` reads UI Automation structure
+  and invokes supported semantic control patterns.
+- `native-input-host/src/native_screenshot.rs` captures target windows and the
+  physical multi-monitor virtual screen. “Virtual screen” here means the
+  Windows coordinate space spanning monitors, not a Task View desktop.
+- `native-input-host/src/windows_stage.rs` validates exact PID/HWND identities,
+  process generation, visible-window inventory, popups, window state, and
+  foreground identity. It does not create, enumerate, switch, or move Windows
+  Task View desktops.
+- `src/lib/native/windows-desktop-stage.ts` owns the persistent native helper,
+  exact-window UIA/screenshot observations, point resolution, and window
+  geometry/state bridge.
+- `src/lib/native/cua-stage-driver.ts` combines those M9R observations with
+  action results and the optional cursor overlay. The target and current UI
+  state come from M9R's native host.
 
-## Semantic/action calls supplied by the native host in production
+## M9R-owned actions
 
-- click, key, hotkey, Unicode text, vertical/horizontal scroll, drag, foreground
-  activation, resize, and window state all route through
-  `windows-desktop-stage.ts` and `native-input-host`.
-- `driverInputAction` no longer calls Cua in production; its compatibility branch
-  is reachable only with the explicit rollback flag and only for injected fixtures.
-- `set_value` replacement uses native foreground click/select-all/text delivery;
-  it is not a Cua semantic action.
+Click, keyboard/hotkey, Unicode text, scroll, drag, window activation/state,
+window-frame changes, system controls, and supported UIA Invoke/Select/Toggle/
+Value operations are dispatched by `native-input-host` through
+`windows-desktop-stage.ts`. Physical `SendInput` paths bring the exact target
+window forward under the shared input lease; they are not headless. Cua remains
+limited to the labeled cursor presentation. A native OS delivery result and
+the later UIA postcondition remain separate signals.
 
-## Cursor/presentation and packaging still supplied by Cua (temporary)
+No production compatibility flag re-enables Cua action or perception calls.
+The old one-shot virtual-desktop owner proof and pill command were removed;
+`scripts/run-step3-owner-proof.ts` is no longer a supported test entrypoint.
 
-- `@trycua/cua-driver` dependency in `package.json` and lockfile.
-- The cursor presentation adapter still uses the vendored Cua runtime for its
-  labeled overlay and motion. This is presentation-only and is not an input or
-  target-selection dependency.
-- Cua runtime download, archive extraction, and packaging in `scripts/build-engine.mjs` and `scripts/package-engine-release.ps1`.
-- Cua runtime promotion/cleanup in `scripts/accept-overlay-candidate.mjs` and `src/lib/native/native-commands.ts`.
-- Cua host metadata/version checks in `src/lib/native/cua-driver-host.ts`.
+## Remaining verification
 
-## Existing M9R-owned native foundation
-
-- UIA desktop structure: `native-input-host/src/shell_accessibility.rs`.
-- Window identity, process generation, virtual desktops, hit testing, popups, and window state: `native-input-host/src/virtual_desktop.rs`.
-- Foreground activation and SendInput primitives: `native-input-host/src/win32.rs`.
-- TypeScript native stage manager: `src/lib/native/windows-desktop-stage.ts`.
-- Shared MCP/action contracts, receipts, task context, and multiplayer routing: `src/lib/native/computer-use-contract.ts`, `computer-use-mcp.ts`, `logical-task-context.ts`, and `multiplayer-*` modules.
-
-## Production rule
-
-No new production caller may add a Cua perception/action dependency. The only
-accepted runtime dependency is the temporary cursor presentation adapter and its
-packaging metadata. The compatibility branch is an explicit rollback/test seam,
-not a production route, and must be deleted once the native observation contract
-is independently packaged and live-verified.
+Source inspection is not live proof. Before promotion, verify a packaged
+candidate on the owner machine: native helper persistence, Notepad and modern
+Notepad editing, Explorer navigation, Calculator launch/focus, a browser task,
+and the visible cursor overlay. Confirm through runtime logs that the cursor
+adapter is the only Cua path and that a cursor failure leaves native actions
+available.

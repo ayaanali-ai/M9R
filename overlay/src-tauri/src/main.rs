@@ -634,112 +634,6 @@ fn plain_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn engine_stage_call_with_input(engine: &PathBuf, args: &[String], input: Option<String>) -> Result<serde_json::Value, String> {
-    let mut cmd = Command::new(engine);
-    cmd.args(args)
-        .env("M9R_DESKTOP_PILL_OWNER_ACTION", "1")
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    if let Some(input) = input {
-        use std::io::Write;
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(input.as_bytes()) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.to_string());
-            }
-        }
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.stdout.len() > 4 * 1024 * 1024 {
-        return Err("The desktop stage response exceeded the safe local UI size.".into());
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    if !out.status.success() {
-        return Err(format!("{}{}", stdout, String::from_utf8_lossy(&out.stderr)).trim().to_string());
-    }
-    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|_| "The desktop stage command returned invalid JSON.".to_string())?;
-    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err("The desktop stage command did not confirm success.".into());
-    }
-    Ok(value)
-}
-
-/// Local pill actions reuse the same stage registry and Windows checks as `m9r web stage`.
-#[tauri::command]
-async fn desktop_stage_action(
-    action: String,
-    name: Option<String>,
-    x: Option<u32>,
-    y: Option<u32>,
-    pid: Option<u32>,
-    window_id: Option<String>,
-    text: Option<String>,
-    direction: Option<String>,
-    from_x: Option<u32>,
-    from_y: Option<u32>,
-    to_x: Option<u32>,
-    to_y: Option<u32>,
-) -> Result<serde_json::Value, String> {
-    let needs_name = matches!(action.as_str(), "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent");
-    let needs_xy = matches!(action.as_str(), "cursor" | "click" | "scroll");
-    let needs_attach = action == "attach";
-    let needs_text = action == "type";
-    let needs_direction = action == "scroll";
-    let needs_drag = action == "drag";
-    if !matches!(action.as_str(), "list" | "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent") {
-        return Err("Unsupported desktop stage action".into());
-    }
-    if needs_name != name.is_some() || name.as_deref().is_some_and(|value| !plain_id(value))
-        || needs_xy != (x.is_some() && y.is_some()) || x.is_some() != y.is_some()
-        || needs_attach != pid.is_some() || needs_attach != window_id.is_some()
-        || window_id.as_deref().is_some_and(|value| !valid_window_id(value))
-        || needs_text != text.is_some() || text.as_deref().is_some_and(|value| value.chars().count() > 500)
-        || needs_direction != direction.is_some() || direction.as_deref().is_some_and(|value| value != "up" && value != "down")
-        || needs_drag != (from_x.is_some() && from_y.is_some() && to_x.is_some() && to_y.is_some())
-        || (!needs_drag && (from_x.is_some() || from_y.is_some() || to_x.is_some() || to_y.is_some()))
-        || [x, y, from_x, from_y, to_x, to_y].into_iter().flatten().any(|value| value > 99_999)
-        || pid.is_some_and(|value| value == 0) {
-        return Err("Invalid desktop stage action arguments".into());
-    }
-    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
-    let engine_action = if action == "attach" { "attach-window" } else { action.as_str() };
-    let mut args = vec!["web".to_string(), "stage".to_string(), engine_action.to_string()];
-    if let Some(name) = name { args.push(name); }
-    if let (Some(x), Some(y)) = (x, y) { args.extend([x.to_string(), y.to_string()]); }
-    if needs_attach {
-        args.extend([pid.unwrap().to_string(), window_id.unwrap()]);
-    }
-    if needs_text {
-        args.push("--stdin-json".into());
-    }
-    if let Some(direction) = direction { args.push(direction); }
-    if let (Some(from_x), Some(from_y), Some(to_x), Some(to_y)) = (from_x, from_y, to_x, to_y) {
-        args.extend([from_x.to_string(), from_y.to_string(), to_x.to_string(), to_y.to_string()]);
-    }
-    args.push("--json".into());
-    let input = text.map(|text| serde_json::json!({ "text": text }).to_string());
-    tauri::async_runtime::spawn_blocking(move || engine_stage_call_with_input(&engine, &args, input))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-fn valid_window_id(value: &str) -> bool {
-    let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).ok()
-    } else {
-        value.parse::<u64>().ok()
-    };
-    parsed.is_some_and(|handle| handle > 0)
-}
-
 /// Sessions M9R knows for one agent (`@codex`, `@claude`, ...), for the pill's link picker.
 #[tauri::command]
 async fn list_sessions(handle: String) -> Result<String, String> {
@@ -1268,7 +1162,7 @@ fn main() {
         // merged-feed, provider-session linking, or compatibility decision
         // commands to the production window; those paths could resurrect
         // historical provider/session state after a restart.
-        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, pill_decide, save_memory, desktop_stage_action, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.
