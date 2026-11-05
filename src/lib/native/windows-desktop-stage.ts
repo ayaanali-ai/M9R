@@ -9,7 +9,11 @@ import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from 
 import { defaultStoreRoot } from "./local-store";
 
 const STAGE_REGISTRY_VERSION = 6;
-const MAX_STAGES = 16;
+const MAX_STAGE_REGISTRY_BYTES = 1024 * 1024;
+// A just-created empty stage is assigned immediately by task preparation. Keep
+// recent empty mappings through that handoff, then reclaim old cursor-only
+// entries because they contain no HWND or durable app state.
+const EMPTY_OWNER_PREVIEW_STAGE_TTL_MS = 60_000;
 const MAX_NATIVE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const OWNER_PREVIEW_STAGE_PREFIX = "preview-agent-";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -161,15 +165,28 @@ function defaultProcessAlive(pid: number): boolean {
 }
 
 /**
- * Owner-preview stages only map an agent onto the owner's one Windows desktop;
- * dropping one closes no window. Once the window they
- * were bound to has exited they are dead bookkeeping, and without this they
- * accumulate until every new stage is refused at the registry limit.
+ * Owner-preview stages are local identity maps onto the owner's visible
+ * Windows surface; removing a record never closes or moves a window. Compact
+ * dead anchors and dormant empty cursor mappings without disturbing a live
+ * app binding or an in-flight task preparation.
  */
-function withoutStaleOwnerPreviewStages(stages: WindowsStageRecord[], alive: (pid: number) => boolean): WindowsStageRecord[] {
-  return stages.filter((stage) => !(stage.name.startsWith("preview-")
-    && stage.anchor
-    && !alive(stage.anchor.pid)));
+function withoutStaleOwnerPreviewStages(
+  stages: WindowsStageRecord[],
+  alive: (pid: number) => boolean,
+  taskActive: (taskId: string) => boolean,
+  nowMs: number,
+): WindowsStageRecord[] {
+  return stages.filter((stage) => {
+    if (!stage.name.startsWith(OWNER_PREVIEW_STAGE_PREFIX)) return true;
+    if (stage.anchor) return alive(stage.anchor.pid);
+    const taskId = stage.agentAssignment?.taskId;
+    if (taskId) return taskActive(taskId);
+    // Cursor priming can create a stage before there is an app/window to bind.
+    // Preserve the short prepare→assign handoff, but don't retain empty session
+    // records indefinitely after the task has moved on or the provider closed.
+    const registeredAt = Date.parse(stage.registeredAt);
+    return Number.isFinite(registeredAt) && nowMs - registeredAt < EMPTY_OWNER_PREVIEW_STAGE_TTL_MS;
+  });
 }
 
 function normalizedName(value: string): string {
@@ -198,7 +215,6 @@ function parseRegistry(raw: string): StageRegistry {
     throw new Error("The local Windows stage registry has an unsupported format; it was left unchanged.");
   }
   const stages = (parsed as { stages: unknown[] }).stages;
-  if (stages.length > MAX_STAGES) throw new Error("The local Windows stage registry exceeds its safe limit; it was left unchanged.");
   const names = new Set<string>();
   const records = stages.map((item): WindowsStageRecord => {
     if (!item || typeof item !== "object") throw new Error("The local Windows stage registry contains an invalid record; it was left unchanged.");
@@ -284,7 +300,7 @@ function readRegistry(root: string): StageRegistry {
   const path = registryPath(root);
   if (!existsSync(path)) return { version: STAGE_REGISTRY_VERSION, stages: [] };
   const raw = readFileSync(path, "utf8");
-  if (Buffer.byteLength(raw, "utf8") > 16 * 1024) throw new Error("The local Windows stage registry is too large; it was left unchanged.");
+  if (Buffer.byteLength(raw, "utf8") > MAX_STAGE_REGISTRY_BYTES) throw new Error("The local Windows stage registry is too large; it was left unchanged.");
   return parseRegistry(raw);
 }
 
@@ -354,7 +370,11 @@ function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
   const target = registryPath(root);
   const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
-    writeFileSync(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const serialized = `${JSON.stringify(registry, null, 2)}\n`;
+    if (Buffer.byteLength(serialized, "utf8") > MAX_STAGE_REGISTRY_BYTES) {
+      throw new Error("The local Windows stage registry would exceed its 1 MiB storage budget; no stage update was saved.");
+    }
+    writeFileSync(temporary, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
     renameStateFile(temporary, target);
   } catch (error) {
     try { unlinkSync(temporary); } catch { /* preserve the original write error */ }
@@ -385,9 +405,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   const now = deps.now ?? (() => new Date());
   const processAlive = deps.processAlive ?? defaultProcessAlive;
   const taskActive = deps.taskActive ?? (() => true);
-  /** Prune dead owner-preview stages only when the registry is full. */
-  function roomFor(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
-    return registry.stages.length >= MAX_STAGES ? withoutStaleOwnerPreviewStages(registry.stages, processAlive) : registry.stages;
+  /** Compact dead anchors and expired empty cursor-stage records before adding one. */
+  function compactRegistryStages(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
+    return withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime());
   }
   const persistentHost = deps.invokeNative ? undefined : createPersistentWindowsStageHost(
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"),
@@ -635,7 +655,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       const savedCoordinationKey = coordinationKey ?? existing?.coordinationKey;
       // Same staleness tolerance as assertWindowUnclaimed(): a dead preview stage's
       // leftover anchor must not permanently lock its window away from every later task.
-      const claimed = withoutStaleOwnerPreviewStages(registry.stages, processAlive).find((stage) => stage.name !== name
+      const claimed = withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime()).find((stage) => stage.name !== name
         && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
         && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey)
         && !(stage.agentAssignment?.taskId && !taskActive(stage.agentAssignment.taskId)));
@@ -653,8 +673,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         ...(existing?.agentAssignment ? { agentAssignment: existing.agentAssignment } : {}),
         registeredAt: existing?.registeredAt ?? now().toISOString(),
       };
-      const kept = existing ? registry.stages : roomFor(registry);
-      if (!existing && kept.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+      const kept = existing ? registry.stages : compactRegistryStages(registry);
       writeRegistryWhileLocked(root, {
         version: STAGE_REGISTRY_VERSION,
         stages: existing
@@ -683,8 +702,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     try {
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
-      if (!existing) registry.stages = roomFor(registry);
-      if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+      if (!existing) registry.stages = compactRegistryStages(registry);
       const record: WindowsStageRecord = {
         name,
         ...(existing?.appId !== undefined ? { appId: existing.appId } : {}),
@@ -915,7 +933,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     // prune dead preview stages. Checking it here too, not only at registration
     // time, stops a finished or crashed earlier session from permanently locking
     // a window out of every later task that happens to reuse the same app.
-    const claimants = withoutStaleOwnerPreviewStages(readRegistry(root).stages, processAlive);
+    const claimants = withoutStaleOwnerPreviewStages(readRegistry(root).stages, processAlive, taskActive, now().getTime());
     const claimed = claimants.find((stage) => stage.name !== name
       && stage.anchor?.pid === pid && stage.anchor.windowId === windowId
       && !(coordinationKey && stage.coordinationKey === coordinationKey)

@@ -156,6 +156,46 @@ test("a full registry drops only owner-preview stages whose window process has e
     "legacy Windows desktop routing metadata is discarded when the registry is rewritten");
 }));
 
+test("a session registry can grow past sixteen entries without refusing a new stage", async () => withRoot(async (root) => {
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32", root, terminal: true, env: {}, now: () => new Date("2026-10-30T12:00:00Z"),
+    invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
+  });
+  for (let index = 0; index < 16; index++) await manager.ensureStage(`preview-agent-stage-${index}`);
+
+  await manager.register("new-session-stage", String(anchor.pid), anchor.windowId);
+
+  assert.equal(manager.list().length, 17);
+  assert.ok(manager.list().some((stage) => stage.name === "new-session-stage"));
+}));
+
+test("stage compaction reclaims dormant empty preview entries but preserves active work and reusable windows", async () => withRoot(async (root) => {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const emptyPreview = (name: string, taskId?: string) => ({ name, roomDesktopId: uuid(name.length + 1), anchor: null, roomWindowId: null,
+    ...(taskId ? { agentAssignment: { handle: "codex", sessionTag: "1234abcd", taskId } } : {}), registeredAt: "2026-10-30T10:00:00.000Z" });
+  const anchoredPreview = (name: string, pid: number) => ({ name, roomDesktopId: uuid(name.length + 2),
+    anchor: { pid, windowId: String(pid) }, roomWindowId: uuid(name.length + 100), registeredAt: "2026-10-30T10:00:00.000Z" });
+  writeFileSync(join(root, "windows-stages.json"), JSON.stringify({ version: 6, stages: [
+    emptyPreview("preview-agent-empty"),
+    emptyPreview("preview-agent-finished", "finished-task"),
+    emptyPreview("preview-agent-active", "active-task"),
+    anchoredPreview("preview-agent-live-window", 7_777),
+    anchoredPreview("preview-agent-dead-window", 9_000),
+    { name: "manual-empty-stage", roomDesktopId: uuid(999), anchor: null, roomWindowId: null, registeredAt: "2026-10-30T10:00:00.000Z" },
+  ] }), "utf8");
+  const manager = createWindowsDesktopStageManager({
+    platform: "win32", root, terminal: true, env: {}, now: () => new Date("2026-10-30T12:00:00Z"),
+    processAlive: (pid) => pid === 7_777 || pid === anchor.pid,
+    taskActive: (taskId) => taskId === "active-task",
+    invokeNative: async (request) => ({ ok: true, window: { ...anchor, pid: Number(request.pid), windowId: String(request.windowId) } }),
+  });
+
+  await manager.ensureStage("preview-agent-new-session");
+
+  const names = manager.list().map((stage) => stage.name).sort();
+  assert.deepEqual(names, ["manual-empty-stage", "preview-agent-active", "preview-agent-live-window", "preview-agent-new-session"]);
+}));
+
 test("creates an owner-visible stage as local metadata without issuing native window operations", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const manager = createWindowsDesktopStageManager({
