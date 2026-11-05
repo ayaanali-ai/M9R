@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
 import { dirname, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -32,6 +33,22 @@ const pkg = JSON.parse(readFileSync(resolve(repoRoot, "cli", "package.json"), "u
 const core = await import(pathToFileURL(resolve(distDir, "oathlock-cli-core.js")).href);
 
 const EXTERNAL_CWD = "/external/workspace";
+
+async function findFreePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolveListen());
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    throw new Error("Could not reserve an ephemeral loopback port for the packaged CLI test.");
+  }
+  const port = address.port;
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  return port;
+}
 
 async function removeTempWorkspace(workspace: string): Promise<void> {
   // The runtime deliberately detaches its watchdog so it can survive a
@@ -390,10 +407,15 @@ test("built mission bridge runtime has no unresolved monorepo source imports", (
 });
 
 test("packed CLI entry boots the terminal runtime without printing a pairing secret", { timeout: 20_000 }, async () => {
-  const port = 43_120;
+  const port = await findFreePort();
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "oathlock-cli-terminal-bridge-"));
+  const workspace = join(temporaryRoot, "workspace");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(m9rHome, { recursive: true });
   const child = spawn(process.execPath, [resolve(distDir, "m9r.js"), "terminal", "bridge"], {
-    cwd: repoRoot,
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port) },
+    cwd: workspace,
+    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, M9R_HOME: m9rHome, M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -420,6 +442,12 @@ test("packed CLI entry boots the terminal runtime without printing a pairing sec
     assert.doesNotMatch(output, /Pairing token:/);
   } finally {
     child.kill();
+    await new Promise<void>((resolveExit) => {
+      if (child.exitCode !== null) resolveExit();
+      else child.once("exit", () => resolveExit());
+    });
+    await removeTempWorkspace(workspace);
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 
