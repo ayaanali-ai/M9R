@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import type { WebBatchRequest, WebBatchResponse, WebRequest, WebResponse } from "./web-broker-core";
 import type { WebAgentMessage } from "./web-broker-core";
 import { requestOwnerPipe } from "./owner-pipe";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
@@ -40,8 +39,6 @@ export interface WebBrokerClient {
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number, options?: { bindForeground?: boolean }): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   /** Best-effort delivery-time cursor prime; never blocks the task transport. */
   primeAgentCursor?(token: string, taskId: string): Promise<StageClientResult>;
-  run(request: WebRequest): Promise<WebResponse>;
-  runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
   notifyMessage?(message: WebAgentMessage): Promise<boolean>;
   /** Ask the local AWARE ledger before a browser-room agent writes a task into another member's inbox. */
   authorizeRoomMessage?(sender: string, recipient: string): Promise<{ ok: true } | { ok: false; error: string }>;
@@ -222,48 +219,6 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async primeAgentCursor(token, taskId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
         url: `${baseUrl}/web/stage/prime-cursor`, body: { token, taskId }, timeoutMs: CURSOR_PRIME_TIMEOUT_MS });
-    },
-    async run(request) {
-      let key: string;
-      try {
-        key = readFileSync(options.keyPath, "utf8").trim();
-      } catch {
-        return { ok: false, error: "the M9R web broker has not been started yet (run m9r-web-broker once)" };
-      }
-      try {
-        const response = await doFetch(`${baseUrl}/cmd`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify(request),
-          // The broker may hold startup calls while Chrome starts the extension worker and it sends READY.
-          signal: AbortSignal.timeout(60_000),
-        });
-        return (await response.json()) as WebResponse;
-      } catch (error) {
-        if (error instanceof Error && error.name === "TimeoutError") return { ok: false, error: "the M9R web broker did not answer within 60s" };
-        const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
-        const code = (cause as { code?: string } | undefined)?.code ?? (cause instanceof Error ? cause.message : String(cause));
-        return { ok: false, error: `the M9R web broker is not reachable (${code}); start it with m9r-web-broker` };
-      }
-    },
-    async runBatch(request) {
-      let key: string;
-      try {
-        key = readFileSync(options.keyPath, "utf8").trim();
-      } catch {
-        return { ok: false, steps: [], failedAt: 0 };
-      }
-      try {
-        const response = await doFetch(`${baseUrl}/batch`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify(request),
-          signal: AbortSignal.timeout(60_000),
-        });
-        return (await response.json()) as WebBatchResponse;
-      } catch {
-        return { ok: false, steps: [], failedAt: 0 };
-      }
     },
     async notifyMessage(message) {
       let key: string;

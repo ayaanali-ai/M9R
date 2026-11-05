@@ -1,9 +1,7 @@
 /**
- * Web broker core (spike, docs: M9R_DEMO_BUILD_PLAN_2026-09-23.md Phase 1-2). Pure logic, no sockets: an agent's
- * browser command goes in through submit(), the connected extension does the work and answers through
- * onExtensionMessage(). Two things live here so they cannot be bypassed by the transport: per-tab claims and
- * fair, scope-aware turns for conflicting writers; and the presence label the overlay draws, derived from the
- * command that really ran rather than reported by the agent.
+ * Shared broker coordination and legacy page-action policy. Current browser/app
+ * input is dispatched through the native desktop stage; this module's former
+ * extension message transport is not registered by the production broker.
  */
 
 import { createHash } from "node:crypto";

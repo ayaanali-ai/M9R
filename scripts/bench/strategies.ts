@@ -3,8 +3,9 @@
  *  - solo: one agent does everything in order.
  *  - parallel: three agents split the work and share nothing until they report at the end.
  *  - coordinated: the same three agents post findings to a shared board as they go, and use what teammates post to stop early.
- * These are NOT evidence about real agents. They exist so the harness can be shown to tell the conditions apart
- * (page loads, tool calls, wall time) before any paid run, and they call the real M9R tools against a real browser.
+ * These are NOT evidence about real agents. They exercise the coordination algorithms
+ * over an injected WebApi adapter; a real-agent or desktop benchmark needs its own
+ * native computer-use adapter and must not use the retired browser command route.
  */
 import type { TaskName } from "./bench-data";
 
@@ -189,24 +190,6 @@ async function tripCoordinated(ctx: RunContext): Promise<void> {
 
 /** M9R tool responses may append a collaboration note after the selected value. */
 export const codeFrom = (text: string) => text.split("\n[teammates meanwhile]", 1)[0].trim();
-
-/** Extract the page delta returned by M9R's ordered click-plus-snapshot browser operation. */
-export function pageTextAfterBatchClick(text: string): string {
-  let result: unknown;
-  try {
-    result = JSON.parse(codeFrom(text));
-  } catch {
-    throw new Error("m9r_web_do did not return page text after the click");
-  }
-  if (!result || typeof result !== "object" || !("ok" in result) || result.ok !== true || !("steps" in result) || !Array.isArray(result.steps)) {
-    throw new Error("m9r_web_do did not return page text after the click");
-  }
-  const first = result.steps[0];
-  if (!first || typeof first !== "object" || !("response" in first) || !first.response || typeof first.response !== "object" || !("changedPart" in first.response) || typeof first.response.changedPart !== "string") {
-    throw new Error("m9r_web_do did not return page text after the click");
-  }
-  return first.response.changedPart;
-}
 
 const certFrom = (text: string) => /Certification code:\s*([A-HJ-NP-Z2-9]{6})\b/.exec(text)?.[1] ?? "";
 const listPath = (p: number) => `/search/list-${p}`;

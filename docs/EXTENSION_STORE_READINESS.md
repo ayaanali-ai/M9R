@@ -1,4 +1,6 @@
-# Browser extension store readiness
+# Archived: browser extension store readiness
+
+**Status: retired historical research.** M9R no longer ships or requires a browser extension. This document describes the former extension design and must not be used as current product, packaging, privacy, or store-submission guidance. It is retained only for historical reference.
 
 This is a policy and packaging readiness review for the current M9R dev extension, not a legal opinion or a prediction of store acceptance. Store rules and forms change; re-check each primary source immediately before submission.
 

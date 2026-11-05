@@ -1,6 +1,6 @@
-# M9R browser extension privacy notice
+# Archived: M9R browser extension privacy notice
 
-This is the source text for the public page at `https://m9r.dev/privacy/extension` (`src/app/privacy/extension/page.tsx` renders the same sections; keep them in step). It describes what the current extension does; it is not legal advice. Contact: the address on <https://m9r.dev/privacy>.
+**Status: retired historical notice.** M9R no longer ships or requires a browser extension. The former public route at `https://m9r.dev/privacy/extension` now explains that the extension is retired; the text below describes its former behavior and is not current product or privacy guidance. Contact: the address on <https://m9r.dev/privacy>.
 
 ## What this extension does
 

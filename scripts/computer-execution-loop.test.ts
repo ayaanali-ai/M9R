@@ -21,27 +21,14 @@ function fixture() {
   const calls: { kind: string; operationId?: string }[] = [];
   let failure: "none" | "before" | "uncertain" = "none";
   let batchFailure: "none" | "partial" = "none";
-  let url = "https://fixture.test/";
   let unlabeled = false;
   let structureCoverage: Record<string, unknown> | undefined;
   let activeTaskId = "T1";
   let clockMs: number | undefined;
-  const workRequests: unknown[] = [];
   const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString(),
     structure: { status: "complete", capturedAt: new Date().toISOString(), elements: [{ ref: "uia:post-action", role: "Button", label: "Action", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }] } });
-  const web: Pick<WebBrokerClient, "run" | "prepareTaskStage" | "taskStageAction"> = {
+  const web: Pick<WebBrokerClient, "prepareTaskStage" | "taskStageAction"> = {
     prepareTaskStage: async () => ({ ok: true }),
-    async run(request) {
-      calls.push({ kind: request.action, operationId: request.operationId });
-      if (request.work) workRequests.push(request.work);
-      if (request.action === "snapshot") return { ok: true, data: { tab: request.tab ?? "one", browserInstanceId: "daemon-one", tabId: request.tab ?? "target-one", url, text: "Verified state", nativeClickAvailable: true,
-        elements: [{ ref, role: "button", name: "Action", actions: ["click"], rect: { x: 1, y: 2, width: 50, height: 20 } }] } };
-      if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched" };
-      if (failure === "uncertain") throw new Error("Response lost after input");
-      if (request.action === "open" && request.url) url = request.url;
-      if (request.action === "close") return { ok: true, data: { closed: true } };
-      return { ok: true };
-    },
     async taskStageAction(_token, _taskId, input, _mode, operationId) {
       const action = input as { kind: string };
       calls.push({ kind: action.kind, operationId });
@@ -62,7 +49,7 @@ function fixture() {
     { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => activeTaskId,
       resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }),
       now: () => new Date(clockMs ?? Date.now()) });
-  return { calls, workRequests, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
+  return { calls, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     setCoverage: (value: Record<string, unknown>) => { structureCoverage = value; },
     setBatchFailure: (value: typeof batchFailure) => { batchFailure = value; },
     setNow: (value: number) => { clockMs = value; },

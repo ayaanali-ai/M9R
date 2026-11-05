@@ -14,19 +14,13 @@ const webBrokerFiles = new Set([
   "m9r-compatibility.test.ts",
   "room-litmus-core.test.ts",
   "web-setup-core.test.ts",
-  "web-broker.test.ts",
   "web-broker-server.test.ts",
-  "web-broker-extension.test.ts",
   "web-powers-core.test.ts",
   "web-powers-mcp.test.ts",
-  "page-actions.test.ts",
-  "page-actions.test.js",
   "web-authority.test.ts",
   "web-authority-store.test.ts",
   "web-authority-cli.test.ts",
   "owner-pipe.test.ts",
-  "presence-logic.test.ts",
-  "permission-logic.test.ts",
 ]);
 
 // These fixtures assert the retired provider-hook/extension delivery plane.
@@ -44,7 +38,7 @@ const retiredDeliveryContractFiles = new Set([
 ]);
 
 function belongsToSuite(name) {
-  if (suite === "bench") return ["bench-cdp.test.ts", "bench-cdp-driver.test.ts", "bench-data.test.ts", "bench-site.test.ts", "bench-strategies.test.ts", "bench-temp-cleanup.test.ts", "bench-client.test.ts"].includes(name);
+  if (suite === "bench") return ["bench-data.test.ts", "bench-site.test.ts", "bench-strategies-core.test.ts", "bench-temp-cleanup.test.ts", "bench-codex-cli.test.ts", "bench-usage-report.test.ts", "bench-prompts.test.ts"].includes(name);
   if (suite === "web-broker") return webBrokerFiles.has(name);
   if (suite !== "web-all") return false;
   return name.startsWith("bench-") ||
@@ -55,7 +49,6 @@ function belongsToSuite(name) {
     name.startsWith("room-") ||
     [
       ...webBrokerFiles,
-      "content-listener-leak.test.js",
       "cross-machine-room.test.ts",
       "engine-mcp-smoke.test.ts",
       "engine-update-core.test.ts",
@@ -66,18 +59,13 @@ function belongsToSuite(name) {
       "prune-tasks.test.ts",
       "vendor-launch-core.test.ts",
       "mission-relay.test.ts",
-      "m9r-extension-csp.test.ts",
       "page-notes-core.test.ts",
       "page-notes-mcp.test.ts",
       "page-notes-store.test.ts",
-      "browser-extension-store-package.test.mjs",
-      "quiet-input.test.js",
       "pill-state.test.ts",
       "pill-shells.test.ts",
       "pill-speech.test.ts",
       "desktop-pill-presence.test.ts",
-      "presence-frame-lifecycle.test.js",
-      "presence-target-highlight.test.js",
     ].includes(name);
 }
 
@@ -143,7 +131,7 @@ for (const file of files) {
     "./scripts/register-alias.mjs",
     "--test",
     `./scripts/${file}`,
-  ], { cwd: repoRoot, encoding: "utf8", timeout: file === "bench-strategies.test.ts" ? 600_000 : 180_000, maxBuffer: 16 * 1024 * 1024 });
+  ], { cwd: repoRoot, encoding: "utf8", timeout: 180_000, maxBuffer: 16 * 1024 * 1024 });
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
 

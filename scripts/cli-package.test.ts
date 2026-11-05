@@ -228,7 +228,7 @@ test("retired extension updater refuses without changing the existing installati
   };
 
   try {
-    const sourceManifest = readFileSync(resolve(repoRoot, "extensions", "browser", "manifest.json"), "utf8");
+    const sourceManifest = JSON.stringify({ manifest_version: 3, name: "retired M9R extension fixture" });
     put(join(extensionPath, "manifest.json"), sourceManifest);
     put(join(extensionPath, "src", "content.js"), "old managed content");
     put(join(extensionPath, "src", "edited.js"), "user edited after install");

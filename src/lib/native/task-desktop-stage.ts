@@ -1177,11 +1177,8 @@ export function createTaskDesktopStageService(input: {
         // Normal profile, normal executable, fixed owner-resolved arguments.
         // If no existing personal browser window was discoverable, open a fresh same-profile
         // window with no forced start URL, so it looks like Chrome actually opening -- its own
-        // real new-tab page, the way a human opening Chrome sees it. An earlier version forced
-        // about:blank here to avoid the browser-extension route restoring a retired extension
-        // page; that route is now permanently disabled (Finding C, WEB_EXTENSION_ROUTE_ENABLED
-        // in mcp-server.ts), so the thing this was protecting against no longer exists. Existing
-        // personal windows are adopted above and are never replaced by this fallback.
+        // real new-tab page, the way a human opening Chrome sees it. Existing personal windows
+        // are adopted above and are never replaced by this fallback.
         const beforeKeys = new Set(before.map(windowIdentityKey));
         const launchSpec = kind
           ? ownedBrowserLaunch(root, name, approved)

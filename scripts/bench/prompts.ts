@@ -24,17 +24,18 @@ const MESSAGE_LIMIT = 1_500;
 
 function preface(input: PromptInput): string {
   return [
-    `You are agent ${input.role} in a small benchmark. You can act on the web only through the M9R browser tools: m9r_web_open, m9r_web_read, m9r_web_click and m9r_web_type.`,
+    `You are agent ${input.role} in a small benchmark. Use M9R's native computer-use tools to work in the owner-visible browser: m9r_stage_app, m9r_computer_observe, m9r_computer_action, or m9r_stage_action.`,
     `Pass this session token as the token argument on EVERY M9R tool call: ${input.token}`,
-    'Open a page with m9r_web_open, then read it with m9r_web_read. Listing pages are tables: read them with selector "#rows". Read a whole page with selector "#content". Pages are small and never change, so do not read a page twice. Your browser tab is your own.',
+    'Inspect the available tool schemas, observe the browser before acting, and use the page structure when it exposes the target. Re-observe after navigation or a meaningful change. Do not assume a result is correct without checking its visible content.',
+    'The retired browser-extension action route is unavailable. Do not use a separate browser profile or a provider-owned browser to bypass the owner-visible desktop.',
   ].join("\n");
 }
 
 const submitTrip = (base: string) =>
-  `To submit: open ${base}/trip/answer, type the three ids into #flight, #hotel and #car with m9r_web_type, click #submit with m9r_web_click, then read #status and confirm it says "Answer received."`;
+  `To submit: use the native M9R computer-use tools to open ${base}/trip/answer, enter the three ids in #flight, #hotel and #car, activate #submit, then inspect #status and confirm it says "Answer received."`;
 
 const submitSearch = (base: string) =>
-  `To submit: open ${base}/search/answer, type the id into #item with m9r_web_type, click #submit with m9r_web_click, then read #status and confirm it says "Answer received."`;
+  `To submit: use the native M9R computer-use tools to open ${base}/search/answer, enter the id in #item, activate #submit, then inspect #status and confirm it says "Answer received."`;
 
 const tripPages = (base: string) =>
   `The policy is at ${base}/trip/policy. Listings: ${base}/trip/flights-1 to flights-3, ${base}/trip/hotels-1 to hotels-4, ${base}/trip/cars-1 to cars-3. Every listing is sorted by price, cheapest first, and each page's URL ends in its page number.`;

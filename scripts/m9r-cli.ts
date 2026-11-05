@@ -69,7 +69,7 @@ import { buildAgentVersionProbeEnv, detectInstalledAgents, type DetectableAgentK
 import {
   buildClaudeMcpRemoveArgs, buildPowerShellInvocation, removeCodexWebMcp, removeOpenCodeWebMcp,
   OPENCODE_IDENTITY_PLUGIN_FILENAME, planOpenCodeIdentityPluginRemoval, resolveOpenCodeGlobalPaths,
-  webConfigUninstallMode, type OpenCodeIdentityPluginRemovalAction, type WebSetupBrowser,
+  webConfigUninstallMode, type OpenCodeIdentityPluginRemovalAction,
 } from "@/lib/native/web-setup-core";
 import { planOpenCodeModelStateRepair, resolveOpenCodeModelFiles } from "@/lib/native/opencode-model-core";
 import { refreshManagedOpenCodeIdentityPlugin } from "@/lib/native/opencode-plugin-refresh";
@@ -97,7 +97,7 @@ import {
 } from "@/lib/native/install-core";
 import { runOpenCodeCli } from "@/lib/native/opencode-cli-core";
 import { migrateLegacyM9rDirectory, normalizeLegacyM9rEnvironment } from "@/lib/native/m9r-compatibility";
-import { isValidNativeInputRegistration, NATIVE_INPUT_HOST_NAME } from "@/lib/native/web-native-input-core";
+import { isValidLegacyNativeInputRegistration, LEGACY_NATIVE_INPUT_HOST_NAME, type LegacyBrowser } from "@/lib/native/legacy-browser-extension-cleanup-core";
 
 const execFileAsync = promisify(execFile);
 
@@ -1347,7 +1347,7 @@ type WebSetupManifest = {
   nativeInputManifestHash?: string;
   nativeInputHostPath?: string;
   nativeInputHostHash?: string;
-  nativeInputRegistrations?: Array<{ browser: WebSetupBrowser; key: string; manifestPath: string }>;
+  nativeInputRegistrations?: Array<{ browser: LegacyBrowser; key: string; manifestPath: string }>;
   runtimePath?: string;
   runtimeHash?: string;
   brokerConfigPath: string;
@@ -1363,7 +1363,7 @@ type WebSetupManifest = {
   identityManifestHash?: string;
   openCodeIdentityPluginPath?: string;
   openCodeIdentityPluginHash?: string;
-  browsers: WebSetupBrowser[];
+  browsers: LegacyBrowser[];
 };
 
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -2320,7 +2320,7 @@ async function runWebUninstall(args: string[]): Promise<number> {
   }
   let nativeManifestUnreferenced = true;
   for (const registration of manifest.nativeInputRegistrations ?? []) {
-    if (!isValidNativeInputRegistration({ ...registration, expectedManifestPath: join(root, "native-messaging", `${NATIVE_INPUT_HOST_NAME}.json`) })) {
+    if (!isValidLegacyNativeInputRegistration({ ...registration, expectedManifestPath: join(root, "native-messaging", `${LEGACY_NATIVE_INPUT_HOST_NAME}.json`) })) {
       nativeManifestUnreferenced = false;
       process.stdout.write("  [KEEP] Malformed Native Messaging ownership record; preserved the registration and manifest.\n");
       continue;
@@ -2341,7 +2341,7 @@ async function runWebUninstall(args: string[]): Promise<number> {
     }
   }
   if (manifest.nativeInputManifestPath
-    && manifest.nativeInputManifestPath === join(root, "native-messaging", `${NATIVE_INPUT_HOST_NAME}.json`)
+    && manifest.nativeInputManifestPath === join(root, "native-messaging", `${LEGACY_NATIVE_INPUT_HOST_NAME}.json`)
     && nativeManifestUnreferenced) {
     const current = await readOptional(manifest.nativeInputManifestPath);
     if (current && digest(current) === manifest.nativeInputManifestHash) await unlink(manifest.nativeInputManifestPath).catch(() => undefined);

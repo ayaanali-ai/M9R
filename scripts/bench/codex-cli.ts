@@ -22,7 +22,7 @@ export function codexCliPath(): string | null {
 
 /** Shown to Codex because its MCP tools are deferred behind the exec gateway rather than listed directly. */
 export const CODEX_PREFACE =
-  "M9R tools may only be reachable as deferred tools through your exec/code gateway (the `tools` object, named like mcp__m9r__m9r_web_open): use it only to call M9R tools. Do not run shell commands, read or write files, or reach the network any other way.";
+  "M9R tools may only be reachable as deferred tools through your exec/code gateway (the `tools` object, named like mcp__m9r__m9r_computer_observe or mcp__m9r__m9r_computer_action): use it only to call M9R tools. Do not run shell commands, read or write files, or reach the network any other way.";
 
 export function codexArgs(options: { prompt: string; cwd: string; launcher: string; storeRoot: string; brokerPort: number; lastMessagePath: string; model?: string }): string[] {
   const toml = (value: string) => JSON.stringify(value);

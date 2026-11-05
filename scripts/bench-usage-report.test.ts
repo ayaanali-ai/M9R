@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseClaudeJson } from "./bench/claude-cli";
-import { reportFrom, totalsOf } from "./bench/real-runner";
+import { reportFrom, totalsOf } from "./bench/usage-report";
 
 test("usage and cost are read from Claude Code's json output, and missing fields count as zero", () => {
   const json = parseClaudeJson(

@@ -1,5 +1,10 @@
 # M9R system map — 2026-10-05
 
+> **Historical snapshot.** The extension and CDP browser transport described in
+> this October 5 map have since been retired. The current runtime uses native
+> desktop controls for browser and app interaction; do not use this snapshot as
+> an installation or routing guide.
+
 This is the checkout map to use before moving, renaming, or deleting files. It
 records observed entry points and deployment boundaries; it does not turn a
 design note into a live acceptance claim.

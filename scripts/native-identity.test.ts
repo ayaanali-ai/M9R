@@ -108,7 +108,6 @@ test("desktop stage tools identify a truncated token before broker dispatch", as
     store,
     web: {
       prepareTaskStage: async () => { brokerCalls += 1; return { ok: true, stage: { name: "preview-agent-test" } }; },
-      run: async () => { throw new Error("unexpected broker request"); },
     },
   });
 

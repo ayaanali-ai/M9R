@@ -67,9 +67,7 @@ test("packaged broker rejects unauthenticated management and keeps its owner pip
   const build = spawnSync(process.execPath, [resolve(root, "scripts/build-cli.mjs")], { cwd: root, encoding: "utf8", timeout: 120_000 });
   assert.equal(build.status, 0, build.stderr || build.stdout);
   const bundle = resolve(root, "cli/dist/m9r-web-broker.cjs");
-  const extensionManifest = JSON.parse(await readFile(resolve(root, "cli/dist/extension/manifest.json"), "utf8"));
-  assert.ok(extensionManifest.key, "packaged extension must carry its fixed development ID");
-  await assert.rejects(access(resolve(root, "cli/dist/extension/store-assets")));
+  await assert.rejects(access(resolve(root, "cli/dist/extension")), "the retired browser extension must not be included in CLI output");
   const home = await mkdtemp(join(tmpdir(), "m9r-web-broker-package-"));
   const port = await freePort();
   const child = spawn(process.execPath, [bundle, "--home", home, "--port", String(port)], {

@@ -1,9 +1,7 @@
 /**
- * The agent's extra browser powers beyond open/read/click/type: scroll, wait, history, tabs, keys, dropdowns, find,
- * hover, screenshot and table extraction. Pure logic shared by the broker core: validation (unknown or extra fields are
- * refused), risk (only actions that can commit something go through the same risky-click gate as m9r_web_click), claims
- * (reads never claim, keys into a field take that field like typing, navigation takes the tab) and the presence
- * summary. The page and tab work itself lives in extensions/browser/src/powers.js and page-powers.js.
+ * Validation and risk classification for legacy page-action records retained by
+ * broker coordination code. This module does not dispatch browser input; all
+ * current browser and app interaction uses the native desktop stage.
  */
 import { classifyWebActionRisk, type Risk } from "./risk-core";
 
@@ -353,7 +351,7 @@ function activates(request: PowerRequestShape): boolean {
 /**
  * Reading, scrolling, waiting, finding, hovering, listing and switching are safe. Screenshots are owner-consented because
  * they can capture private page state. History moves, closing a
- * tab, Enter/Space on a target and choosing a dropdown option are judged by exactly the rules m9r_web_click uses, so a
+ * tab, Enter/Space on a target and choosing a dropdown option are judged by the same click-risk rules, so a
  * submit-, pay-, send- or delete-like target is held for the owner.
  */
 export function classifyPowerRisk(request: PowerRequestShape): Risk {

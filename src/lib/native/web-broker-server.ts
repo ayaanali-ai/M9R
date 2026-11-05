@@ -1,7 +1,6 @@
 /**
- * Local transport for the web broker (spike). Three doors:
- * - POST /cmd from the M9R MCP tools, allowed only with the owner-scoped key in ~/.m9r/web-broker.key. Requests that
- *   carry an Origin header are refused, so a web page cannot drive the browser through this port.
+ * Local transport for the owner broker:
+ * - authenticated native desktop stage/action routes; browser-extension command routes are not registered.
  * - a local named pipe/Unix socket for read-only status plus narrowly scoped, session-token-authorized agent task
  *   mutations; owner approvals, authority changes, and arbitrary store writes are never accepted on this pipe.
  * - the broker-owned desktop/owner-pipe routes. The former browser-extension
@@ -183,13 +182,7 @@ export interface WebBrokerServerOptions {
   key: string;
   port?: number;
   host?: string;
-  /** @deprecated Extension sockets are no longer accepted. */
-  allowedExtensionIds?: string[];
-  /** @deprecated Extension sockets are no longer accepted. */
-  allowAnyExtension?: boolean;
   timeoutMs?: number;
-  /** @deprecated There is no extension readiness wait anymore. */
-  extensionConnectTimeoutMs?: number;
   claimTtlMs?: number;
   loopGuard?: { repeat: number; budget: number; windowMs: number };
   approvalTimeoutMs?: number;
@@ -450,7 +443,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   options.ui?.attachBroker(broker);
 
   const ownerOnlyPaths = new Set([
-    "/web/mode", "/web/shutdown", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
+    "/web/mode", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
     "/web/actions/approve", "/web/actions/deny", "/web/aware/members/invite", "/web/aware/members/remove",
     "/web/aware/disclosures/decision", "/web/protocol",
     "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note", "/web/ui/model",
@@ -787,7 +780,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         const sender = memberPrincipal({ agent: values.sender });
         const recipient = memberPrincipal({ agent: values.recipient });
         if (!sender || !recipient) return reply(res, 400, { ok: false, error: "sender and recipient must be valid room agent handles" });
-        // AWARE membership enforcement disabled here too -- see the /cmd handler's comment.
+        // AWARE membership enforcement remains disabled here as it is for the local task route.
         return reply(res, 200, { ok: true });
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/protocol") {
@@ -921,9 +914,12 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       if (!persist()) return;
       return reply(res, 200, { ok: true, revoked });
     }
-    // /cmd and /batch were the browser-extension command door. There is no
-    // extension transport in the product; unknown routes end here without
-    // parsing a body or waiting for a browser connection.
+    // These legacy command routes once waited for a browser extension. Return
+    // an explicit migration hint so stale clients cannot silently wait or
+    // mistake the 404 for a transient broker failure.
+    if (requestUrl.pathname === "/cmd" || requestUrl.pathname === "/batch") {
+      return reply(res, 410, { ok: false, error: "The browser-extension command route is retired; use m9r_stage_action instead." });
+    }
     return reply(res, 404, { ok: false, error: "not found" });
   });
 

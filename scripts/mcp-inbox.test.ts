@@ -49,7 +49,6 @@ test("desktop stage input derives a private one-shot receipt ID from the MCP req
       receivedOperationId = operationId ?? "";
       return { ok: true, result: { operationReceipt: { status: "applied" }, actionExecuted: true } };
     },
-    run: async () => ({ ok: false, error: "unused" }),
   };
   const t = setup({ web });
   try {
@@ -69,7 +68,6 @@ test("an agent naming a task the owner's new message paused acts under the owner
   let receivedTaskId = "";
   const web: WebBrokerClient = {
     taskStageAction: async (_token, taskId) => { receivedTaskId = taskId; return { ok: true, result: { actionExecuted: true } }; },
-    run: async () => ({ ok: false, error: "unused" }),
   };
   const t = setup({ web });
   try {
@@ -225,7 +223,7 @@ test("delegated Codex can read its registered repository through its session tok
 });
 
 test("room identities cannot use governed file tools when AWARE membership is unavailable", async () => {
-  const t = setup({ web: { run: async () => ({ ok: false, error: "unused" }), authorizeRoomMessage: async () => ({ ok: false, error: "active room membership required" }) } });
+  const t = setup({ web: { authorizeRoomMessage: async () => ({ ok: false, error: "active room membership required" }) } });
   const project = mkdtempSync(join(tmpdir(), "m9r-room-file-gate-"));
   try {
     execFileSync("git", ["init", "-q", project]);
@@ -241,7 +239,7 @@ test("room identities cannot use governed file tools when AWARE membership is un
 });
 
 test("ordinary native sessions retain governed file access", async () => {
-  const t = setup({ web: { run: async () => ({ ok: false, error: "unused" }), authorizeRoomMessage: async () => ({ ok: false, error: "must not be called" }) } });
+  const t = setup({ web: { authorizeRoomMessage: async () => ({ ok: false, error: "must not be called" }) } });
   const project = mkdtempSync(join(tmpdir(), "m9r-native-file-gate-"));
   try {
     execFileSync("git", ["init", "-q", project]);
