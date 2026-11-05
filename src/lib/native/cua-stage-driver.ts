@@ -506,6 +506,7 @@ interface ResolvedDesktopPoint {
   screenPoint: { x: number; y: number };
   target: DesktopInputTarget;
   localPoint: { x: number; y: number };
+  windowCaptureSize?: { width: number; height: number };
   shellControl?: NativePointControl;
   nativeKeyboardWindow?: boolean;
   element?: CuaWindowElement;
@@ -1532,7 +1533,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { target: { pid, windowId }, localPoint, state: { elements }, element,
         ...(element?.elementToken ? { nativeElement: nativeElements.find((item) => item.ref === element.elementToken) } : {}) };
     }
-    return { target: { pid, windowId }, localPoint, state: { elements } };
+    return { target: { pid, windowId }, localPoint,
+      windowCaptureSize: { width: frame.width, height: frame.height }, state: { elements } };
   }
 
   async function resolveOwnerDesktopPoint(runtime: CuaRuntime | undefined, session: AgentCursorSession, x: number, y: number,
@@ -2134,7 +2136,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }, "Cua Driver could not click the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
-            const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
+            const screen = await desktopPointToCurrentScreen(point);
             await manager.sendClick(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
               ...(options.count ? { count: options.count } : {}),
@@ -2236,7 +2238,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
-            const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
+            const screen = await desktopPointToCurrentScreen(point);
             await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
           }),
       });
@@ -2262,7 +2264,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
-            const screen = await localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y, capture.width, capture.height);
+            const screen = await desktopPointToCurrentScreen(point);
             await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y,
               (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount,
               (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical");
@@ -2279,9 +2281,6 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       forgetDesktopInputTarget(name, identity);
       const start = await resolveOwnerDesktopPoint(undefined, session, fromX, fromY, capture);
       const end = await resolveOwnerDesktopPoint(undefined, session, toX, toY, capture);
-      if (start.target.pid !== end.target.pid || start.target.windowId !== end.target.windowId) {
-        throw new DesktopInputNotDispatchedError("A background drag must stay inside one exact window; no drag was sent.");
-      }
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, start);
       await inspectOwnerDesktop(name, identity);
@@ -2293,8 +2292,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }, "Cua Driver could not drag on the owner's current desktop.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         nativeForeground: nativeStageInput(start.target.pid, start.target.windowId, async () => {
-            const fromScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), start.localPoint.x, start.localPoint.y, capture.width, capture.height);
-            const toScreen = await localToScreenPoint(start.target.pid, BigInt(start.target.windowId), end.localPoint.x, end.localPoint.y, capture.width, capture.height);
+            const fromScreen = await desktopPointToCurrentScreen(start);
+            const toScreen = await desktopPointToCurrentScreen(end);
             await manager.sendDrag(start.target.pid, start.target.windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
           }),
       });
@@ -2426,6 +2425,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       x: rect.x + Math.floor((localX + 0.5) * rect.width / captureWidth),
       y: rect.y + Math.floor((localY + 0.5) * rect.height / captureHeight),
     };
+  }
+
+  async function desktopPointToCurrentScreen(point: ResolvedDesktopPoint): Promise<{ x: number; y: number }> {
+    // Desktop coordinates are first resolved into the exact hit window's own
+    // screenshot space. Reproject with that screenshot's dimensions, never the
+    // full desktop capture dimensions; otherwise a restored window's click is
+    // scaled toward its upper-left corner.
+    if (!point.windowCaptureSize) return point.screenPoint;
+    return localToScreenPoint(point.target.pid, BigInt(point.target.windowId), point.localPoint.x, point.localPoint.y,
+      point.windowCaptureSize.width, point.windowCaptureSize.height);
   }
 
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {

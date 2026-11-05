@@ -1,8 +1,36 @@
-use m9r_native_input_host::{read_frame, write_frame};
+use m9r_native_input_host::{
+    read_frame, write_frame, MAX_REQUEST_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES,
+};
 use serde_json::{json, Value};
 use std::io::{stdin, stdout, Read};
 
-const MAX_DESKTOP_STAGE_REQUEST_BYTES: u64 = 16 * 1024;
+fn bounded_response_bytes(response: &Value, operation: Option<&str>) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec(response)
+        .map_err(|error| format!("could not encode desktop-stage response: {error}"))?;
+    if bytes.len() <= MAX_RESPONSE_FRAME_BYTES {
+        return Ok(bytes);
+    }
+
+    // A large observation must produce an explicit operation error, not kill
+    // the persistent helper and turn every following desktop action into an
+    // unexplained transport failure. For an input operation, preserve the
+    // fact that its result can no longer be established from this response.
+    let mut fallback = json!({
+        "ok": false,
+        "error": "native desktop-stage response exceeded the broker response limit"
+    });
+    if let Some(request_id) = response.get("requestId") {
+        fallback["requestId"] = request_id.clone();
+    }
+    if matches!(
+        operation,
+        Some("sendClick" | "sendDrag" | "sendScroll" | "sendKeyCombo" | "sendText")
+    ) {
+        fallback["dispatchState"] = json!("uncertain");
+    }
+    serde_json::to_vec(&fallback)
+        .map_err(|error| format!("could not encode oversized-response error: {error}"))
+}
 
 fn has_agent_context(mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>) -> bool {
     const MARKERS: &[&str] = &[
@@ -56,7 +84,7 @@ fn run_desktop_stage_server() -> Result<(), String> {
             Ok(None) => return Err("persistent desktop-stage input closed unexpectedly".into()),
             Err(error) => return Err(format!("desktop-stage request framing failed: {error}")),
         };
-        if raw.len() as u64 > MAX_DESKTOP_STAGE_REQUEST_BYTES {
+        if raw.len() > MAX_REQUEST_FRAME_BYTES {
             let response =
                 json!({"ok":false,"error":"desktop stage request is invalid or too large"});
             let bytes = serde_json::to_vec(&response).expect("static response serializes");
@@ -72,6 +100,9 @@ fn run_desktop_stage_server() -> Result<(), String> {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             });
+        let operation = serde_json::from_slice::<Value>(&raw)
+            .ok()
+            .and_then(|parsed| parsed.get("op").and_then(Value::as_str).map(str::to_owned));
         if let Some(request_id) = request_id.as_deref() {
             let started = serde_json::to_vec(&json!({ "type":"started", "requestId":request_id }))
                 .map_err(|error| {
@@ -97,10 +128,7 @@ fn run_desktop_stage_server() -> Result<(), String> {
                 object.insert("requestId".to_owned(), Value::String(request_id));
             }
         }
-        let bytes = match serde_json::to_vec(&response) {
-            Ok(bytes) => bytes,
-            Err(error) => return Err(format!("could not encode desktop-stage response: {error}")),
-        };
+        let bytes = bounded_response_bytes(&response, operation.as_deref())?;
         write_frame(&mut output, &bytes)
             .map_err(|error| format!("could not write desktop-stage response: {error}"))?;
     }
@@ -124,10 +152,10 @@ fn main() {
         let mut request = Vec::new();
         if stdin()
             .lock()
-            .take(MAX_DESKTOP_STAGE_REQUEST_BYTES + 1)
+            .take(MAX_REQUEST_FRAME_BYTES as u64 + 1)
             .read_to_end(&mut request)
             .is_err()
-            || request.len() as u64 > MAX_DESKTOP_STAGE_REQUEST_BYTES
+            || request.len() > MAX_REQUEST_FRAME_BYTES
         {
             println!(
                 "{{\"ok\":false,\"error\":\"desktop stage request is invalid or too large\"}}"
@@ -152,4 +180,31 @@ fn main() {
 
     eprintln!("m9r-native-input-host requires --desktop-stage-server or --desktop-stage-json; the browser native-messaging route is retired");
     std::process::exit(2);
+}
+
+#[cfg(test)]
+mod response_frame_tests {
+    use super::bounded_response_bytes;
+    use m9r_native_input_host::MAX_RESPONSE_FRAME_BYTES;
+    use serde_json::json;
+
+    #[test]
+    fn oversized_observations_return_an_error_frame_without_terminating_the_host() {
+        let response = json!({ "ok": true, "requestId": "capture-1", "image": "x".repeat(MAX_RESPONSE_FRAME_BYTES + 1) });
+        let encoded = bounded_response_bytes(&response, Some("captureWindow")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["requestId"], "capture-1");
+        assert_eq!(parsed["dispatchState"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn oversized_input_result_is_reported_as_uncertain_not_not_dispatched() {
+        let response = json!({ "ok": true, "requestId": "click-1", "detail": "x".repeat(MAX_RESPONSE_FRAME_BYTES + 1) });
+        let encoded = bounded_response_bytes(&response, Some("sendClick")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["requestId"], "click-1");
+        assert_eq!(parsed["dispatchState"], "uncertain");
+    }
 }

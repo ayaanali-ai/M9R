@@ -10,11 +10,11 @@ use windows::Win32::{
     Foundation::{HWND, RECT},
     Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteObject, GetDC, GetDIBits,
-        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
-        SRCCOPY,
+        GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HGDIOBJ, SRCCOPY,
     },
     Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS},
-    UI::WindowsAndMessaging::GetClientRect,
+    UI::WindowsAndMessaging::GetWindowRect,
     UI::WindowsAndMessaging::{GetSystemMetrics, SYSTEM_METRICS_INDEX},
 };
 
@@ -47,25 +47,51 @@ fn png_data_url(width: u32, height: u32, bgra: &[u8]) -> Result<String, String> 
 }
 
 #[cfg(windows)]
+fn window_capture_dimensions(rect: &RECT) -> Result<(i32, i32), String> {
+    let width = rect
+        .right
+        .checked_sub(rect.left)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "Windows returned no valid full-window capture width".to_owned())?;
+    let height = rect
+        .bottom
+        .checked_sub(rect.top)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "Windows returned no valid full-window capture height".to_owned())?;
+    Ok((width, height))
+}
+
+#[cfg(windows)]
 pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
     let hwnd = HWND(window as *mut core::ffi::c_void);
     if hwnd.0.is_null() {
         return Err("no window handle was supplied for capture".into());
     }
     let mut rect = RECT::default();
-    unsafe { GetClientRect(hwnd, &mut rect) }.map_err(|error| error.to_string())?;
-    let width = (rect.right - rect.left).max(1) as u32;
-    let height = (rect.bottom - rect.top).max(1) as u32;
-    let source = unsafe { GetDC(Some(hwnd)) };
+    unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|error| error.to_string())?;
+    let (width, height) = window_capture_dimensions(&rect)?;
+    let pixel_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "Windows returned full-window bounds too large to capture".to_owned())?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(pixel_bytes).map_err(|error| {
+        format!("Windows could not allocate the full-window capture buffer: {error}")
+    })?;
+    pixels.resize(pixel_bytes, 0);
+    // The screenshot and windowRect contract both describe the full HWND
+    // bounds, including its non-client frame. GetDC(hwnd) is client-only and
+    // made PrintWindow's full-window output clip into a client-sized bitmap.
+    let source = unsafe { GetWindowDC(Some(hwnd)) };
     if source.0.is_null() {
-        return Err("Windows returned no client device context".into());
+        return Err("Windows returned no full-window device context".into());
     }
     let memory = unsafe { CreateCompatibleDC(Some(source)) };
     if memory.0.is_null() {
         unsafe { ReleaseDC(Some(hwnd), source) };
         return Err("Windows could not create a compatible capture context".into());
     }
-    let bitmap = unsafe { CreateCompatibleBitmap(source, width as i32, height as i32) };
+    let bitmap = unsafe { CreateCompatibleBitmap(source, width, height) };
     if bitmap.0.is_null() {
         unsafe {
             let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
@@ -78,27 +104,14 @@ pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
     let copied = if painted {
         true
     } else {
-        unsafe {
-            BitBlt(
-                memory,
-                0,
-                0,
-                width as i32,
-                height as i32,
-                Some(source),
-                0,
-                0,
-                SRCCOPY,
-            )
-            .is_ok()
-        }
+        unsafe { BitBlt(memory, 0, 0, width, height, Some(source), 0, 0, SRCCOPY).is_ok() }
     };
     let mut info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width as i32,
+            biWidth: width,
             // A negative height asks GDI for top-down rows, matching screen order.
-            biHeight: -(height as i32),
+            biHeight: -height,
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -106,14 +119,13 @@ pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
         },
         ..Default::default()
     };
-    let mut pixels = vec![0u8; width as usize * height as usize * 4];
     let read = if copied {
         unsafe {
             GetDIBits(
                 memory,
                 bitmap,
                 0,
-                height,
+                height as u32,
                 Some(pixels.as_mut_ptr().cast()),
                 &mut info,
                 DIB_RGB_COLORS,
@@ -130,16 +142,45 @@ pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
         let _ = windows::Win32::Graphics::Gdi::DeleteDC(memory);
         ReleaseDC(Some(hwnd), source);
     }
-    if read != height as i32 {
+    if read != height {
         return Err("Windows could not read the captured pixels".into());
     }
     Ok(NativeWindowCapture {
-        data_url: png_data_url(width, height, &pixels)?,
-        width,
-        height,
-        origin_x: 0,
-        origin_y: 0,
+        data_url: png_data_url(width as u32, height as u32, &pixels)?,
+        width: width as u32,
+        height: height as u32,
+        origin_x: rect.left,
+        origin_y: rect.top,
     })
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_capture_uses_the_full_frame_rectangle_and_origin() {
+        let rect = RECT {
+            left: -1200,
+            top: 40,
+            right: 400,
+            bottom: 940,
+        };
+        assert_eq!(window_capture_dimensions(&rect).unwrap(), (1600, 900));
+        assert_eq!((rect.left, rect.top), (-1200, 40));
+    }
+
+    #[test]
+    fn window_capture_rejects_empty_bounds_without_clamping_them_into_fake_pixels() {
+        let rect = RECT {
+            left: 10,
+            top: 40,
+            right: 10,
+            bottom: 30,
+        };
+        assert!(window_capture_dimensions(&rect).is_err());
+    }
 }
 
 /// Capture the full virtual screen (the union of connected monitor bounds)

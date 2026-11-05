@@ -327,7 +327,10 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
           originX: 0, originY: 0 } };
       }
       if (request.op === "windowRect") {
-        const rect = fixture.state?.windowBounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
+        const matchingWindow = fixture.windows?.find((window) => Number(window.pid) === Number(request.pid)
+          && String(window.windowId) === String(request.windowId));
+        const listedBounds = matchingWindow?.bounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
+        const rect = listedBounds ?? fixture.state?.windowBounds as { x?: number; y?: number; width?: number; height?: number } | undefined;
         return { ok: true, rect: rect ?? { x: 100, y: 50, width: 400, height: 200 } };
       }
       if (request.op === "inspectDesktopStructure") {
@@ -757,6 +760,62 @@ test("owner preview captures the whole current desktop and binds visible cursor 
   assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendKeyCombo").length, 1);
   assert.equal(calls.some((call) => ["click", "typeText", "hotkey", "capturedPosition"].includes(call.method)), false,
     "the overlay adapter does not dispatch input or capture the desktop");
+  await driver.shutdown();
+}));
+
+test("desktop pointer actions reproject through the hit window's screenshot size", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "restored-window-mapping" };
+  await registerOwnerPreview(root, identity);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const window = { pid: 4321, windowId: BigInt(windowId), processName: "notepad.exe", title: "Untitled",
+    bounds: { x: 100, y: 50, width: 400, height: 200 }, isOnScreen: true, minimized: false, zIndex: BigInt(1) };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls,
+    windows: [window], screenSize: { width: 1920, height: 1080 },
+    state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: window.bounds, images: [{ mimeType: "image/png", dataBase64: imageData }] },
+  }) as never });
+
+  await driver.captureDesktop("preview", identity);
+  await driver.clickDesktop("preview", 300, 150, identity, { button: "right" });
+  await driver.scrollDesktop("preview", 300, 150, "down", identity);
+  await driver.scrollDeltaDesktop("preview", 300, 150, 0, -3, "line", identity);
+
+  for (const operation of ["sendClick", "sendScroll"]) {
+    const callsForOperation = nativeFixture(root).calls.filter((call) => call.op === operation);
+    assert.equal(callsForOperation.length, operation === "sendScroll" ? 2 : 1);
+    for (const call of callsForOperation) {
+      assert.ok(Math.abs(Number(call.x) - 300) <= 2, `${operation} x should stay at the observed desktop point, got ${call.x}`);
+      assert.ok(Math.abs(Number(call.y) - 150) <= 2, `${operation} y should stay at the observed desktop point, got ${call.y}`);
+    }
+  }
+  await driver.shutdown();
+}));
+
+test("owner-preview desktop drag can cross into another window while retaining the exact drag-start HWND", async () => withRoot(async (root) => {
+  const identity = { handle: "codex", sessionId: "cross-window-drag" };
+  await registerOwnerPreview(root, identity);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const first = { pid: 4321, windowId: BigInt(windowId), processName: "notepad.exe", title: "Source",
+    bounds: { x: 100, y: 50, width: 400, height: 200 }, isOnScreen: true, minimized: false, zIndex: BigInt(1) };
+  const second = { pid: 5678, windowId: BigInt(7777), processName: "explorer.exe", title: "Destination",
+    bounds: { x: 500, y: 50, width: 400, height: 200 }, isOnScreen: true, minimized: false, zIndex: BigInt(2) };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls,
+    windows: [first, second], screenSize: { width: 1920, height: 1080 },
+    state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+      windowBounds: first.bounds, images: [{ mimeType: "image/png", dataBase64: imageData }] },
+  }) as never });
+
+  await driver.captureDesktop("preview", identity);
+  await driver.dragDesktop("preview", 300, 150, 600, 150, identity);
+
+  const drag = nativeFixture(root).calls.find((call) => call.op === "sendDrag");
+  assert.ok(drag, "owner-preview sends one physical drag across the observed endpoints");
+  assert.equal(drag?.pid, first.pid);
+  assert.equal(drag?.windowId, windowId, "the drag remains bound to the exact window under its start point");
+  assert.ok(Math.abs(Number(drag?.fromX) - 300) <= 2);
+  assert.ok(Math.abs(Number(drag?.fromY) - 150) <= 2);
+  assert.ok(Math.abs(Number(drag?.toX) - 600) <= 2);
+  assert.ok(Math.abs(Number(drag?.toY) - 150) <= 2);
   await driver.shutdown();
 }));
 
