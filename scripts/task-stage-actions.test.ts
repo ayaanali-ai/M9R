@@ -21,6 +21,12 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
     { kind: "type", view: "popup", mode: "replace", x: 32, y: 14, text: "M9R-demo-smoke.txt" });
   assert.deepEqual(parseTaskStageAction({ kind: "save_as", view: "app", path: "C:\\Users\\owner\\Desktop\\M9R Benchmark\\F1-Run1\\house.png", createParentDirectories: true }),
     { kind: "save_as", view: "app", path: "C:\\Users\\owner\\Desktop\\M9R Benchmark\\F1-Run1\\house.png", createParentDirectories: true });
+  assert.deepEqual(parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "down" }),
+    { kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "down" });
+  assert.deepEqual(parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "right", granularity: "large", expectedRole: "Pane" }),
+    { kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "right", granularity: "large", expectedRole: "Pane" });
+  assert.throws(() => parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "bottom" }), /Invalid accessibility scroll direction/);
+  assert.throws(() => parseTaskStageAction({ kind: "scroll_element", ref: "window-ui-element-a-1", direction: "down" }), /exact app view/);
   assert.throws(() => parseTaskStageAction({ kind: "save_as", view: "app", path: "Desktop\\file.txt" }), /absolute Windows file path/);
   assert.throws(() => parseTaskStageAction({ kind: "save_as", path: "C:\\Users\\owner\\Desktop\\file.txt" }), /exact app view/);
   assert.throws(() => parseTaskStageAction({ kind: "type", view: "popup", mode: "replace", text: "filename.txt" }), /Replace text requires an exact field point/);
@@ -124,6 +130,19 @@ test("explicit app view targets the selected window while remaining in owner-pre
   }
   assert.deepEqual(calls, ["app capture", "app click", "app type"]);
   assert.throws(() => parseTaskStageAction({ kind: "capture", view: "other-user-window" }), /Invalid stage action view/);
+});
+
+test("scroll_element routes to the exact app tree ref and carries the bounded granularity", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const, summary: "one small scroll increment" } };
+  const driver = { scrollElement: async (...args: unknown[]) => { calls.push({ method: "scrollElement", args }); return proof; } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "scroll-session" };
+  const result = await runTaskStageAction(driver, "settings", parseTaskStageAction({ kind: "scroll_element", view: "app",
+    ref: "window-ui-element-a-1", direction: "down", expectedRole: "List", expectedLabel: "Installed apps" }), identity, "owner-preview");
+  assert.equal(result, proof);
+  assert.deepEqual(calls, [{ method: "scrollElement", args: ["settings", "window-ui-element-a-1", "down", identity,
+    { expectedRole: "List", expectedLabel: "Installed apps", deliveryMode: "owner-preview" }] }]);
 });
 
 test("text and save shortcuts stay on the selected app while modal controls stay on its popup", async () => {

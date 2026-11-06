@@ -21,6 +21,7 @@ type TaskStageActionBody =
   | { kind: "press_key"; key: string; confirmFocusForeground?: boolean }
   | { kind: "hotkey"; keys: string[]; confirmFocusForeground?: boolean }
   | { kind: "click_element"; ref: string; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
+  | { kind: "scroll_element"; ref: string; direction: "up" | "down" | "left" | "right"; granularity?: "small" | "large"; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
   | { kind: "replace_element"; ref: string; text: string; expectedRole?: string; expectedLabel?: string }
   | { kind: "scroll_delta"; x?: number; y?: number; deltaX: number; deltaY: number; unit: "pixel" | "line" | "page"; confirmFocusForeground?: boolean }
   | { kind: "window_frame"; x: number; y: number; width: number; height: number }
@@ -57,7 +58,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   const action = value as Record<string, unknown>;
   const fields: Record<string, string[]> = { capture: [], stop: [], read_structure: [], window_status: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
     type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], type_then_enter: ["text"], scroll: ["x", "y", "direction", "amount"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
-    click_element: ["ref", "expectedRole", "expectedLabel"], replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
+    click_element: ["ref", "expectedRole", "expectedLabel"], scroll_element: ["ref", "direction", "granularity", "expectedRole", "expectedLabel"],
+    replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
     window_frame: ["x", "y", "width", "height"], snap: ["position"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
     system_control: ["control", "action", "value", "step"], save_as: ["path", "createParentDirectories", "replaceExisting"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
@@ -71,7 +73,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     // Same reasoning as scroll: x/y are a convenience, not a requirement.
     : action.kind === "scroll_delta" ? ["deltaX", "deltaY", "unit"] : action.kind === "window_frame" ? allowedFields
       : action.kind === "clipboard_read" ? ["includeText"] : action.kind === "clipboard_write" ? ["confirmSharedClipboard"] : action.kind === "click_element" ? ["ref"]
-        : action.kind === "replace_element" ? ["ref", "text"] : allowedFields;
+        : action.kind === "replace_element" ? ["ref", "text"] : action.kind === "scroll_element" ? ["ref", "direction"] : allowedFields;
   const commonOptionalFields = ["view", "confirmFocusForeground"];
   if (Object.keys(action).some((key) => key !== "kind" && !commonOptionalFields.includes(key) && !allowedFields.includes(key))
     || requiredFields.some((key) => !Object.hasOwn(action, key))) throw new Error("Invalid stage action fields.");
@@ -85,12 +87,14 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   }
   if (action.kind === "read_structure" && action.view !== "app" && action.view !== "desktop") throw new Error("Structure observation requires an exact app or desktop view.");
   if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
-  if (["click_element", "replace_element", "type_then_enter", "window_frame", "snap", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write", "save_as"].includes(action.kind)
+  if (["click_element", "scroll_element", "replace_element", "type_then_enter", "window_frame", "snap", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write", "save_as"].includes(action.kind)
     && action.view !== "app") throw new Error("This semantic stage action requires the exact app view.");
   if (action.kind === "snap" && !["left", "right", "top", "bottom", "maximize"].includes(String(action.position))) throw new Error("Invalid snap position.");
-  if (action.kind === "click_element" || action.kind === "replace_element") {
+  if (action.kind === "click_element" || action.kind === "scroll_element" || action.kind === "replace_element") {
     if (typeof action.ref !== "string" || !/^[A-Za-z0-9._:-]{1,512}$/.test(action.ref)) throw new Error("Invalid accessibility element reference.");
   }
+  if (action.kind === "scroll_element" && (!(["up", "down", "left", "right"] as unknown[]).includes(action.direction)
+    || (action.granularity !== undefined && action.granularity !== "small" && action.granularity !== "large"))) throw new Error("Invalid accessibility scroll direction or granularity.");
   for (const key of ["x", "y", "fromX", "fromY", "toX", "toY"]) {
     if (action.kind === "window_frame" && (key === "x" || key === "y")) continue;
     if (key in action && (!Number.isSafeInteger(action[key]) || (action[key] as number) < 0 || (action[key] as number) > 16383)) {
@@ -128,6 +132,9 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     if (["increase", "decrease"].includes(String(choice))) {
       if (action.step !== undefined && (!Number.isSafeInteger(action.step) || (action.step as number) < 1 || (action.step as number) > 50)) throw new Error("Level step must be from 1 to 50.");
     } else if (action.step !== undefined) throw new Error("Only increase and decrease accept a step.");
+  }
+  if (action.kind === "scroll_element" && ["expectedRole", "expectedLabel"].some((key) => action[key] !== undefined && (typeof action[key] !== "string" || (action[key] as string).length > 160))) {
+    throw new Error("Invalid expected scroll-container metadata.");
   }
   if (action.kind === "drag" && action.durationMs !== undefined
     && (typeof action.durationMs !== "number" || !Number.isSafeInteger(action.durationMs) || action.durationMs < 1 || action.durationMs > 10_000)) {
@@ -264,6 +271,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "hotkey": return popupTargeted ? driver.hotkeyPopup(name, action.keys, { confirmFocusForeground, deliveryMode: mode, ...(signal ? { signal } : {}) })
       : desktopWide ? driver.hotkeyDesktop(name, action.keys, identity, stageOptions({ confirmFocusForeground })) : driver.hotkey(name, action.keys, identity, stageOptions({ confirmFocusForeground }));
     case "click_element": return driver.clickElement(name, action.ref, identity, stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }));
+    case "scroll_element": return driver.scrollElement(name, action.ref, action.direction, identity,
+      stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, granularity: action.granularity }));
     case "replace_element": return driver.replaceElement(name, action.ref, action.text, identity,
       stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground }));
     case "window_frame": return driver.windowFrame(name, action.x, action.y, action.width, action.height, identity,

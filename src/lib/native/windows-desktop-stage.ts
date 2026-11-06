@@ -60,7 +60,8 @@ interface NativeStageResponse {
   window?: NativeWindowStageInfo;
   desktopStructure?: NativeDesktopStructure;
   windowStructure?: NativeWindowStructure;
-  semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean };
+  semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
+    scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null };
   capture?: { dataUrl: string; width: number; height: number; originX?: number; originY?: number };
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
@@ -130,8 +131,15 @@ export interface NativeWindowStructureElement extends NativeDesktopStructureElem
   /** Control View child-index path used for immediate native re-resolution. */
   path: number[];
   automationId: string;
-  actions?: { invoke: boolean; select: boolean; toggle: boolean; legacy: boolean; setValue: boolean };
+  actions?: { invoke: boolean; select: boolean; toggle: boolean; legacy: boolean; setValue: boolean; scroll?: boolean };
+  /** UIA ScrollPattern progress when this element is a scroll container. Percent can be null when the provider omits it. */
+  scroll?: {
+    horizontal: { scrollable: boolean; percent: number | null; viewSize: number | null };
+    vertical: { scrollable: boolean; percent: number | null; viewSize: number | null };
+  } | null;
 }
+
+interface NativeScrollPosition { horizontal: number | null; vertical: number | null }
 
 export interface NativeWindowStructure {
   scope: "window";
@@ -570,19 +578,29 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         || (element.actions !== undefined && Object.values(element.actions).some((action) => typeof action !== "boolean"))) {
         throw new Error("Windows returned an invalid window UI Automation element.");
       }
+      if (element.scroll !== undefined && element.scroll !== null && ["horizontal", "vertical"].some((axis) => {
+        const value = element.scroll?.[axis as "horizontal" | "vertical"];
+        return !value || typeof value.scrollable !== "boolean"
+          || (value.percent !== null && (!Number.isFinite(value.percent) || value.percent < 0 || value.percent > 100))
+          || (value.viewSize !== null && (!Number.isFinite(value.viewSize) || value.viewSize < 0 || value.viewSize > 100));
+      })) throw new Error("Windows returned invalid UI Automation scroll state.");
     }
     return structure;
   }
 
   async function invokeWindowElement(pid: number, windowId: string, input: {
-    path: number[]; action: "activate" | "setValue"; expectedRole: string; expectedLabel: string;
-    expectedClassName: string; expectedAutomationId: string; text?: string;
-  }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean }> {
+    path: number[]; action: "activate" | "setValue" | "scroll"; expectedRole: string; expectedLabel: string;
+    expectedClassName: string; expectedAutomationId: string; text?: string; direction?: "up" | "down" | "left" | "right";
+    granularity?: "small" | "large";
+  }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
+    scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null }> {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     if (!Array.isArray(input.path) || input.path.length > 64 || input.path.some((part) => !Number.isSafeInteger(part) || part < 0)
       || !input.expectedRole || (!input.expectedLabel && !input.expectedAutomationId)
-      || (input.action === "setValue" && typeof input.text !== "string")) {
+      || (input.action === "setValue" && typeof input.text !== "string")
+      || (input.action === "scroll" && (!input.direction || !["up", "down", "left", "right"].includes(input.direction)
+        || (input.granularity !== undefined && input.granularity !== "small" && input.granularity !== "large")))) {
       throw new Error("The native semantic action identity is invalid.");
     }
     let inspected: NativeWindowStageInfo;
@@ -610,7 +628,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!semanticAction || typeof semanticAction.dispatched !== "boolean"
       || (semanticAction.mechanism !== undefined && typeof semanticAction.mechanism !== "string")
       || (semanticAction.reason !== undefined && typeof semanticAction.reason !== "string")
-      || (semanticAction.valueConfirmed !== undefined && typeof semanticAction.valueConfirmed !== "boolean")) {
+      || (semanticAction.valueConfirmed !== undefined && typeof semanticAction.valueConfirmed !== "boolean")
+      || (semanticAction.moved !== undefined && semanticAction.moved !== null && typeof semanticAction.moved !== "boolean")
+      || ([semanticAction.scrollBefore, semanticAction.scrollAfter].some((position) => position !== undefined
+        && (!position || [position.horizontal, position.vertical].some((axis) => axis !== null && (!Number.isFinite(axis) || axis < 0 || axis > 100)))))) {
       throw new DesktopInputOutcomeUnknownError("Windows returned an invalid native semantic action result; inspect the target before retrying.");
     }
     return semanticAction;

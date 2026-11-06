@@ -10,13 +10,14 @@ use windows::Win32::{
     UI::Accessibility::{
         CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
         IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
-        IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
-        IUIAutomationValuePattern, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
-        UIA_ComboBoxControlTypeId, UIA_EditControlTypeId, UIA_HyperlinkControlTypeId,
-        UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId,
-        UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId, UIA_RadioButtonControlTypeId,
-        UIA_SelectionItemPatternId, UIA_TabItemControlTypeId, UIA_TogglePatternId,
-        UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+        IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
+        IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_ButtonControlTypeId,
+        UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_EditControlTypeId,
+        UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId,
+        UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId,
+        UIA_RadioButtonControlTypeId, UIA_ScrollPatternId, UIA_SelectionItemPatternId,
+        UIA_TabItemControlTypeId, UIA_TogglePatternId, UIA_TreeItemControlTypeId,
+        UIA_ValuePatternId,
     },
     UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -430,6 +431,11 @@ fn walk_window_element(
                     .map(|read_only| !read_only.as_bool())
                     .unwrap_or(false)
             });
+        let scroll_state = current_scroll_state(element);
+        let supports_scroll = scroll_state.as_ref().is_some_and(|state| {
+            state["horizontal"]["scrollable"].as_bool().unwrap_or(false)
+                || state["vertical"]["scrollable"].as_bool().unwrap_or(false)
+        });
         elements.push(json!({
             "ref": format!("window-ui-element-{}-{}", snapshot_id, next_ref),
             "path": path,
@@ -439,7 +445,8 @@ fn walk_window_element(
             "automationId": truncate_text(&automation_id, 256),
             "rect": { "x": bounds.left, "y": bounds.top, "width": bounds.right - bounds.left, "height": bounds.bottom - bounds.top },
             "depth": depth, "enabled": enabled, "focused": focused,
-            "actions": { "invoke": supports_invoke, "select": supports_select, "toggle": supports_toggle, "legacy": supports_legacy, "setValue": supports_value },
+            "actions": { "invoke": supports_invoke, "select": supports_select, "toggle": supports_toggle, "legacy": supports_legacy, "setValue": supports_value, "scroll": supports_scroll },
+            "scroll": scroll_state,
         }));
     }
     if depth >= max_depth {
@@ -492,9 +499,11 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
     use windows::Win32::UI::Accessibility::{
         IUIAutomationElement, IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
-        IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
-        IUIAutomationValuePattern, UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId,
-        UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
+        IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
+        IUIAutomationTreeWalker, IUIAutomationValuePattern, ScrollAmount_LargeDecrement,
+        ScrollAmount_LargeIncrement, ScrollAmount_NoAmount, ScrollAmount_SmallDecrement,
+        ScrollAmount_SmallIncrement, UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId,
+        UIA_ScrollPatternId, UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
 
@@ -647,6 +656,52 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         ));
     }
 
+    if action == "scroll" {
+        let direction = value
+            .get("direction")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                crate::InputDispatchError::not_dispatched("scroll direction is required")
+            })?;
+        let granularity = value
+            .get("granularity")
+            .and_then(Value::as_str)
+            .unwrap_or("small");
+        let increment = match (direction, granularity) {
+            ("up", "small") | ("left", "small") => ScrollAmount_SmallDecrement,
+            ("down", "small") | ("right", "small") => ScrollAmount_SmallIncrement,
+            ("up", "large") | ("left", "large") => ScrollAmount_LargeDecrement,
+            ("down", "large") | ("right", "large") => ScrollAmount_LargeIncrement,
+            _ => {
+                return Err(crate::InputDispatchError::not_dispatched(
+                    "unsupported scroll direction or granularity",
+                ))
+            }
+        };
+        let (horizontal, vertical) = if direction == "left" || direction == "right" {
+            (increment, ScrollAmount_NoAmount)
+        } else {
+            (ScrollAmount_NoAmount, increment)
+        };
+        let Ok(pattern) = (unsafe { element.GetCurrentPattern(UIA_ScrollPatternId) })
+            .and_then(|pattern| pattern.cast::<IUIAutomationScrollPattern>())
+        else {
+            return Ok(json!({"dispatched":false,"reason":"scroll-pattern-unavailable"}));
+        };
+        let before = scroll_pattern_position(&pattern);
+        unsafe { pattern.Scroll(horizontal, vertical) }
+            .map_err(|error| crate::InputDispatchError::uncertain(error.to_string()))?;
+        let after = scroll_pattern_position(&pattern);
+        let axis = if direction == "left" || direction == "right" {
+            "horizontal"
+        } else {
+            "vertical"
+        };
+        let moved = scroll_position_changed(Some(&before), Some(&after), axis);
+        return Ok(
+            json!({"dispatched":true,"mechanism":"scroll-pattern","scrollBefore":before,"scrollAfter":after,"moved":moved}),
+        );
+    }
     if action == "setValue" {
         let Ok(pattern) = (unsafe { element.GetCurrentPattern(UIA_ValuePatternId) })
             .and_then(|pattern| pattern.cast::<IUIAutomationValuePattern>())
@@ -713,6 +768,60 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         }
     }
     Ok(json!({"dispatched":false,"reason":"activation-pattern-unavailable"}))
+}
+
+fn finite_scroll_percent(value: windows::core::Result<f64>) -> Option<f64> {
+    value
+        .ok()
+        .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+}
+
+fn current_scroll_state(element: &IUIAutomationElement) -> Option<Value> {
+    let pattern: IUIAutomationScrollPattern =
+        unsafe { element.GetCurrentPattern(UIA_ScrollPatternId) }
+            .ok()?
+            .cast()
+            .ok()?;
+    Some(scroll_pattern_state(&pattern))
+}
+
+fn scroll_pattern_state(pattern: &IUIAutomationScrollPattern) -> Value {
+    let horizontal_scrollable = unsafe { pattern.CurrentHorizontallyScrollable() }
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    let vertical_scrollable = unsafe { pattern.CurrentVerticallyScrollable() }
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    json!({
+        "horizontal": {
+            "scrollable": horizontal_scrollable,
+            "percent": finite_scroll_percent(unsafe { pattern.CurrentHorizontalScrollPercent() }),
+            "viewSize": finite_scroll_percent(unsafe { pattern.CurrentHorizontalViewSize() }),
+        },
+        "vertical": {
+            "scrollable": vertical_scrollable,
+            "percent": finite_scroll_percent(unsafe { pattern.CurrentVerticalScrollPercent() }),
+            "viewSize": finite_scroll_percent(unsafe { pattern.CurrentVerticalViewSize() }),
+        },
+    })
+}
+
+fn scroll_pattern_position(pattern: &IUIAutomationScrollPattern) -> Value {
+    let state = scroll_pattern_state(pattern);
+    json!({"horizontal": state["horizontal"]["percent"], "vertical": state["vertical"]["percent"]})
+}
+
+fn scroll_position_changed(
+    before: Option<&Value>,
+    after: Option<&Value>,
+    axis: &str,
+) -> Option<bool> {
+    let (Some(before), Some(after)) = (before, after) else {
+        return None;
+    };
+    let old = before[axis].as_f64()?;
+    let new = after[axis].as_f64()?;
+    Some((old - new).abs() > f64::EPSILON)
 }
 
 fn walk_desktop_elements(
@@ -854,6 +963,30 @@ mod tests {
                 .expect("read the configured AutoSetFocus value")
                 .as_bool(),
             "semantic UIA calls must not automatically focus their target"
+        );
+    }
+
+    #[test]
+    fn scroll_progress_uses_only_the_requested_axis_and_preserves_unknown_state() {
+        let before = json!({ "horizontal": 30.0, "vertical": 40.0 });
+        let after = json!({ "horizontal": 30.0, "vertical": 41.0 });
+        assert_eq!(
+            scroll_position_changed(Some(&before), Some(&after), "vertical"),
+            Some(true)
+        );
+        assert_eq!(
+            scroll_position_changed(Some(&before), Some(&after), "horizontal"),
+            Some(false)
+        );
+        let tiny_move = json!({ "horizontal": 30.0, "vertical": 40.000_001 });
+        assert_eq!(
+            scroll_position_changed(Some(&before), Some(&tiny_move), "vertical"),
+            Some(true)
+        );
+        let unavailable = json!({ "horizontal": null, "vertical": null });
+        assert_eq!(
+            scroll_position_changed(Some(&unavailable), Some(&after), "vertical"),
+            None
         );
     }
 }

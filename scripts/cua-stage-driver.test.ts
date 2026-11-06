@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies } from "../src/lib/native/cua-stage-driver";
-import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
+import { createWindowsDesktopStageManager, type NativeWindowStructureElement } from "../src/lib/native/windows-desktop-stage";
 import { parseTaskStageAction } from "../src/lib/native/task-stage-actions";
 import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "../src/lib/native/desktop-input-errors";
 
@@ -471,7 +471,9 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
               toggle: actionNames.includes("toggle") || actions.toggle === true,
               legacy: actionNames.includes("legacy") || actions.legacy === true,
               setValue: actionNames.includes("set_value") || actions.setValue === true || actions.set_value === true,
+              scroll: actionNames.includes("scroll") || actions.scroll === true,
             },
+            scroll: (element.scroll ?? null) as NativeWindowStructureElement["scroll"],
           };
         });
         return { ok: true, windowStructure: { scope: "window", windowId: String(request.windowId),
@@ -482,7 +484,9 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
         const path = input.path as number[] | undefined;
         const element = (fixture.state?.elements as Array<Record<string, unknown>> | undefined)?.[path?.[0] ?? -1];
         const actions = Array.isArray(element?.actions) ? element.actions.map(String) : [];
-        const canRun = input.action === "setValue" ? actions.includes("set_value") : actions.some((name) => ["invoke", "click", "select", "toggle", "expand"].includes(name));
+        const canRun = input.action === "setValue" ? actions.includes("set_value")
+          : input.action === "scroll" ? actions.includes("scroll")
+            : actions.some((name) => ["invoke", "click", "select", "toggle", "expand"].includes(name));
         const sameIdentity = element && String(element.role ?? "") === input.expectedRole
           && String(element.label ?? "") === input.expectedLabel
           && String(element.className ?? "") === input.expectedClassName
@@ -490,8 +494,10 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
         if (!sameIdentity) return { ok: false, dispatchState: "not-dispatched", error: "The native semantic target changed; no semantic input was sent." };
         return canRun
           ? { ok: true, semanticAction: { dispatched: true, mechanism: "test-uia",
-            ...(input.action === "setValue" ? { valueConfirmed: fixture.state?.valueConfirmed !== false } : {}) } }
-          : { ok: true, semanticAction: { dispatched: false, reason: "activation-pattern-unavailable" } };
+            ...(input.action === "setValue" ? { valueConfirmed: fixture.state?.valueConfirmed !== false } : {}),
+            ...(input.action === "scroll" ? { scrollBefore: { horizontal: null, vertical: Number(fixture.state?.scrollBeforePercent ?? 20) },
+              scrollAfter: { horizontal: null, vertical: Number(fixture.state?.scrollAfterPercent ?? 25) }, moved: fixture.state?.scrollMoved !== false } : {}) } }
+          : { ok: true, semanticAction: { dispatched: false, reason: input.action === "scroll" ? "scroll-pattern-unavailable" : "activation-pattern-unavailable" } };
       }
       if (request.op === "listVisibleWindows") {
         const source = fixture.windows;
@@ -1824,6 +1830,68 @@ test("an exact UIA ref with no advertised activation pattern still uses native p
   assert.ok(native.some(call => call.op === "invokeWindowElement"), "M9R tries the semantic route first");
   assert.ok(native.some(call => call.op === "sendClick"), "unsupported UIA patterns do not veto a physical click on the exact live point");
   assert.equal(calls.some(call => call.method === "click"), false, "the native fallback does not route through Cua input dispatch");
+  await driver.shutdown();
+}));
+
+test("UIA scroll-container refs expose progress and move one headless increment with post-action evidence", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls, state: { elements: [{ role: "List", label: "Installed apps",
+      className: "ItemsView", automationId: "InstalledAppsList", enabled: true, actions: ["scroll"],
+      scroll: { horizontal: { scrollable: false, percent: null, viewSize: null },
+        vertical: { scrollable: true, percent: 20, viewSize: 35 } },
+      frame: { x: 120, y: 70, w: 400, h: 300 } }] } }) as never });
+
+  const observation = await driver.readStructure("stage");
+  assert.equal(observation.elements[0]?.actions?.includes("scroll"), true);
+  assert.equal(observation.elements[0]?.scroll?.vertical.percent, 20);
+  const result = await driver.scrollElement("stage", observation.elements[0]!.ref, "down");
+  assert.equal(result.outcome.status, "confirmed");
+  assert.match(result.outcome.summary ?? "", /one small down increment; position 25\.0%/);
+  const native = nativeFixture(root).calls;
+  const request = native.find((call) => call.op === "invokeWindowElement" && call.action === "scroll");
+  assert.equal(request?.direction, "down");
+  assert.equal(request?.granularity, "small");
+  assert.equal(native.some((call) => ["bringToForeground", "sendScroll"].includes(String(call.op))), false,
+    "the semantic ScrollPattern route does not touch the physical pointer or target focus");
+  await driver.shutdown();
+}));
+
+test("scroll-element fallback is one observed wheel notch when UIA has no ScrollPattern", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls, state: { elements: [{ role: "Pane", label: "Custom list",
+      className: "CustomList", enabled: true, actions: ["focus"], frame: { x: 120, y: 70, w: 80, h: 60 } }] } }) as never });
+
+  const observation = await driver.readStructure("stage");
+  const result = await driver.scrollElement("stage", observation.elements[0]!.ref, "down");
+  assert.equal(result.outcome.status, "unverified");
+  const native = nativeFixture(root).calls;
+  const wheel = native.find((call) => call.op === "sendScroll");
+  assert.equal(wheel?.amount, -1);
+  assert.equal(native.filter((call) => call.op === "sendScroll").length, 1);
+  await driver.shutdown();
+}));
+
+test("a UIA scroll request with no progress is reported as partial and is not replayed through wheel input", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls, state: { scrollBeforePercent: 100, scrollAfterPercent: 100, scrollMoved: false,
+      elements: [{ role: "List", label: "Installed apps", className: "ItemsView", enabled: true, actions: ["scroll"],
+        scroll: { horizontal: { scrollable: false, percent: null, viewSize: null },
+          vertical: { scrollable: true, percent: 100, viewSize: 35 } }, frame: { x: 120, y: 70, w: 80, h: 60 } }] } }) as never });
+
+  const observation = await driver.readStructure("stage");
+  const result = await driver.scrollElement("stage", observation.elements[0]!.ref, "down");
+  assert.equal(result.outcome.status, "partial");
+  assert.match(result.outcome.summary ?? "", /no position change/);
+  const native = nativeFixture(root).calls;
+  assert.equal(native.filter((call) => call.op === "invokeWindowElement" && call.action === "scroll").length, 1);
+  assert.equal(native.some((call) => call.op === "sendScroll"), false,
+    "an accepted semantic request that reports no progress is reconciled, never blindly replayed through wheel input");
   await driver.shutdown();
 }));
 

@@ -242,6 +242,7 @@ export interface CuaStageStructure {
     selected?: boolean;
     actions?: string[];
     canReplaceValue?: boolean;
+    scroll?: NativeWindowStructureElement["scroll"];
     rect?: { x: number; y: number; width: number; height: number };
   }>;
   /** Same-call visual fallback when the accessibility tree is incomplete. */
@@ -1622,6 +1623,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           ...(item.actions?.toggle ? ["toggle"] : []),
           ...(item.actions?.legacy ? ["click"] : []),
           ...(item.actions?.setValue ? ["set_value"] : []),
+          ...(item.actions?.scroll ? ["scroll"] : []),
         ];
         return { elementToken: item.ref, elementIndex: BigInt(index), depth: item.depth, role: item.role,
           label: normalizeAccessibleLabel(item.label) ?? "", enabled: item.enabled, actions,
@@ -1818,6 +1820,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           ...(element.actions?.toggle ? ["toggle"] : []),
           ...(element.actions?.legacy ? ["click"] : []),
           ...(element.actions?.setValue ? ["set_value"] : []),
+          ...(element.actions?.scroll ? ["scroll"] : []),
         ];
         const mapped = {
           elementToken: element.ref, elementIndex: BigInt(index),
@@ -1921,6 +1924,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           elements: elements.map(({ native, mapped }) => ({
             ref: native.ref, depth: native.depth, role: native.role, label: normalizeAccessibleLabel(native.label) ?? "", enabled: native.enabled,
             actions: mapped.actions, ...(native.actions?.setValue ? { canReplaceValue: true } : {}),
+            ...(native.scroll ? { scroll: native.scroll } : {}),
             rect: { x: (native.rect.x - frame.windowBounds!.x) * frame.width / frame.windowBounds!.width,
               y: (native.rect.y - frame.windowBounds!.y) * frame.height / frame.windowBounds!.height,
               width: native.rect.width * frame.width / frame.windowBounds!.width,
@@ -2797,6 +2801,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         ...(element.actions?.toggle ? ["toggle"] : []),
         ...(element.actions?.legacy ? ["click"] : []),
         ...(element.actions?.setValue ? ["set_value"] : []),
+        ...(element.actions?.scroll ? ["scroll"] : []),
       ];
       return { elementToken: element.ref, elementIndex: BigInt(index), ...(parentIndex !== undefined ? { parentIndex } : {}),
         depth: element.depth, role: element.role, label: normalizeAccessibleLabel(element.label) ?? "", enabled: element.enabled, actions,
@@ -3360,6 +3365,61 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     }, cursorIdentity);
   }
 
+  async function scrollElement(name: string, ref: string, direction: "up" | "down" | "left" | "right",
+    cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions & { granularity?: "small" | "large" } = {}): Promise<CuaStageActionProof> {
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementByToken }) => {
+      assertNotAbortedBeforeInput(options.signal);
+      const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
+      if (!selected?.nativeElement || selected.element.enabled === false) {
+        throw new DesktopInputNotDispatchedError("The scroll container ref is stale, disabled, or no longer matches the observed control; no scroll was sent.", "target-identity");
+      }
+      const nativeElement = selected.nativeElement;
+      if (nativeElement.actions?.scroll && typeof manager.invokeWindowElement === "function") {
+        const semantic = await invokeWindowElementTimed(pid, windowId.toString(), {
+          path: nativeElement.path, action: "scroll", expectedRole: nativeElement.role,
+          expectedLabel: nativeElement.label, expectedClassName: nativeElement.className,
+          expectedAutomationId: nativeElement.automationId, direction, granularity: options.granularity ?? "small",
+        });
+        if (semantic.dispatched) {
+          const before = semantic.scrollBefore?.[direction === "up" || direction === "down" ? "vertical" : "horizontal"];
+          const after = semantic.scrollAfter?.[direction === "up" || direction === "down" ? "vertical" : "horizontal"];
+          const progress = after === null || after === undefined ? "position unavailable" : `position ${after.toFixed(1)}%`;
+          const summary = semantic.moved === true
+            ? `Scrolled the observed UI Automation container by one ${options.granularity ?? "small"} ${direction} increment; ${progress}.`
+            : semantic.moved === false
+              ? `UI Automation accepted the ${direction} scroll request but reported no position change (${before === null || before === undefined ? "previous position unavailable" : `previous position ${before.toFixed(1)}%`}; ${progress}). Treat this as a boundary or provider no-op and inspect the refreshed view before continuing.`
+              : `UI Automation accepted one ${direction} scroll request; ${progress} could not be confirmed. Inspect the refreshed view before continuing.`;
+          return { capture: stageCapture(await captureWindow(), now), outcome: {
+            status: semantic.moved === true ? "confirmed" : semantic.moved === false ? "partial" : "unverified", summary,
+          } };
+        }
+        if (semantic.reason !== "scroll-pattern-unavailable") {
+          throw new DesktopInputNotDispatchedError(`The observed UI Automation scroll container could not scroll (${semantic.reason ?? "unknown reason"}); no wheel fallback was attempted.`, "target-identity");
+        }
+      }
+
+      // A visible wheel fallback is only used when this container does not
+      // implement ScrollPattern. Keep it to one notch so each task-stage call
+      // is a bounded movement followed by a fresh capture; the model can then
+      // stop at the requested item instead of firing an endpoint-sized jump.
+      const point = elementCursorPoint(selected.element, selected.frame);
+      if (!point) throw new DesktopInputNotDispatchedError("The observed scroll container has no usable point for the one-notch wheel fallback; no scroll was sent.", "target-identity");
+      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
+      const before = await captureFrame();
+      const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
+      const horizontal = direction === "left" || direction === "right";
+      const signedAmount = direction === "up" || direction === "right" ? 1 : -1;
+      const outcome = await driverInputAction("scroll", {
+        pid, window_id: Number(windowId), x: point.x, y: point.y, direction: signedAmount > 0 ? "up" : "down",
+        by: "line", amount: 1, session,
+      }, "Cua Driver could not scroll the observed container by one wheel notch.", {
+        preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeForeground: nativeStageInput(pid, windowId, () => manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, signedAmount, horizontal ? "horizontal" : "vertical")),
+      });
+      return { capture: stageCapture(await captureWindow(), now), outcome };
+    }, cursorIdentity);
+  }
+
   async function replaceElement(name: string, ref: string, text: string, cursorIdentity?: CuaAgentCursorIdentity,
     options: CuaStageInputOptions & { expectedRole?: string; expectedLabel?: string } = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementByToken }) => {
@@ -3642,7 +3702,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, readStructure, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, drag,
+  return { capture, readStructure, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
     clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,
