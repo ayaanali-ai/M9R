@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { createCuaStageDriver as createCuaStageDriverCore, topmostWindowAtScreenPoint, type CuaStageDriverDependencies } from "../src/lib/native/cua-stage-driver";
@@ -489,7 +489,8 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
           && String(element.automationId ?? "") === input.expectedAutomationId;
         if (!sameIdentity) return { ok: false, dispatchState: "not-dispatched", error: "The native semantic target changed; no semantic input was sent." };
         return canRun
-          ? { ok: true, semanticAction: { dispatched: true, mechanism: "test-uia" } }
+          ? { ok: true, semanticAction: { dispatched: true, mechanism: "test-uia",
+            ...(input.action === "setValue" ? { valueConfirmed: fixture.state?.valueConfirmed !== false } : {}) } }
           : { ok: true, semanticAction: { dispatched: false, reason: "activation-pattern-unavailable" } };
       }
       if (request.op === "listVisibleWindows") {
@@ -1886,6 +1887,105 @@ test("popup replace mode resolves the exact enabled UIA edit and sets its value 
   assert.equal(invoke?.text, "M9R-demo-smoke.txt");
   assert.equal(native.some((call) => ["sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false,
     "the accessible filename field uses UIA ValuePattern without unnecessary physical input");
+  await driver.shutdown();
+}));
+
+test("generic Save As creates only the requested parent folder and verifies the exact persisted path without pointer input", async () => withRoot(async root => {
+  await registerStage(root);
+  const target = join(root, "M9R Benchmark", "F1-Run1", "house.png");
+  const popup = { pid: 4321, windowId: "1234" };
+  const noPopups = { ok: true, windows: [] };
+  const elements = [
+    { role: "Edit", label: "File name", className: "Edit", automationId: "FileName", enabled: true,
+      actions: ["set_value"], rect: { x: 320, y: 250, width: 220, height: 24 } },
+    { role: "Button", label: "&Save", className: "Button", automationId: "1", enabled: true,
+      actions: ["invoke"], rect: { x: 500, y: 550, width: 80, height: 28 } },
+  ];
+  setNativeFixture(root, {
+    windows: [
+      { pid: 4321, windowId: BigInt(windowId), title: "Paint", appName: "mspaint.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+      { pid: 4321, windowId: BigInt(popup.windowId), title: "Save As", appName: "mspaint.exe", bounds: { x: 300, y: 200, width: 600, height: 400 }, isOnScreen: true },
+    ],
+    state: { elements, elementsComplete: true, windowBounds: { x: 100, y: 50, width: 600, height: 400 } },
+    responseSequences: { listOwnedPopups: [
+      { ok: true, windows: [popup] }, { ok: true, windows: [popup] }, { ok: true, windows: [popup] },
+      noPopups, noPopups, noPopups,
+    ] },
+  });
+  const base = stageDependencies(root);
+  const deps = { ...base, invokeNative: async (request: Record<string, unknown>) => {
+    const response = await base.invokeNative!(request);
+    if (request.op === "invokeWindowElement" && request.action === "activate" && request.expectedLabel === "&Save") {
+      mkdirSync(join(root, "M9R Benchmark", "F1-Run1"), { recursive: true });
+      writeFileSync(target, "paint-bytes", { flag: "wx" });
+    }
+    return response;
+  } };
+  const driver = createCuaStageDriver({ stage: deps, loadSdk: async () => makeSdk({ testRoot: root, state: nativeFixture(root).state, calls: [] }) as never });
+  const result = await driver.saveAs("stage", target, { createParentDirectories: true });
+  assert.equal(result.saveAs?.path, target);
+  assert.equal(result.saveAs?.directory, join(root, "M9R Benchmark", "F1-Run1"));
+  assert.equal(result.saveAs?.fileName, "house.png");
+  assert.equal(result.saveAs?.persisted, true, JSON.stringify(result.outcome));
+  assert.equal(result.saveAs?.directoryCreated, true);
+  assert.equal(readFileSync(target, "utf8"), "paint-bytes");
+  const nativeCalls = nativeFixture(root).calls;
+  const setValue = nativeCalls.find(call => call.op === "invokeWindowElement" && call.action === "setValue");
+  assert.equal(setValue?.text, target, "the model supplies one absolute path; M9R owns exact path resolution");
+  assert.equal(nativeCalls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false,
+    "the structured Save As operation uses exact UIA targets without moving the owner's cursor or taking focus");
+  await driver.shutdown();
+}));
+
+test("generic Save As does not activate Save when the filename field fails exact value readback", async () => withRoot(async root => {
+  await registerStage(root);
+  const target = join(root, "folder", "requested.txt");
+  const popup = { pid: 4321, windowId: "1234" };
+  setNativeFixture(root, {
+    windows: [
+      { pid: 4321, windowId: BigInt(windowId), title: "Editor", appName: "editor.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+      { pid: 4321, windowId: BigInt(popup.windowId), title: "Save As", appName: "editor.exe", bounds: { x: 300, y: 200, width: 600, height: 400 }, isOnScreen: true },
+    ],
+    state: { elements: [
+      { role: "Edit", label: "File name:", className: "Edit", automationId: "FileName", enabled: true, actions: ["set_value"] },
+      { role: "Button", label: "&Save", className: "Button", automationId: "1", enabled: true, actions: ["invoke"] },
+    ], elementsComplete: true, valueConfirmed: false, windowBounds: { x: 100, y: 50, width: 600, height: 400 } },
+    responses: { listOwnedPopups: { ok: true, windows: [popup] } },
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, state: nativeFixture(root).state, calls: [] }) as never });
+  const result = await driver.saveAs("stage", target, { createParentDirectories: true });
+  assert.equal(result.saveAs?.persisted, false);
+  assert.match(result.outcome.summary ?? "", /did not confirm the exact requested path/);
+  assert.equal(nativeFixture(root).calls.some(call => call.op === "invokeWindowElement" && call.action === "activate"), false,
+    "Save is never pressed when the live filename field did not confirm the requested absolute path");
+  assert.equal(existsSync(target), false);
+  await driver.shutdown();
+}));
+
+test("generic Save As preserves an existing exact destination unless replacement was authorized", async () => withRoot(async root => {
+  await registerStage(root);
+  const target = join(root, "existing.txt");
+  writeFileSync(target, "keep-existing", { flag: "wx" });
+  const popup = { pid: 4321, windowId: "1234" };
+  const elements = [
+    { role: "Edit", label: "File name", className: "Edit", automationId: "FileName", enabled: true, actions: ["set_value"] },
+    { role: "Button", label: "Save", className: "Button", automationId: "1", enabled: true, actions: ["invoke"] },
+  ];
+  setNativeFixture(root, {
+    windows: [
+      { pid: 4321, windowId: BigInt(windowId), title: "Editor", appName: "editor.exe", bounds: { x: 100, y: 50, width: 600, height: 400 }, isOnScreen: true },
+      { pid: 4321, windowId: BigInt(popup.windowId), title: "Save As", appName: "editor.exe", bounds: { x: 300, y: 200, width: 600, height: 400 }, isOnScreen: true },
+    ],
+    state: { elements, elementsComplete: true, windowBounds: { x: 100, y: 50, width: 600, height: 400 } },
+    responses: { listOwnedPopups: { ok: true, windows: [popup] } },
+  });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, state: nativeFixture(root).state, calls: [] }) as never });
+  const result = await driver.saveAs("stage", target);
+  assert.equal(result.saveAs?.persisted, false);
+  assert.match(result.outcome.summary ?? "", /preserved because replacement was not authorized/);
+  assert.equal(readFileSync(target, "utf8"), "keep-existing");
+  assert.equal(nativeFixture(root).calls.some(call => call.op === "invokeWindowElement"), false,
+    "no file-dialog value or button is touched before explicit overwrite authorization");
   await driver.shutdown();
 }));
 

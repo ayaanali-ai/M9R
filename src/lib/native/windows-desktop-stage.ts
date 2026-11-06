@@ -60,7 +60,7 @@ interface NativeStageResponse {
   window?: NativeWindowStageInfo;
   desktopStructure?: NativeDesktopStructure;
   windowStructure?: NativeWindowStructure;
-  semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string };
+  semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean };
   capture?: { dataUrl: string; width: number; height: number; originX?: number; originY?: number };
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
@@ -577,7 +577,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   async function invokeWindowElement(pid: number, windowId: string, input: {
     path: number[]; action: "activate" | "setValue"; expectedRole: string; expectedLabel: string;
     expectedClassName: string; expectedAutomationId: string; text?: string;
-  }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string }> {
+  }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean }> {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     if (!Array.isArray(input.path) || input.path.length > 64 || input.path.some((part) => !Number.isSafeInteger(part) || part < 0)
@@ -609,7 +609,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const semanticAction = result.semanticAction;
     if (!semanticAction || typeof semanticAction.dispatched !== "boolean"
       || (semanticAction.mechanism !== undefined && typeof semanticAction.mechanism !== "string")
-      || (semanticAction.reason !== undefined && typeof semanticAction.reason !== "string")) {
+      || (semanticAction.reason !== undefined && typeof semanticAction.reason !== "string")
+      || (semanticAction.valueConfirmed !== undefined && typeof semanticAction.valueConfirmed !== "boolean")) {
       throw new DesktopInputOutcomeUnknownError("Windows returned an invalid native semantic action result; inspect the target before retrying.");
     }
     return semanticAction;

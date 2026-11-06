@@ -1,11 +1,11 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { defaultStoreRoot } from "./local-store";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ActionResult, ActionTarget, ClickPosition as CuaClickPosition, CuaDriverLike, ToolResult } from "@trycua/cua-driver";
 import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "./desktop-input-errors";
@@ -14,6 +14,7 @@ import { CUA_DRIVER_VERSION, startCuaDriverHost, validateCuaDriverPackageVersion
 import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type NativeWindowStructureElement, type WindowsSystemControlRequest } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
+import { classifySaveAsConflict, findSaveAsButton, findSaveAsNameField, resolveSaveAsTarget } from "./stage-save-as";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
 const PUBLIC_CURSOR_LABEL_MAX_LENGTH = 28;
@@ -183,6 +184,8 @@ export interface CuaStageActionProof {
   /** Popup-local fallback pixels must never be mistaken for the parent app observation. */
   captureScope?: "app" | "popup";
   outcome: CuaStageActionOutcome;
+  /** Exact-path persistence evidence from the generic Windows Save As workflow. */
+  saveAs?: { path: string; directory: string; fileName: string; persisted: boolean; sizeBytes?: string; directoryCreated?: boolean };
 }
 
 function sameWindowFrame(
@@ -2688,7 +2691,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   // resolve the app's current owned popup and dispatch straight to its own
   // pid/windowId through the same native SendInput path as the app window.
   async function withRegisteredPopup<T>(nameInput: string, run: (input: {
-    driver?: CuaDriverLike; session: string; pid: number; popupWindowId: bigint;
+    driver?: CuaDriverLike; session: string; pid: number; parentWindowId: bigint; popupWindowId: bigint;
     capture: () => Promise<CuaStageCapture>;
   }) => Promise<T>): Promise<T> {
     let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
@@ -2762,7 +2765,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         );
       }
     };
-    return run({ driver: agentRuntimeReady?.driver, session, pid, popupWindowId, capture });
+    return run({ driver: agentRuntimeReady?.driver, session, pid, parentWindowId: windowId, popupWindowId, capture });
   }
 
   async function captureAfterPopupDispatch(name: string, before: CuaStageCapture,
@@ -2920,6 +2923,236 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           signal: options.signal });
       }
       return captureAfterPopupDispatch(name, before, outcome);
+    });
+  }
+
+  async function saveAs(name: string, requestedPath: string, options: {
+    createParentDirectories?: boolean; replaceExisting?: boolean; signal?: AbortSignal;
+  } = {}): Promise<CuaStageActionProof> {
+    let target: ReturnType<typeof resolveSaveAsTarget>;
+    try { target = resolveSaveAsTarget(requestedPath, win32); }
+    catch (error) {
+      throw new DesktopInputNotDispatchedError(error instanceof Error ? error.message : "Invalid Save As path.", "target-identity");
+    }
+    options.signal?.throwIfAborted();
+    const statOrMissing = (path: string): ReturnType<typeof statSync> | undefined => {
+      try { return statSync(path); }
+      catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+        throw new DesktopInputNotDispatchedError(
+          `Save As could not safely inspect the requested path (${code || "filesystem error"}); no dialog input was sent.`,
+          "target-identity",
+        );
+      }
+    };
+    const beforeStat = statOrMissing(target.path);
+    const beforeVersion = beforeStat ? { size: beforeStat.size, mtimeMs: beforeStat.mtimeMs, ctimeMs: beforeStat.ctimeMs } : undefined;
+    const baseEvidence = { path: target.path, directory: target.directory, fileName: target.fileName };
+    return withRegisteredPopup(name, async ({ pid, parentWindowId, popupWindowId, capture }) => {
+      const before = await capture();
+      const inspect = async (windowId: bigint) => manager.windowStructure(pid, windowId.toString(), { maxElements: 4096, maxDepth: 64 });
+      let structure: Awaited<ReturnType<typeof manager.windowStructure>>;
+      try { structure = await inspect(popupWindowId); }
+      catch (error) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `Save As stopped before dispatch because the owned dialog structure could not be read. ${error instanceof Error ? error.message : String(error)}` },
+          saveAs: { ...baseEvidence, persisted: false } };
+      }
+      const controls = structure.elements;
+      const nameField = findSaveAsNameField(controls);
+      const saveButton = findSaveAsButton(controls);
+      if (structure.status !== "complete" || structure.truncated || !nameField || !saveButton) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `Save As stopped before dispatch: the owned dialog exposed ${structure.elements.length} accessible control(s) and was ${structure.status}${structure.truncated ? " and truncated" : ""}; unique accessible filename field=${Boolean(nameField)}, Save button=${Boolean(saveButton)}.` },
+          saveAs: { ...baseEvidence, persisted: false } };
+      }
+      if (beforeStat && !beforeStat.isFile()) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "The requested destination exists but is not a file. No Save As input was sent." },
+          saveAs: { ...baseEvidence, persisted: false } };
+      }
+      if (beforeStat && !options.replaceExisting) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "The exact destination file already exists. It was preserved because replacement was not authorized." },
+          saveAs: { ...baseEvidence, persisted: false, sizeBytes: String(beforeStat.size) } };
+      }
+      let existingDirectory: ReturnType<typeof statSync> | undefined;
+      try { existingDirectory = statOrMissing(target.directory); }
+      catch (error) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `Save As stopped before dialog input because the requested destination folder could not be safely inspected. ${error instanceof Error ? error.message : String(error)}` },
+          saveAs: { ...baseEvidence, persisted: false } };
+      }
+      const directoryAlreadyExists = existingDirectory !== undefined;
+      if (existingDirectory && !existingDirectory.isDirectory()) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "The requested destination parent exists but is not a folder. No Save As input was sent." },
+          saveAs: { ...baseEvidence, persisted: false } };
+      }
+      if (!directoryAlreadyExists && !options.createParentDirectories) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "The requested destination folder does not exist. No Save As input was sent; create that folder only if the task requests it." },
+          saveAs: { ...baseEvidence, persisted: false } };
+      }
+      let directoryCreated = false;
+      try {
+        if (!directoryAlreadyExists) {
+          directoryCreated = typeof mkdirSync(target.directory, { recursive: true }) === "string";
+        }
+        if (!statSync(target.directory).isDirectory()) throw new Error("The destination parent path is not a folder.");
+      } catch (error) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `Save As stopped before dialog input because the destination folder could not be prepared. ${error instanceof Error ? error.message : String(error)}` },
+          saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+      }
+
+      options.signal?.throwIfAborted();
+      let setPath: Awaited<ReturnType<typeof manager.invokeWindowElement>>;
+      try {
+        setPath = await invokeWindowElementTimed(pid, popupWindowId.toString(), {
+          path: nameField.path, action: "setValue", expectedRole: nameField.role,
+          expectedLabel: nameField.label, expectedClassName: nameField.className,
+          expectedAutomationId: nameField.automationId, text: target.path,
+        });
+      } catch (error) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `Save As could not set the exact requested path in the current accessible filename field. ${error instanceof Error ? error.message : String(error)}` },
+          saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+      }
+      if (!setPath.dispatched) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "The current filename field did not accept an accessible value replacement; Save was not activated." },
+          saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+      }
+      if (setPath.valueConfirmed !== true) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "The filename field did not confirm the exact requested path after replacement; Save was not activated." },
+          saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+      }
+
+      // Re-resolve the dialog controls after setting the full target path. The
+      // path is internally split and validated above; Windows common Save As
+      // dialogs accept an absolute path in their File name field, which avoids
+      // guessing at a localized address-bar control or accidentally saving to
+      // the currently displayed folder.
+      let currentStructure: Awaited<ReturnType<typeof manager.windowStructure>>;
+      try { currentStructure = await inspect(popupWindowId); }
+      catch (error) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `The filename was entered, but the Save button could not be safely re-resolved; inspect the dialog before continuing. ${error instanceof Error ? error.message : String(error)}` },
+          saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+      }
+      const currentSave = currentStructure.status === "complete" && !currentStructure.truncated
+        ? findSaveAsButton(currentStructure.elements) : undefined;
+      if (!currentSave || JSON.stringify(currentSave.path) !== JSON.stringify(saveButton.path)
+        || currentSave.label !== saveButton.label || currentSave.automationId !== saveButton.automationId) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "The filename was entered, but the Save control changed or became ambiguous; it was not activated." },
+          saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+      }
+      options.signal?.throwIfAborted();
+      const saveDispatch = await invokeWindowElementTimed(pid, popupWindowId.toString(), {
+        path: currentSave.path, action: "activate", expectedRole: currentSave.role,
+        expectedLabel: currentSave.label, expectedClassName: currentSave.className,
+        expectedAutomationId: currentSave.automationId,
+      });
+      if (!saveDispatch.dispatched) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: "Windows did not dispatch the exact accessible Save control; the file was not reported saved." },
+          saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+      }
+
+      const inspectOwnedPopups = async () => {
+        const owned = await manager.ownedPopups(pid, parentWindowId.toString());
+        const results: Array<{ windowId: bigint; structure?: Awaited<ReturnType<typeof manager.windowStructure>> }> = [];
+        for (const popup of owned) {
+          const id = BigInt(popup.windowId);
+          try { results.push({ windowId: id, structure: await inspect(id) }); }
+          catch { results.push({ windowId: id }); }
+        }
+        return results;
+      };
+      let conflictHandled = false;
+      let handledConflictWindowId: bigint | undefined;
+      let latestPopups: Awaited<ReturnType<typeof inspectOwnedPopups>> = [];
+      let targetStat: ReturnType<typeof statSync> | undefined;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        options.signal?.throwIfAborted();
+        latestPopups = await inspectOwnedPopups();
+        const conflicts = latestPopups.filter((popup) => popup.structure
+          && classifySaveAsConflict(popup.structure.elements, target.fileName, options.replaceExisting === true).recognized);
+        if (conflicts.length > 1 || (handledConflictWindowId !== undefined
+          && conflicts.some((popup) => popup.windowId !== handledConflictWindowId))) {
+          return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+            summary: "More than one exact-target overwrite prompt appeared; no additional prompt was acted on." },
+            saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+        }
+        const conflict = conflicts[0];
+        // A modal may remain enumerable for a short time after its button was
+        // dispatched. Never click that same prompt twice while waiting for it
+        // to close and for the file system effect to become observable.
+        if (conflict && conflict.windowId === handledConflictWindowId) {
+          await delay(100);
+          continue;
+        }
+        if (conflict?.structure) {
+          const decision = classifySaveAsConflict(conflict.structure.elements, target.fileName, options.replaceExisting === true);
+          const actionLabel = decision.confirm ? /^(?:replace|yes|overwrite)$/i : decision.dismiss ? /^(?:no|cancel|keep both)$/i : undefined;
+          const button = actionLabel && conflict.structure.elements.filter((element) => element.enabled
+            && /^button$/i.test(element.role) && (element.actions?.invoke || element.actions?.legacy)
+            && actionLabel.test(element.label.replace(/&/g, "").replace(/[.…]+$/g, "").trim()));
+          if (!button || button.length !== 1) {
+            return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+              summary: decision.reason ?? "The exact filename conflict could not be resolved safely; the prompt remains open for inspection." },
+              saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+          }
+          const resolved = await invokeWindowElementTimed(pid, conflict.windowId.toString(), {
+            path: button[0]!.path, action: "activate", expectedRole: button[0]!.role,
+            expectedLabel: button[0]!.label, expectedClassName: button[0]!.className,
+            expectedAutomationId: button[0]!.automationId,
+          });
+          if (!resolved.dispatched) {
+            return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+              summary: "The recognized exact-file conflict button was not dispatched; the file was not reported saved." },
+              saveAs: { ...baseEvidence, persisted: false, ...(directoryCreated ? { directoryCreated } : {}) } };
+          }
+          conflictHandled = decision.confirm === true;
+          handledConflictWindowId = conflict.windowId;
+          if (decision.dismiss) {
+            return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+              summary: decision.reason ?? "The existing file was preserved; no replacement occurred." },
+              saveAs: { ...baseEvidence, persisted: false, ...(beforeStat ? { sizeBytes: String(beforeStat.size) } : {}), ...(directoryCreated ? { directoryCreated } : {}) } };
+          }
+        }
+        try { targetStat = statOrMissing(target.path); }
+        catch {
+          // The file may have been written, but inaccessible metadata is not
+          // persistence proof. Keep observing until the bounded wait ends.
+          targetStat = undefined;
+        }
+        const originalDialogOpen = latestPopups.some((popup) => popup.windowId === popupWindowId);
+        const sameVersion = Boolean(beforeVersion && targetStat
+          && beforeVersion.size === targetStat.size
+          && beforeVersion.mtimeMs === targetStat.mtimeMs
+          && beforeVersion.ctimeMs === targetStat.ctimeMs);
+        if (targetStat?.isFile() && (!beforeVersion || (options.replaceExisting === true && !sameVersion)) && !originalDialogOpen
+          && !latestPopups.some((popup) => popup.windowId !== popupWindowId && popup.structure === undefined)) break;
+        await delay(100);
+      }
+      const originalDialogOpen = latestPopups.some((popup) => popup.windowId === popupWindowId);
+      const sameVersion = Boolean(beforeVersion && targetStat
+        && beforeVersion.size === targetStat.size
+        && beforeVersion.mtimeMs === targetStat.mtimeMs
+        && beforeVersion.ctimeMs === targetStat.ctimeMs);
+      const persisted = Boolean(targetStat?.isFile() && (!beforeVersion || (options.replaceExisting === true && !sameVersion))
+        && !originalDialogOpen && !latestPopups.some((popup) => popup.windowId !== popupWindowId && popup.structure === undefined));
+      const outcome: CuaStageActionOutcome = persisted
+        ? { status: "confirmed", summary: "The exact requested file path exists after the owned Save As dialog closed. This confirms path persistence, not document-content correctness; reopen and inspect the saved output before reporting the task complete." }
+        : { status: "partial", summary: "The Save control was dispatched, but M9R could not confirm that the exact requested file exists after the dialog closed. Inspect the current app and owned dialogs before retrying." };
+      if (beforeVersion && persisted) outcome.summary = `The exact requested file path was updated${conflictHandled ? " after an explicitly authorized overwrite prompt" : " under the explicit replacement authorization"}, and the owned Save As dialog closed. Reopen and inspect the saved output before reporting the task complete.`;
+      const result = await captureAfterPopupDispatch(name, before, outcome);
+      return { ...result, saveAs: { ...baseEvidence, persisted, ...(targetStat ? { sizeBytes: String(targetStat.size) } : {}), ...(directoryCreated ? { directoryCreated } : {}) } };
     });
   }
 
@@ -3413,7 +3646,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,
-    clickPopup, pressKeyPopup, hotkeyPopup, typeTextPopup, capturePopup };
+    clickPopup, pressKeyPopup, hotkeyPopup, typeTextPopup, capturePopup, saveAs };
 }
 
 async function readStageTextFromStdin(): Promise<string> {

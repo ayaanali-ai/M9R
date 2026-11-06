@@ -19,6 +19,10 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
   assert.deepEqual(parseTaskStageAction({ kind: "type", view: "popup", mode: "replace", x: 32, y: 14, text: "M9R-demo-smoke.txt" }),
     { kind: "type", view: "popup", mode: "replace", x: 32, y: 14, text: "M9R-demo-smoke.txt" });
+  assert.deepEqual(parseTaskStageAction({ kind: "save_as", view: "app", path: "C:\\Users\\owner\\Desktop\\M9R Benchmark\\F1-Run1\\house.png", createParentDirectories: true }),
+    { kind: "save_as", view: "app", path: "C:\\Users\\owner\\Desktop\\M9R Benchmark\\F1-Run1\\house.png", createParentDirectories: true });
+  assert.throws(() => parseTaskStageAction({ kind: "save_as", view: "app", path: "Desktop\\file.txt" }), /absolute Windows file path/);
+  assert.throws(() => parseTaskStageAction({ kind: "save_as", path: "C:\\Users\\owner\\Desktop\\file.txt" }), /exact app view/);
   assert.throws(() => parseTaskStageAction({ kind: "type", view: "popup", mode: "replace", text: "filename.txt" }), /Replace text requires an exact field point/);
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
   assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
@@ -165,4 +169,16 @@ test("owner-preview app actions preserve semantic delivery until foreground is e
   assert.equal(options[1].confirmFocusForeground, true);
   await assert.rejects(runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity, "background"), /safe background delivery/);
   assert.equal(options.length, 2, "background refusal must happen before dispatch");
+});
+
+test("Save As targets one exact app-owned dialog and keeps destination policy explicit", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const }, saveAs: { path: "C:\\Users\\owner\\Desktop\\report.txt", directory: "C:\\Users\\owner\\Desktop", fileName: "report.txt", persisted: true } };
+  const driver = ({ saveAs: async (...args: unknown[]) => { calls.push({ method: "saveAs", args }); return proof; } }) as unknown as ReturnType<typeof createCuaStageDriver>;
+  const result = await runTaskStageAction(driver, "editor", parseTaskStageAction({ kind: "save_as", view: "app",
+    path: proof.saveAs.path, createParentDirectories: true, replaceExisting: false }), { handle: "codex", sessionId: "session" }, "background");
+  assert.deepEqual(calls, [{ method: "saveAs", args: ["editor", proof.saveAs.path,
+    { createParentDirectories: true, replaceExisting: false, signal: undefined }] }]);
+  assert.equal((result as typeof proof).saveAs.persisted, true);
 });

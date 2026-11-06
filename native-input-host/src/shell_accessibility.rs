@@ -650,7 +650,15 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         })?;
         unsafe { pattern.SetValue(&BSTR::from(text)) }
             .map_err(|error| crate::InputDispatchError::uncertain(error.to_string()))?;
-        return Ok(json!({"dispatched":true,"mechanism":"value-pattern"}));
+        // A successful SetValue call is only dispatch evidence. Re-read the
+        // same live UIA value before reporting that the field accepted it; do
+        // not return the field contents because it may contain user data.
+        let value_confirmed = unsafe { pattern.CurrentValue() }
+            .map(|current| current.to_string() == text)
+            .unwrap_or(false);
+        return Ok(
+            json!({"dispatched":true,"mechanism":"value-pattern","valueConfirmed":value_confirmed}),
+        );
     }
     if action != "activate" {
         return Err(crate::InputDispatchError::not_dispatched(

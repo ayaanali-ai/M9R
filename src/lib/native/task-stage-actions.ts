@@ -4,6 +4,7 @@ import { selectActionDelivery } from "./multiplayer-action-policy";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { StageInputNotDispatchedError } from "./stage-errors";
 import { classifyWebActionRisk } from "./risk-core";
+import { resolveSaveAsTarget } from "./stage-save-as";
 
 type TaskStageActionBody =
   | { kind: "capture" }
@@ -28,6 +29,7 @@ type TaskStageActionBody =
   | { kind: "invoke_menu"; path: string[] }
   | { kind: "clipboard_read"; includeText: boolean; confirmSharedClipboard?: boolean }
   | { kind: "clipboard_write"; text?: string; imagePath?: string; filePath?: string; confirmSharedClipboard: true }
+  | { kind: "save_as"; path: string; createParentDirectories?: boolean; replaceExisting?: boolean }
   | ({ kind: "system_control" } & WindowsSystemControlRequest);
 export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" | "popup" };
 
@@ -57,10 +59,10 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], type_then_enter: ["text"], scroll: ["x", "y", "direction", "amount"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
     click_element: ["ref", "expectedRole", "expectedLabel"], replace_element: ["ref", "text", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
     window_frame: ["x", "y", "width", "height"], snap: ["position"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
-    system_control: ["control", "action", "value", "step"] };
+    system_control: ["control", "action", "value", "step"], save_as: ["path", "createParentDirectories", "replaceExisting"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
   const allowedFields = fields[action.kind]!;
-  const requiredFields = action.kind === "system_control" ? ["control", "action"] : action.kind === "type" ? ["text"] : action.kind === "read_structure" ? ["view"]
+  const requiredFields = action.kind === "system_control" ? ["control", "action"] : action.kind === "type" ? ["text"] : action.kind === "save_as" ? ["path"] : action.kind === "read_structure" ? ["view"]
     // A scroll targets one already-exact window (or, on the desktop, the
     // point that picks which window) -- x/y are a convenience for the
     // common "scroll wherever this already-selected window is" case, not
@@ -83,7 +85,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   }
   if (action.kind === "read_structure" && action.view !== "app" && action.view !== "desktop") throw new Error("Structure observation requires an exact app or desktop view.");
   if (action.kind === "window_state" && (action.view !== "app" || !["minimized", "maximized", "restored"].includes(String(action.state)))) throw new Error("Invalid exact-app window state.");
-  if (["click_element", "replace_element", "type_then_enter", "window_frame", "snap", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write"].includes(action.kind)
+  if (["click_element", "replace_element", "type_then_enter", "window_frame", "snap", "window_status", "focus", "invoke_menu", "clipboard_read", "clipboard_write", "save_as"].includes(action.kind)
     && action.view !== "app") throw new Error("This semantic stage action requires the exact app view.");
   if (action.kind === "snap" && !["left", "right", "top", "bottom", "maximize"].includes(String(action.position))) throw new Error("Invalid snap position.");
   if (action.kind === "click_element" || action.kind === "replace_element") {
@@ -137,6 +139,13 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     if (["text", "imagePath", "filePath"].filter((key) => action[key] !== undefined).length !== 1) throw new Error("Clipboard write requires exactly one payload.");
     for (const key of ["imagePath", "filePath"]) if (action[key] !== undefined
       && (typeof action[key] !== "string" || !/^[a-z]:[\\/]/i.test(action[key] as string) || /[\u0000-\u001f]/.test(action[key] as string) || (action[key] as string).length > 1024)) throw new Error("Clipboard paths must be bounded absolute local paths.");
+  }
+  if (action.kind === "save_as") {
+    if (typeof action.path !== "string" || action.path.length > 32_760) throw new Error("Invalid absolute Save As path.");
+    resolveSaveAsTarget(action.path);
+    for (const key of ["createParentDirectories", "replaceExisting"]) if (action[key] !== undefined && typeof action[key] !== "boolean") {
+      throw new Error(`Invalid Save As ${key} flag.`);
+    }
   }
   if (action.kind === "invoke_menu" && (!Array.isArray(action.path) || action.path.length < 1 || action.path.length > 16 || !action.path.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 160))) throw new Error("Invalid menu path.");
   if (action.kind === "clipboard_read" && typeof action.includeText !== "boolean") throw new Error("Invalid clipboard read flag.");
@@ -266,6 +275,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "clipboard_write": return driver.clipboardWrite(name, action.text ?? "", identity,
       action.imagePath || action.filePath ? { imagePath: action.imagePath, filePath: action.filePath } : undefined,
       stageOptions({ confirmFocusForeground }));
+    case "save_as": return driver.saveAs(name, action.path, { createParentDirectories: action.createParentDirectories,
+      replaceExisting: action.replaceExisting, signal });
     case "system_control": return driver.systemControl({ control: action.control, action: action.action,
       ...(action.value === undefined ? {} : { value: action.value }), ...(action.step === undefined ? {} : { step: action.step }) }, signal);
   }
