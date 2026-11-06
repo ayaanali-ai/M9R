@@ -128,6 +128,9 @@ test("task guidance verifies visual artifacts before save and after reopening th
     assert.match(notice, /fresh capture before saving/);
     assert.match(notice, /reopen the exact path and inspect the rendered file again/);
     assert.match(notice, /Report completion only when the requested visual elements are visible/);
+    assert.match(notice, /each requested datum in its own labeled field/);
+    assert.match(notice, /Not shown in inspected source/);
+    assert.match(notice, /verify each written field against the source evidence/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
