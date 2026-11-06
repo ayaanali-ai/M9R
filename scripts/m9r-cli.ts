@@ -112,19 +112,26 @@ async function readNativeInputRegistration(key: string): Promise<string | null> 
   }
 }
 
+const argv = process.argv.slice(2);
+
 // One compatibility release reads OATHLOCK_* and copies old project/home
 // state into .m9r. All subsequent writes use M9R_* and .m9r; the old data is
 // deliberately retained so migration is recoverable and non-destructive.
 normalizeLegacyM9rEnvironment(process.env);
-for (const stateRoot of new Set([process.cwd(), homedir()])) {
-  try {
-    const migration = migrateLegacyM9rDirectory(stateRoot);
-    if (migration.skippedGeneratedDirectories || migration.skippedUnreadableEntries) {
-      process.stderr.write(`M9R preserved ${migration.skippedGeneratedDirectories} generated legacy director${migration.skippedGeneratedDirectories === 1 ? "y" : "ies"} and skipped ${migration.skippedUnreadableEntries} unreadable legacy entr${migration.skippedUnreadableEntries === 1 ? "y" : "ies"} under ${stateRoot}.\n`);
+// Evidence export must be usable as a genuinely read-only diagnostic. In
+// particular, running `task-log` must not trigger the compatibility copier
+// before it reads the current canonical store.
+if (argv[0] !== "task-log") {
+  for (const stateRoot of new Set([process.cwd(), homedir()])) {
+    try {
+      const migration = migrateLegacyM9rDirectory(stateRoot);
+      if (migration.skippedGeneratedDirectories || migration.skippedUnreadableEntries) {
+        process.stderr.write(`M9R preserved ${migration.skippedGeneratedDirectories} generated legacy director${migration.skippedGeneratedDirectories === 1 ? "y" : "ies"} and skipped ${migration.skippedUnreadableEntries} unreadable legacy entr${migration.skippedUnreadableEntries === 1 ? "y" : "ies"} under ${stateRoot}.\n`);
+      }
     }
-  }
-  catch (error) {
-    process.stderr.write(`M9R could not copy legacy .oathlock state from ${stateRoot}: ${error instanceof Error ? error.message : "unknown error"}\n`);
+    catch (error) {
+      process.stderr.write(`M9R could not copy legacy .oathlock state from ${stateRoot}: ${error instanceof Error ? error.message : "unknown error"}\n`);
+    }
   }
 }
 
@@ -1262,7 +1269,6 @@ async function reportTerminalState(state: string | undefined): Promise<number> {
   }
 }
 
-const argv = process.argv.slice(2);
 async function runVendorLaunch(args: string[]): Promise<number> {
   const vendorValue = args[0];
   if (vendorValue !== "claude" && vendorValue !== "codex") {
@@ -1291,7 +1297,7 @@ async function runVendorLaunch(args: string[]): Promise<number> {
   const storeRoot = defaultStoreRoot(homedir(), process.env);
   const store = createLocalStore(storeRoot);
   const sessionId = randomUUID();
-  const identity = store.issueIdentity(vendor, vendor === "claude" ? "claude-code" : "codex-cli", sessionId);
+  store.issueIdentity(vendor, vendor === "claude" ? "claude-code" : "codex-cli", sessionId);
   const tempDir = await mkdtemp(join(tmpdir(), "m9r-launch-"));
   try {
     const compiledMcp = join(dirname(fileURLToPath(import.meta.url)), "m9r-mcp.js");
@@ -1305,11 +1311,15 @@ async function runVendorLaunch(args: string[]): Promise<number> {
       try { await access(mcpSource); } catch { throw new Error("M9R MCP entry is missing; install the CLI build or run from the M9R repository."); }
       mcpArgs = ["--disable-warning=ExperimentalWarning", "--import", mcpRegister, mcpSource];
     }
-    const mcpEnv: Record<string, string> = { M9R_HOME: storeRoot };
+    const mcpEnv: Record<string, string> = {
+      M9R_HOME: storeRoot,
+      M9R_PROVIDER: vendor === "claude" ? "claude-code" : "codex-cli",
+      M9R_SESSION_ID: sessionId,
+    };
     if (process.env.M9R_WEB_BROKER_PORT) mcpEnv.M9R_WEB_BROKER_PORT = process.env.M9R_WEB_BROKER_PORT;
     const plan = buildVendorLaunchPlan({
       vendor, profile, cwd: process.cwd(), mcpConfigPath: join(tempDir, "mcp.json"), promptFile: join(tempDir, "m9r-system-prompt.txt"),
-      mcpCommand: process.execPath, mcpArgs, mcpEnv, sessionToken: identity.token,
+      mcpCommand: process.execPath, mcpArgs, mcpEnv,
     });
     if (plan.mcpConfigJson) await writeFile(join(tempDir, "mcp.json"), plan.mcpConfigJson, "utf8");
     if (plan.promptFileContent) await writeFile(join(tempDir, "m9r-system-prompt.txt"), plan.promptFileContent, "utf8");

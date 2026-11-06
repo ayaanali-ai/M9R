@@ -476,7 +476,7 @@ test("the prompt the broker builds for a web-room agent never becomes tasks for 
   store.registerEndpoint({ provider: "opencode" });
   const prompt = `${CODEX_WEB_PREFACE}
 
-${webAgentPrompt("codex", "tok_test", ["claude", "opencode"], "project-x")}
+${webAgentPrompt("codex", ["claude", "opencode"], "project-x")}
 
 The owner says:
 read the page`;
@@ -488,7 +488,7 @@ read the page`;
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "w1b", cwd: "/repo", prompt: resumePrompt }, ctx(store, "codex"));
   assert.equal(store.tasksFor("claude").length, 0, "a resumed worker's short prompt is machine-written too");
   assert.equal(store.tasksFor("opencode").length, 0);
-  assert.equal(isBrokerAgentPrompt(webAgentPrompt("claude", "tok", ["codex"])), true, "the bare agent prompt (no Codex preface) is recognised by its header");
+  assert.equal(isBrokerAgentPrompt(webAgentPrompt("claude", ["codex"])), true, "the bare agent prompt (no Codex preface) is recognised by its header");
   assert.equal(isBrokerAgentPrompt("@claude please look at the relay bug"), false, "a person's message is not");
   // A person typing the same handles still routes normally.
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "w2", cwd: "/repo", prompt: "@claude and @opencode please compare notes" }, ctx(store, "codex"));

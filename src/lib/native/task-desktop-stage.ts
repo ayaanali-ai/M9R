@@ -294,6 +294,8 @@ export function createTaskDesktopStageService(input: {
         durationMs: event.durationMs,
         status: event.status,
         ...(activeTimingTask.operationId ? { operationId: activeTimingTask.operationId } : {}),
+        ...(event.stageName ? { stageName: event.stageName } : {}),
+        ...(event.cached === undefined ? {} : { cached: event.cached }),
         ...(event.detail ? { detail: event.detail } : {}),
       });
     },
@@ -552,7 +554,9 @@ export function createTaskDesktopStageService(input: {
     }
     const identity = input.store.verifyIdentity(token);
     if (!identity) {
-      throw new StageAuthorizationError("The owner-launched stage broker cannot verify this session identity in its configured M9R store. The agent MCP server and broker may have different M9R_HOME values, or the token was revoked. Run M9R setup to synchronize their M9R_HOME settings, then restart the broker and reconnect the agent.");
+      // Keep the failure useful in raw diagnostics without exposing internal
+      // identity mechanics or asking the owner to repair M9R's own process setup.
+      throw new StageAuthorizationError("M9R could not authorize this desktop action. No desktop input was sent.", undefined, "agent_identity_unavailable");
     }
     if (!readPolicy().handles.includes(normalizeHandle(identity.handle))) throw new StageAuthorizationError("The owner has not enabled task stages for this agent.");
     const task = input.store.getTask(taskId);
@@ -700,12 +704,25 @@ export function createTaskDesktopStageService(input: {
           // a duplicate app instance.
           await manager.inspectWindow(String(selected.pid), windowId);
         } catch (error) {
+          const rebindStartedAt = Date.now();
+          const rebindStartedTick = performance.now();
+          const rebindStartedAtIso = new Date(rebindStartedAt).toISOString();
           const replacement = await manager.resolveWindowReplacement(name);
           if (!replacement) {
             throw new Error("The selected window cannot be rebound to one verified process generation; refresh the exact window target before sending input.", { cause: error });
           }
           windowId = replacement.windowId;
           process.stderr.write(`[stage-recovery] ${taskId}: stale window handle ${selected.windowId}; rebinding same-process window ${windowId}\n`);
+          const recoveredAt = new Date().toISOString();
+          recordStageTiming(taskId, {
+            phase: "stage-recovery",
+            startedAt: rebindStartedAtIso,
+            endedAt: recoveredAt,
+            durationMs: performance.now() - rebindStartedTick,
+            status: "ok",
+            ...(operationId ? { operationId } : {}),
+            detail: "outcome=rebound;same-process-window=true",
+          });
         }
         await manager.presentOwnerWindow(name, selected.pid, windowId, coordinationKey);
         await manager.attachWindow(name, String(selected.pid), windowId, selected.appId || undefined, coordinationKey);
@@ -749,10 +766,34 @@ export function createTaskDesktopStageService(input: {
           recoveryNotice = "The application's window was recreated in the same verified process generation. Inspect its fresh state before choosing the next action.";
         } else if (ownedBeforeFailure?.appId) {
           const recoveryStartedAt = Date.now();
+          const recoveryStartedTick = performance.now();
+          const recoveryStartedAtIso = new Date(recoveryStartedAt).toISOString();
           process.stderr.write(`[stage-recovery] ${taskId}: inspectStage failed (${error instanceof Error ? error.message : String(error)}), relaunching ${ownedBeforeFailure.appId}\n`);
-          await launch(token, taskId, ownedBeforeFailure.appId, mode, undefined, { skipQueue: true });
-          process.stderr.write(`[stage-recovery] ${taskId}: relaunch completed after ${Date.now() - recoveryStartedAt}ms, re-inspecting\n`);
-          inspected = await manager.inspectStage(name);
+          try {
+            await launch(token, taskId, ownedBeforeFailure.appId, mode, undefined, { skipQueue: true });
+            process.stderr.write(`[stage-recovery] ${taskId}: relaunch completed after ${Date.now() - recoveryStartedAt}ms, re-inspecting\n`);
+            inspected = await manager.inspectStage(name);
+            const recoveredAt = new Date().toISOString();
+            recordStageTiming(taskId, {
+              phase: "stage-recovery",
+              startedAt: recoveryStartedAtIso,
+              endedAt: recoveredAt,
+              durationMs: performance.now() - recoveryStartedTick,
+              status: "ok",
+              detail: "trigger=window-gone;recovery=relaunch;outcome=ready",
+            });
+          } catch (recoveryError) {
+            const failedAt = new Date().toISOString();
+            recordStageTiming(taskId, {
+              phase: "stage-recovery",
+              startedAt: recoveryStartedAtIso,
+              endedAt: failedAt,
+              durationMs: performance.now() - recoveryStartedTick,
+              status: "error",
+              detail: `trigger=window-gone;recovery=relaunch;error=${recoveryError instanceof Error ? recoveryError.name : "unknown"}`,
+            });
+            throw recoveryError;
+          }
           // Lightweight, no added latency: this reuses the title already known from the
           // owned app record (stashed opportunistically below, never a dedicated fetch) to
           // tell the agent honestly that on-screen state was lost, instead of pretending the
@@ -1117,9 +1158,20 @@ export function createTaskDesktopStageService(input: {
       }
       if (mode === "owner-preview") {
         const preLoopStartedAt = Date.now();
+        const preLoopStartedTick = performance.now();
         await manager.ensureStage(name);
         const before = await listVisibleWindows();
         process.stderr.write(`[stage-launch-pre] ${taskId}: listVisibleWindows done after ${Date.now() - preLoopStartedAt}ms total, found ${before.length} windows\n`);
+        const preLoopEndedAt = new Date().toISOString();
+        recordStageTiming(taskId, {
+          phase: "launch-preflight",
+          startedAt: new Date(preLoopStartedAt).toISOString(),
+          endedAt: preLoopEndedAt,
+          durationMs: performance.now() - preLoopStartedTick,
+          status: "ok",
+          ...(operationId ? { operationId } : {}),
+          detail: `visibleWindows=${before.length}`,
+        });
         const kind = stageBrowserKind(approved.executable);
         // A same-intent task from another provider may already have selected
         // this exact window. Join that durable coordination group instead of
@@ -1206,6 +1258,9 @@ export function createTaskDesktopStageService(input: {
           const discoveryStartedAtMs = Date.now();
           const discoveryStartedTick = performance.now();
           let discoveryAttempts = 0;
+          let slowPollCount = 0;
+          let maxPollMs = 0;
+          const slowPollAttempts: number[] = [];
           let discoveryCompletedAt: { atMs: number; tick: number } | undefined;
           try {
           for (let attempt = 0; attempt < LAUNCH_POLL_ATTEMPTS && Date.now() - pollStartedAt < LAUNCH_POLL_BUDGET_MS; attempt++) {
@@ -1216,6 +1271,11 @@ export function createTaskDesktopStageService(input: {
             const iterationStartedAt = Date.now();
             const windows = await listVisibleWindows();
             const iterationMs = Date.now() - iterationStartedAt;
+            maxPollMs = Math.max(maxPollMs, iterationMs);
+            if (iterationMs > 500) {
+              slowPollCount += 1;
+              if (slowPollAttempts.length < 4) slowPollAttempts.push(attempt);
+            }
             if (iterationMs > 500 || attempt % 10 === 0) {
               process.stderr.write(`[stage-launch-poll] ${taskId}: attempt ${attempt} took ${iterationMs}ms (${Date.now() - pollStartedAt}ms elapsed total)\n`);
             }
@@ -1257,7 +1317,7 @@ export function createTaskDesktopStageService(input: {
               durationMs: (discoveryCompletedAt?.tick ?? performance.now()) - discoveryStartedTick,
               status: discoveryCompletedAt ? "ok" : "error",
               ...(operationId ? { operationId } : {}),
-              detail: `path=owner-preview;pollAttempts=${discoveryAttempts};pollBudgetMs=${LAUNCH_POLL_BUDGET_MS};window=${discoveryCompletedAt ? "found" : "not-found"}`,
+              detail: `path=owner-preview;pollAttempts=${discoveryAttempts};pollBudgetMs=${LAUNCH_POLL_BUDGET_MS};window=${discoveryCompletedAt ? "found" : "not-found"};slowPolls=${slowPollCount};maxPollMs=${maxPollMs};slowAttempts=${slowPollAttempts.join(",") || "none"}`,
             });
           }
         } catch (error) {

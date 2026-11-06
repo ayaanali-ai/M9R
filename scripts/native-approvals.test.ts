@@ -202,3 +202,57 @@ test("`tasks` lists what is waiting and how far each task got", async () => {
   assert.match(text, /T2 {2}@you -> @codex {2}\[in the inbox\]/);
   assert.match(text, /1 waiting for you/);
 });
+
+test("task-log exports only the selected task's retained evidence for the owner", async () => {
+  const s = sandbox({ terminal: true });
+  s.store.addTask({ from: "you", to: "codex", goal: "Open Calculator and verify 432", origin: "human_typed", idempotencyKey: "task-log-a" });
+  s.store.addTask({ from: "you", to: "codex", goal: "Unrelated task", origin: "human_typed", idempotencyKey: "task-log-b" });
+  s.store.recordStageTiming("T1", {
+    phase: "input-dispatch",
+    startedAt: "2026-11-05T12:00:00.000Z",
+    endedAt: "2026-11-05T12:00:00.004Z",
+    durationMs: 4.37,
+    status: "error",
+    operationId: "action-7",
+    stageName: "agent-abcdef0123456789abcdef01",
+    cached: false,
+    detail: "route=native",
+  });
+
+  assert.equal(await s.run("task-log", ["t1"]), 0);
+  const report = JSON.parse(s.out[0] ?? "null") as {
+    schema: string;
+    task: { id: string; instruction: string };
+    stageTiming: Array<{ phase: string; operationId?: string; cached?: boolean }>;
+    correlatedStoreEvents: Array<{ taskId?: string }>;
+    retention: { stageTimingEvents: number; stageTimingMayBeTruncated: boolean; note: string };
+  };
+  assert.equal(report.schema, "m9r.task-evidence.v1");
+  assert.equal(report.task.id, "T1");
+  assert.equal(report.task.instruction, "Open Calculator and verify 432");
+  assert.deepEqual(report.stageTiming.map(({ phase, operationId, cached }) => ({ phase, operationId, cached })), [
+    { phase: "input-dispatch", operationId: "action-7", cached: false },
+  ]);
+  assert.ok(report.correlatedStoreEvents.every((event) => event.taskId === "T1"));
+  assert.equal(report.retention.stageTimingEvents, 1);
+  assert.equal(report.retention.stageTimingMayBeTruncated, false);
+  assert.match(report.retention.note, /does not retain provider conversation transcripts/);
+  assert.doesNotMatch(s.out[0] ?? "", /Unrelated task/);
+});
+
+test("task-log does not expose local task evidence to an agent shell", async () => {
+  const s = sandbox({ terminal: true, env: { CODEX_THREAD_ID: THREAD } });
+  s.store.addTask({ from: "you", to: "codex", goal: "private instruction", origin: "human_typed", idempotencyKey: "task-log-agent" });
+  assert.equal(await s.run("task-log", ["T1"]), 1);
+  assert.equal(s.out.length, 0);
+  assert.match(s.err.join("\n"), /owner at a terminal/);
+});
+
+test("task-log rejects malformed and unknown task ids without returning state", async () => {
+  const s = sandbox({ terminal: true });
+  assert.equal(await s.run("task-log", ["not-a-task"]), 1);
+  assert.match(s.err.at(-1) ?? "", /Usage: m9r-cli task-log/);
+  assert.equal(await s.run("task-log", ["T999"]), 1);
+  assert.match(s.err.at(-1) ?? "", /No task T999 exists/);
+  assert.equal(s.out.length, 0);
+});

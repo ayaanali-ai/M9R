@@ -34,7 +34,7 @@ import { requestOwnerPipe } from "./owner-pipe";
 import { ownerPipePath } from "./web-broker-paths";
 import { canQueue, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { isHumanContext, isProtectedAction } from "./approval-core";
-import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
+import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTaskLog, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
 import { readRuntimeBuildId, readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
@@ -1131,6 +1131,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   }
   if (command === "dismiss") { const n = createLocalStore(root).dismiss(positionals.map((p) => p.toUpperCase())); io.out(n ? `Cleared ${n} from the overlay list.` : "Nothing to clear."); return 0; }
   if (command === "tasks") return runTasks(io, root);
+  if (command === "task-log") return runTaskLog(io, root, positionals[0]);
   if (command === "sessions") return runSessions(io, root, positionals[0]);
   if (command === "sessions-json") return runSessionsJson(io, root, positionals[0]);
   if (command === "approvals" && positionals[0] === "purge") return runPurgeStaleApprovals(io, root, has("--apply"));

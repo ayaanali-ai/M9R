@@ -31,6 +31,13 @@ const BOM = String.fromCharCode(0xfeff);
 
 const CWD = "/repo";
 
+test("task-log is routed to the native CLI command instead of reported as unknown", async () => {
+  const { deps, err } = makeDeps({ env: { USERPROFILE: "C:/Users/test" } });
+  assert.equal(await run(["task-log"], deps), 1);
+  assert.match(err.join("\n"), /Usage: m9r-cli task-log <task id>/);
+  assert.doesNotMatch(err.join("\n"), /Unknown command/);
+});
+
 interface FakeResponse {
   ok: boolean;
   status: number;

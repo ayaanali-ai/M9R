@@ -33,10 +33,12 @@ export class StageWindowSelectionError extends StageInputNotDispatchedError {
 
 export class StageAuthorizationError extends StageInputNotDispatchedError {
   readonly failureKind = "authorization" as const;
+  readonly code?: string;
 
-  constructor(message: string, options?: ErrorOptions) {
+  constructor(message: string, options?: ErrorOptions, code?: string) {
     super(message, options);
     this.name = "StageAuthorizationError";
+    this.code = code;
   }
 }
 

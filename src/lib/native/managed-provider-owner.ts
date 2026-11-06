@@ -187,7 +187,9 @@ function contextForProfile(
     // provider process is M9R-owned; its continuity is the M9R task context,
     // not a vendor conversation/session binding.
   };
-  const prompt = `${webAgentPrompt(profile.handle, token, teammates, projectRoomId(deps.repoRoot))}\n\n${sharedProjectMemory(deps.storeRoot, projectRoomId(deps.repoRoot))}`;
+  // The MCP server is scoped to this exact M9R-owned session via its private
+  // environment. Do not put the internal credential in model-visible context.
+  const prompt = `${webAgentPrompt(profile.handle, teammates, projectRoomId(deps.repoRoot))}\n\n${sharedProjectMemory(deps.storeRoot, projectRoomId(deps.repoRoot))}`;
   return { profile, sessionId, token, mcpConfigPath: configPath, launcher, prompt, environment };
 }
 

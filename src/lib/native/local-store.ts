@@ -107,11 +107,11 @@ export interface EventRecord {
   text: string;
 }
 
-const MAX_EVENTS = 500;
+export const MAX_LOCAL_EVENT_HISTORY = 500;
 /** Keep receipts for recent stage actions so an MCP retry cannot repeat an OS input. */
 const MAX_STAGE_OPERATION_RECEIPTS = 10_000;
 /** Keep durable phase history bounded even for a long-running task/session. */
-const MAX_STAGE_TIMING_EVENTS_PER_TASK = 256;
+export const MAX_STAGE_TIMING_EVENTS_PER_TASK = 256;
 const MAX_STAGE_TIMING_DETAIL_CHARS = 240;
 /** Keep generic computer-use receipts across broker/client restarts; fail closed rather than evicting replay protection. */
 const MAX_COMPUTER_OPERATION_RECEIPTS = 10_000;
@@ -533,7 +533,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
   const pushEvent = (s: StoreState, event: Omit<EventRecord, "at">) => {
     s.events.push({ at: now().toISOString(), ...event });
-    if (s.events.length > MAX_EVENTS) s.events = s.events.slice(-MAX_EVENTS);
+    if (s.events.length > MAX_LOCAL_EVENT_HISTORY) s.events = s.events.slice(-MAX_LOCAL_EVENT_HISTORY);
   };
 
   /** Retry transient Windows sharing errors, but never replace atomic publication with an in-place copy. */
@@ -1044,11 +1044,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
      */
     recordStageTiming(taskId: string, event: StageTimingEvent): boolean {
       if (!/^T[0-9]{1,12}$/.test(taskId)
-        || !["queue_wait", "prepare", "launch", "launch-discovery", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "foreground-lease", "background-dispatch", "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation", "provider-acceptance", "first-visible-action", "completion"].includes(event.phase)
+        || !["queue_wait", "prepare", "launch", "launch-preflight", "launch-discovery", "stage-recovery", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "foreground-lease", "background-dispatch", "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation", "provider-acceptance", "first-visible-action", "completion"].includes(event.phase)
         || !["ok", "error"].includes(event.status)
         || !Number.isFinite(event.durationMs) || event.durationMs < 0
         || Number.isNaN(Date.parse(event.startedAt)) || Number.isNaN(Date.parse(event.endedAt))) return false;
       if (event.operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(event.operationId)) return false;
+      if (event.stageName !== undefined && !/^[a-zA-Z0-9._:-]{1,96}$/.test(event.stageName)) return false;
+      if (event.cached !== undefined && typeof event.cached !== "boolean") return false;
       const detail = event.detail === undefined ? undefined : redactSecrets(event.detail).slice(0, MAX_STAGE_TIMING_DETAIL_CHARS);
       const stored: StageTimingEvent = {
         phase: event.phase,
@@ -1057,6 +1059,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         durationMs: Math.round(event.durationMs * 100) / 100,
         status: event.status,
         ...(event.operationId ? { operationId: event.operationId } : {}),
+        ...(event.stageName ? { stageName: event.stageName } : {}),
+        ...(event.cached === undefined ? {} : { cached: event.cached }),
         ...(detail ? { detail } : {}),
       };
       return update((s) => {
@@ -1156,13 +1160,17 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Issues (or, for the same session, re-issues) an identity token. Old tokens for the SAME session are revoked, so a
-     * session that starts again never has two live tokens. Capped: the 200 most recent stay, so the store cannot grow forever. */
+     * session that starts again never has two live tokens. Active identities are never evicted by age/count; only
+     * revoked history is bounded. Silently dropping an active credential makes a still-running agent unauthenticatable. */
     issueIdentity(handle: string, provider: string, sessionId: string): IdentityToken {
       return update((s) => {
         const at = now().toISOString();
         for (const t of s.identities) if (t.sessionId === sessionId && !t.revokedAt) t.revokedAt = at;
         const issued = issueIdentity(normalizeHandle(handle), provider, sessionId, at);
-        s.identities = [...s.identities, issued].slice(-200);
+        const identities = [...s.identities, issued];
+        const active = identities.filter((identity) => !identity.revokedAt);
+        const revoked = identities.filter((identity) => !!identity.revokedAt).slice(-200);
+        s.identities = [...revoked, ...active];
         return issued;
       });
     },
@@ -1176,6 +1184,57 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     identityTokenFor(handle: string, sessionId: string): string | null {
       const identity = readState().identities.find((item) => !item.revokedAt && item.sessionId === sessionId && normalizeHandle(item.handle) === normalizeHandle(handle));
       return identity?.token ?? null;
+    },
+
+    /** Resolve the exact M9R-owned provider session and its internal credential in one store read. */
+    identityCredentialForSession(provider: string, sessionId: string): { identity: VerifiedIdentity; token: string } | null {
+      const normalizedProvider = provider.trim();
+      const exactSession = sessionId.trim();
+      if (!normalizedProvider || !exactSession) return null;
+      const matches = readState().identities.filter((item) => !item.revokedAt
+        && item.sessionId === exactSession
+        && sameConnectionProvider(item.provider, normalizedProvider));
+      if (matches.length !== 1) return null;
+      const item = matches[0]!;
+      return {
+        identity: { handle: item.handle, provider: item.provider, sessionId: item.sessionId },
+        token: item.token,
+      };
+    },
+
+    /**
+     * Resolve or restore the private credential for an M9R-launched provider
+     * session. The session ID reaches this API only through M9R's private MCP
+     * process configuration, so the provider never needs to carry a token in
+     * prompt text. A recorded revocation is authoritative and is never undone.
+     */
+    ensureManagedIdentityCredential(provider: string, sessionId: string): { identity: VerifiedIdentity; token: string } | null {
+      const normalizedProvider = provider.trim();
+      const exactSession = sessionId.trim();
+      if (!normalizedProvider || !exactSession) return null;
+      return update((s) => {
+        const matches = s.identities.filter((item) => item.sessionId === exactSession
+          && sameConnectionProvider(item.provider, normalizedProvider));
+        const active = matches.filter((item) => !item.revokedAt);
+        if (active.length === 1) {
+          const item = active[0]!;
+          return {
+            identity: { handle: item.handle, provider: item.provider, sessionId: item.sessionId },
+            token: item.token,
+          };
+        }
+        // Multiple live credentials indicate corrupt/ambiguous state. A
+        // revoked record means M9R intentionally ended this identity; neither
+        // condition may be repaired by silently minting another credential.
+        if (active.length > 1 || matches.length > 0) return null;
+        const handle = handleForProvider(normalizedProvider);
+        const issued = issueIdentity(normalizeHandle(handle), normalizedProvider, exactSession, now().toISOString());
+        s.identities = [...s.identities, issued];
+        return {
+          identity: { handle: issued.handle, provider: issued.provider, sessionId: issued.sessionId },
+          token: issued.token,
+        };
+      });
     },
 
     /** Distinguishes a session that never had an identity from one whose identity was explicitly revoked. */

@@ -3349,6 +3349,7 @@ Usage:
   m9r-cli update check                    Check the signed M9R runtime manifest without applying an update
   m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
   m9r-cli tasks                             List tasks and what is waiting for your approval
+  m9r-cli task-log <task id>                Export retained task evidence as JSON (owner terminal only)
   m9r-cli approvals purge [--apply]         Dry-run stale approvals; apply expires them but keeps history
   m9r-cli feed [--watch]                    Write the native overlay feed (~/.m9r/feed.json); web activity stays separate
   m9r-cli dismiss <task id>...              Clear items from the overlay list (changes nothing else)
@@ -3485,6 +3486,7 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "note":
     case "cloud":
     case "tasks":
+    case "task-log":
     case "feed":
     case "dismiss":
     case "sessions":

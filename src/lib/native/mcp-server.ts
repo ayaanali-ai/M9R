@@ -1,15 +1,8 @@
 /**
- * M9R MCP server (P1, design: M9R_IDENTITY_AND_CONTROL_DESIGN.md sections 4 and 6). One shared local server (matches
- * "One server, local first" in section 6) -- every tool takes the caller's own per-session token as an argument
- * rather than the process being launched scoped to one token. This is what actually makes a static, once-per-machine
- * MCP registration work for every agent session: the host app (Claude Code/Codex) starts this same process for any
- * session per its own .mcp.json-style config, and each session supplies the token it was already handed in its
- * SessionStart card (see hook-handler.ts, renderSessionCard in inbox-core.ts) with every call it makes.
- *
- * Delivery is still honest about its limit: this only helps an agent that actually reads its own SessionStart
- * context and passes the token through as the `token` argument on each call. There is no host-level mechanism that
- * hands a tool call its own caller's token automatically. Without a valid one, every tool below refuses at call
- * time with a clear reason, same discipline as dev-mcp-server.ts.
+ * M9R MCP server (P1, design: M9R_IDENTITY_AND_CONTROL_DESIGN.md sections 4 and 6). The M9R-owned launcher scopes
+ * this process to its exact local agent session. Managed sessions resolve identity from private M9R configuration;
+ * the internal credential is added only at the lower-level adapter boundary and never needs to appear in a prompt or
+ * tool argument. An optional token field remains only for unbound legacy MCP registrations.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -90,7 +83,7 @@ export interface McpServerDeps {
 // instead of caching a yes/no decision from process start, so a claim that becomes available a
 // moment later (the normal case: a hook fires just after the MCP connection opens) is picked up
 // on the very next tool call automatically.
-const OPTIONAL_TOKEN_FIELD = { token: z.string().min(1).optional().describe("Your M9R session token, if this connection was not already bound by its provider adapter. Most connections do not need this.") };
+const OPTIONAL_TOKEN_FIELD = { token: z.string().min(1).optional().describe("Internal compatibility field for an unbound legacy connection. M9R-managed agent sessions authenticate automatically.") };
 const STAGE_APP_REF = z.string().min(1).max(1024).refine(isStageAppReference, "Use an installed app name, app id, or absolute .exe path.");
 const runtimeIdentityAtProcessStart = readRuntimeBuildIdentity();
 type ProviderReconciliationResult = { healthy: boolean; detail: string; binding?: ConnectionBinding };
@@ -168,8 +161,19 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // static fact about how the process was launched (its env/deps genuinely never changes after
   // that) -- what changed is that it no longer freezes the *schema* or skips a fresh resolution
   // attempt on every call; see requireIdentity() below.
-  const connectionConfigured = Boolean(deps.connectionBindingId || deps.connectionProcessId || deps.connectionProvider || deps.connectionWorkerFallback);
-  const AUTH_FIELD = OPTIONAL_TOKEN_FIELD;
+  const connectionConfigured = Boolean(deps.connectionBindingId || deps.connectionProcessId || deps.connectionProvider || deps.connectionSessionId || deps.connectionWorkerFallback);
+  // A private M9R binding is the authentication context. This includes the
+  // exact-session launch path and provider-process binding, where a trusted
+  // prompt hook publishes the active conversation after MCP startup. Do not
+  // expose the legacy token argument to an automatically bound agent: stale
+  // credentials must not be something it can accidentally keep submitting.
+  const hasAutomaticIdentityBinding = Boolean(
+    deps.connectionSessionId
+      || deps.connectionBindingId
+      || deps.connectionWorkerFallback
+      || (deps.connectionProvider && deps.connectionProcessId !== undefined),
+  );
+  const AUTH_FIELD = (hasAutomaticIdentityBinding ? {} : OPTIONAL_TOKEN_FIELD) as typeof OPTIONAL_TOKEN_FIELD;
   let connectionBindingId = deps.connectionBindingId;
   const defaultConnectionBindingProblem = "no trusted SessionStart or UserPromptSubmit event has published a usable provider claim yet";
   const connectionWaitMs = Math.max(0, Math.min(10_000, Math.floor(deps.connectionWaitMs ?? 3_000)));
@@ -186,6 +190,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const getConnectionBindingProblem = (): string =>
     providerCallContext.getStore()?.bindingProblem ?? defaultConnectionBindingProblem;
   const codexCallSelector = (): { supplied: boolean; invalid: boolean; sessionId?: string } => {
+    // M9R-managed owner sessions have an exact local identity that is deliberately
+    // different from a provider's internal thread id. The private M9R config wins.
+    if (deps.connectionSessionId) return { supplied: false, invalid: false };
     if (handleForProvider(deps.connectionProvider ?? "") !== "codex") {
       return { supplied: false, invalid: false };
     }
@@ -437,6 +444,14 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   }
 
   async function requireIdentity(token?: string): Promise<VerifiedIdentity> {
+    if (deps.connectionProvider && deps.connectionSessionId) {
+      // M9R owns this child process and the exact session selector in its
+      // private environment. If an older runtime dropped an active credential,
+      // repair it internally; never make the model or owner paste a token.
+      const managedIdentity = deps.store.ensureManagedIdentityCredential(deps.connectionProvider, deps.connectionSessionId);
+      if (managedIdentity) return managedIdentity.identity;
+      throw new Error("M9R could not authorize this connected agent. No action was sent.");
+    }
     // Always try connection-mode resolution fresh when this process has any connection-mode
     // configuration at all, before ever falling back to a manual token -- a claim that did not
     // exist yet on an earlier call (the hook had not fired) can exist now, and this picks it up
@@ -453,29 +468,32 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       if (identity
         && (!selector.supplied || identity.sessionId === selector.sessionId)
         && (!deps.connectionProvider || normalizeHandle(identity.provider) === normalizeHandle(deps.connectionProvider))) return identity;
+      if (deps.connectionSessionId && deps.connectionProvider) {
+        throw new Error("M9R could not authorize this connected agent. No action was sent.");
+      }
       if (typeof token !== "string") {
-        throw new Error(`Automatic M9R provider binding did not become ready within ${connectionWaitMs}ms; ${getConnectionBindingProblem()}. No manual token or new session is required; retry after the provider turn is unambiguous.`);
+        throw new Error("M9R could not verify this agent connection automatically. No action was sent.");
       }
       if (selector.supplied) {
         const manualIdentity = deps.store.verifyIdentity(token);
         if (!manualIdentity || manualIdentity.sessionId !== selector.sessionId
           || (deps.connectionProvider && normalizeHandle(manualIdentity.provider) !== normalizeHandle(deps.connectionProvider))) {
-          throw new Error("The supplied manual credential does not match the Codex conversation identified by this tool call.");
+          throw new Error("M9R could not verify this agent connection. No action was sent.");
         }
         return manualIdentity;
       }
       // Fall through to legacy token verification below -- a caller that supplied a token
       // explicitly is honored even on a connection-configured process.
     }
-    if (typeof token !== "string") throw new Error("M9R session token is required for this legacy MCP connection.");
+    if (typeof token !== "string") throw new Error("M9R could not verify this agent connection. No action was sent.");
     // Tokens are 24 random bytes encoded as base64url. Detect copied or truncated
     // values before consulting the store so they are not misreported as revoked.
     if (!/^[A-Za-z0-9_-]{32}$/.test(token)) {
-      throw new Error(`M9R session token is malformed: received ${token.length} characters; expected a 32-character base64url token. Use the exact token from this session's SessionStart card.`);
+      throw new Error("M9R could not verify this agent connection. No action was sent.");
     }
     const identity = deps.store.verifyIdentity(token);
     if (!identity) {
-      throw new Error("This well-formed M9R session token is not active in the configured M9R store. It may be revoked, or this process may use a different M9R_HOME from the SessionStart hook. Run M9R setup to synchronize M9R_HOME, then restart the agent session. The token value was not logged.");
+      throw new Error("M9R could not verify this agent connection. No action was sent.");
     }
     return identity;
   }
@@ -492,15 +510,21 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
    */
   async function authenticate(token?: string): Promise<{ identity: VerifiedIdentity; token: string }> {
     const identity = await requireIdentity(token);
-    // A manually presented token is already the right credential -- requireIdentity just
-    // verified it against the store -- so use it directly rather than looking it up again.
-    // Only when no token was presented (the normal connection-mode case) does this need to ask
-    // the store for the credential bound to that identity.
-    const credential = token ?? deps.store.identityTokenFor(identity.handle, identity.sessionId);
-    if (typeof credential !== "string" || credential.length === 0) {
-      throw new Error("The authenticated provider session has no active internal M9R credential. Reconnect the provider adapter.");
+    return { identity, token: credentialForIdentity(identity) };
+  }
+
+  function credentialForIdentity(identity: VerifiedIdentity): string {
+    // Always resolve the canonical active M9R credential for the identity that
+    // was just authenticated. A stale optional credential supplied alongside
+    // an already-trusted provider binding must never replace it.
+    const credential = deps.store.identityCredentialForSession(identity.provider, identity.sessionId);
+    if (!credential
+      || normalizeHandle(credential.identity.handle) !== normalizeHandle(identity.handle)
+      || normalizeHandle(credential.identity.provider) !== normalizeHandle(identity.provider)
+      || credential.identity.sessionId !== identity.sessionId) {
+      throw new Error("M9R could not authenticate this connected agent. Reconnect the agent from M9R.");
     }
-    return { identity, token: credential };
+    return credential.token;
   }
 
   // Shared by every tool surface that takes an optional taskId (the provider-neutral
@@ -584,7 +608,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     store: deps.store,
     web: deps.web,
     requireIdentity,
-    identityToken: async (_identity, presented) => (await authenticate(presented as string | undefined)).token,
+    identityToken: async (identity) => credentialForIdentity(identity),
     resolveTaskId,
     resolveWorkIdentity: (taskId) => {
       const context = deps.store.getTask(taskId)?.logicalContext;

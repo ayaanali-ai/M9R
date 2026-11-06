@@ -72,6 +72,8 @@ test("task timing persists native subphase labels, operation correlation, and fr
       durationMs: 4.37,
       status: "ok",
       operationId: "action-7",
+      stageName: "agent-abcdef0123456789abcdef01",
+      cached: true,
       detail: "route=native",
     });
     assert.equal(accepted, true);
@@ -82,6 +84,8 @@ test("task timing persists native subphase labels, operation correlation, and fr
       durationMs: 4.37,
       status: "ok",
       operationId: "action-7",
+      stageName: "agent-abcdef0123456789abcdef01",
+      cached: true,
       detail: "route=native",
     });
   } finally { f.cleanup(); }
@@ -308,21 +312,22 @@ test("revoked identities and different target sessions cannot provision stages",
     const other = f.store.issueIdentity("codex", "codex", "session-two");
     await assert.rejects(f.service.prepare(other.token, f.task.id), /does not belong/);
     f.store.revokeIdentity("session-one");
-    await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /revoked/);
+    await assert.rejects(f.service.prepare(f.identity.token, f.task.id), /M9R could not authorize this desktop action/);
     assert.equal(f.creations(), 0);
   } finally { f.cleanup(); }
 });
 
-test("a stage broker with a different identity store explains the M9R_HOME mismatch without echoing the token", async () => {
+test("a stage broker with an unknown identity reports a safe authorization failure without echoing credentials", async () => {
   const f = fixture();
   const foreignRoot = mkdtempSync(join(tmpdir(), "m9r-stage-other-store-"));
   const foreignToken = createLocalStore(foreignRoot).issueIdentity("codex", "codex", "session-one").token;
   try {
     await assert.rejects(f.service.prepare(foreignToken, f.task.id), (error: unknown) => {
       const message = String(error);
-      assert.match(message, /stage broker cannot verify this session identity/);
-      assert.match(message, /different M9R_HOME values/);
-      assert.match(message, /synchronize their M9R_HOME settings/);
+      assert.match(message, /M9R could not authorize this desktop action/);
+      assert.match(message, /No desktop input was sent/);
+      assert.doesNotMatch(message, /session token|M9R_HOME|synchronize|restart/i);
+      assert.equal((error as { code?: string }).code, "agent_identity_unavailable");
       assert.ok(!message.includes(foreignToken), "identity tokens must not be echoed in diagnostics");
       return true;
     });

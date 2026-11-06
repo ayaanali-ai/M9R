@@ -3,6 +3,16 @@
 **Checkpoint date:** 2026-10-10  
 **Purpose:** One cumulative execution plan for reliability defects, the earlier proposed fix order, product/demo gates, roadmap work, and cleanup. New findings are appended to this plan; they do not replace or reorder it.
 
+> **Historical-plan notice (2026-11-06):** This file preserves the Oct 10
+> investigation and its evidence. Its opening “CURRENT EXECUTION ORDER” is no
+> longer the active implementation order; use
+> [M9R Source of Truth 6.0](./M9R_SOURCE_OF_TRUTH_6.0_IMPLEMENTATION_ORDER.md)
+> for the current plan and demo status. In particular, the archived Task View /
+> virtual-desktop proposal was not adopted and must not be implemented as a
+> current requirement. The six acceptance gates below remain useful historical
+> prompts, but their extension and desktop-route assumptions must be rechecked
+> against the current owner-approved architecture before use.
+
 ## 0. CURRENT EXECUTION ORDER — read this first (2026-10-10, owner-set, do not reorder or skip without the owner's explicit yes)
 
 This section is the live, authoritative sequence for what gets worked on right now. It points at evidence recorded elsewhere in this document (sections 4-6 and the F12-F20 entries under Source records) rather than repeating it. Do not start step *N+1* before step *N*'s acceptance test passes, and do not edit this ordering yourself — if something here looks wrong, flag it to the owner rather than reordering.

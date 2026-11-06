@@ -5,6 +5,7 @@ import test from "node:test";
 import { createLocalStore } from "@/lib/native/local-store";
 import { renderInboxInjection, type Task } from "@/lib/native/inbox-core";
 import { canQueue } from "@/lib/native/codex-delivery-core";
+import { stateLabel } from "@/lib/native/approval-commands";
 
 test("stale queued, sending, and deferred work is permanently retired with history intact", () => {
   const fixture = join(process.cwd(), ".workcache", "native-test-fixtures");
@@ -25,6 +26,7 @@ test("stale queued, sending, and deferred work is permanently retired with histo
     for (const previous of tasks) {
       const task = restarted.getTask(previous.id)!;
       assert.ok(task.retiredAt);
+      assert.equal(stateLabel(task), "retired from live delivery; history retained");
       assert.deepEqual(task.delivery, previous.delivery);
       assert.deepEqual(task.receipt, previous.receipt);
       assert.equal(task.goal, previous.goal);

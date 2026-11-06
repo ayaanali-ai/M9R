@@ -2,8 +2,10 @@ export interface M9rMcpConnectionConfig {
   provider?: string;
   bindingId?: string;
   processId?: number;
-  /** Optional provider-supplied canonical session id; private host metadata only. */
+  /** Exact M9R-owned session id; private launcher metadata, not a user credential. */
   sessionId?: string;
+  /** Project scope supplied by the M9R-owned provider launcher. */
+  cwd?: string;
 }
 
 function positiveProcessId(value: unknown): number | undefined {
@@ -31,6 +33,9 @@ export function readM9rMcpConnectionConfig(
   const rawSessionId = env.M9R_PROVIDER_SESSION_ID?.trim() || env.M9R_SESSION_ID?.trim();
   const sessionId = rawSessionId && rawSessionId.length <= 256 && !/[\u0000-\u001f\u007f]/.test(rawSessionId)
     ? rawSessionId : undefined;
+  const rawCwd = env.M9R_PROJECT_ROOT?.trim();
+  const cwd = rawCwd && rawCwd.length <= 4_096 && !/[\u0000-\u001f\u007f]/.test(rawCwd)
+    ? rawCwd : undefined;
   const isWorker = env.M9R_MCP_WORKER === "1";
   // A legacy binding id must not suppress the provider-host identity. When
   // both are present the MCP server can prefer the exact active turn and avoid
@@ -42,6 +47,7 @@ export function readM9rMcpConnectionConfig(
     ...(bindingId ? { bindingId } : {}),
     ...(processId ? { processId } : {}),
     ...(sessionId ? { sessionId } : {}),
+    ...(cwd ? { cwd } : {}),
   };
 }
 
@@ -62,5 +68,6 @@ export function mcpWorkerEnvironment(
     ...(connection.bindingId ? { M9R_CONNECTION_BINDING_ID: connection.bindingId } : {}),
     ...(connection.processId ? { M9R_CONNECTION_PROCESS_ID: String(connection.processId) } : {}),
     ...(connection.sessionId ? { M9R_PROVIDER_SESSION_ID: connection.sessionId } : {}),
+    ...(connection.cwd ? { M9R_PROJECT_ROOT: connection.cwd } : {}),
   };
 }

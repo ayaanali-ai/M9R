@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -209,16 +209,44 @@ function outcomeResponse(kind: ApprovalKind, outcome: Outcome, params: Record<st
  * app-server` running, still holding its threads: the next server then cannot resume them ("already has an active
  * writer"). Kill the whole tree there.
  */
-function killProcessTree(child: ChildProcessWithoutNullStreams): void {
+function killProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (process.platform === "win32" && child.pid) {
-    try {
-      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-      return;
-    } catch {
-      /* already gone, or taskkill unavailable: fall through to a plain kill */
-    }
+    // Do not block the broker's event loop while Windows walks the process
+    // tree. The timeout belongs to taskkill itself, and the outer fallback is
+    // also bounded in case process creation or teardown stops responding.
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      let fallbackTimer: NodeJS.Timeout | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        resolve();
+      };
+      fallbackTimer = setTimeout(() => {
+        try { child.kill(); } catch { /* already exited */ }
+        finish();
+      }, 3_500);
+      try {
+        execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+          windowsHide: true,
+          timeout: 3_000,
+          maxBuffer: 1_024,
+        }, (error) => {
+          if (error) {
+            /* already gone, or taskkill unavailable: fall through to a plain kill */
+            try { child.kill(); } catch { /* already exited */ }
+          }
+          finish();
+        });
+      } catch {
+        try { child.kill(); } catch { /* already exited */ }
+        finish();
+      }
+    });
   }
   try { child.kill(); } catch { /* already exited */ }
+  return Promise.resolve();
 }
 
 /**
@@ -546,11 +574,14 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
     }
     state.client.fail("The Codex app-server was shut down.");
     if (state.child.exitCode === null && !state.child.killed) {
-      killProcessTree(state.child);
-      await new Promise<void>((resolveExit) => {
-        const timeout = setTimeout(resolveExit, 5_000);
-        state.child.once("exit", () => { clearTimeout(timeout); resolveExit(); });
+      const childExited = new Promise<void>((resolveExit) => {
+        if (state.child.exitCode !== null || state.child.signalCode !== null) return resolveExit();
+        let timeout: NodeJS.Timeout;
+        const finish = () => { clearTimeout(timeout); resolveExit(); };
+        timeout = setTimeout(finish, 5_000);
+        state.child.once("exit", finish);
       });
+      await Promise.all([killProcessTree(state.child), childExited]);
     }
     this.servers.delete(handle.serverId);
   }

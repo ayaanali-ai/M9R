@@ -1,11 +1,10 @@
 /**
- * P1 identity (design: M9R_IDENTITY_AND_CONTROL_DESIGN.md section 4). Every agent session gets a random, per-session
- * token when it starts; the M9R MCP server (mcp-server.ts) is launched scoped to exactly one token, so every call it
- * makes is stamped with a verified identity instead of a claimed `--from` string.
+ * P1 identity (design: M9R_IDENTITY_AND_CONTROL_DESIGN.md section 4). Every agent session gets an internal,
+ * random credential when it starts. M9R resolves the exact owner-managed session at the MCP boundary; the credential
+ * remains inside M9R and is used only when a lower-level adapter still needs token-shaped authorization.
  *
- * Honest limit, stated in the design and repeated here: the token lives in the same local store as everything else in
- * `~/.m9r`, readable by anything running as the same Windows user. This defends against accidents, a receiving agent
- * being fooled by prompt-injected text, and one agent impersonating another -- not a determined local attacker.
+ * Honest limit: the credential lives in the same local store as everything else in `~/.m9r`, readable by anything
+ * running as the same Windows user. It is an internal session-binding mechanism, not a user-facing setup secret.
  */
 import { randomBytes } from "node:crypto";
 

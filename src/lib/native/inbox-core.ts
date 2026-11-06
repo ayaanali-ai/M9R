@@ -161,6 +161,7 @@ export function transitionTaskReceipt(current: TaskReceipt | undefined, transiti
 
 /** A durable phase boundary for one request handled by the native desktop stage. */
 export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | "close" | "stop"
+  | "launch-preflight" | "stage-recovery"
   | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "foreground-lease" | "background-dispatch"
   | "window-capture" | "accessibility-read" | "target-resolution" | "input-dispatch" | "post-action-observation"
   | "launch-discovery"
@@ -179,6 +180,10 @@ export interface StageTimingEvent {
   durationMs: number;
   status: "ok" | "error";
   operationId?: string;
+  /** Runtime stage correlation label; it is an M9R-generated name, not a window or session id. */
+  stageName?: string;
+  /** Whether the driver reused a warm runtime/capture for this phase, when reported. */
+  cached?: boolean;
   detail?: string;
 }
 

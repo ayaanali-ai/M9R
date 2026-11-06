@@ -661,7 +661,44 @@ checks only; no owner-machine task, install, acceptance, or runtime promotion
 has occurred in this phase.
 
 The remaining release gates in XIV.14–15 are still explicit: build a candidate
-from the final committed source, have the owner/Claude review it, then run the
-owner-machine acceptance and installation steps only after that review. A
+from the final committed source, complete owner/Codex review, then run the
+owner-machine acceptance and installation steps only after that review. An
+external Claude review is not a prerequisite per the owner's direction. A
 successful source test suite or candidate build is not live-task verification.
+
+### Demo-readiness checkpoint (2026-11-06)
+
+This is a status record, not a release claim.
+
+- The Nov 6 source work binds M9R-launched provider MCP processes to a private
+  provider/session scope, removes the need for a model-visible session token on
+  that path, keeps explicit revocation authoritative, and adds an owner-only
+  `task-log` export for the task lifecycle and bounded stage evidence actually
+  persisted by M9R. The export does not contain provider transcripts,
+  screenshots, or broker stderr.
+- `npm run typecheck` and `git diff --check` passed during this checkpoint.
+  The retained `native-identity` and `native-store-and-hook` tests still have
+  legacy contract failures and are excluded from the aggregate suite; they must
+  not be described as passing. Other focused suites passed in the preceding
+  verification pass, but that is not a complete release suite.
+- The installed local candidate was built from a dirty source tree. The owner
+  reported that a recent simple task worked, which is useful smoke evidence but
+  does not establish repeatable task acceptance or a clean candidate build.
+- Before demo sign-off, rebuild from a committed clean source tree and verify
+  artifact provenance, broker health, and provider connectivity. Then retain
+  raw task evidence for: one end-to-end single-agent task with a checked effect;
+  two distinct agents coordinating and returning attributed results; a user
+  continuing to work during the task without focus or pointer theft; and
+  pause/redirect/recovery without duplicate delivery. Run a three-agent demo
+  only after the two-agent path passes. Cross-provider active-session handoff,
+  fresh-install/update recovery, and any broader multiplayer claim remain open
+  until separately demonstrated.
+- Git was refreshed from `origin`; `origin/main` was at `e411a060` (2026-11-01)
+  and the local `codex/final-polish-rebirth` branch had no upstream and was 147
+  commits ahead before this checkpoint commit. Per the owner's earlier
+  instruction, this branch must not be pushed into `main` as a bulk update.
+  Local commits do not make GitHub `main` current.
+
+The demo candidate remains **not release-ready** until the clean build and the
+live acceptance items above have retained, reviewable evidence.
 
