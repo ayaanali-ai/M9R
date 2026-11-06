@@ -156,6 +156,7 @@ test("built entry has the correct shebang and a relative core import", () => {
   assert.ok(existsSync(resolve(distDir, "adapter-contract.js")));
   assert.ok(existsSync(resolve(distDir, "broker-update-record.js")), "the CLI broker updater must ship its BOM-compatible ownership-record parser");
   assert.ok(existsSync(resolve(distDir, "agent-task-routing.js")));
+  assert.ok(existsSync(resolve(distDir, "stage-save-as.js")), "the compiled desktop stage must ship its shared Save As path resolver");
   assert.ok(existsSync(resolve(distDir, "opencode-capture-backfill-core.js")));
   assert.ok(!readFileSync(resolve(distDir, "resident-provider-adapters.js"), "utf8").includes("@/lib/"));
   assert.ok(!readFileSync(resolve(distDir, "oathlock-resident-core.js"), "utf8").includes("@/lib/"));
