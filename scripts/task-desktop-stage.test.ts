@@ -62,6 +62,31 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     retiredDesktopOpCount: () => retiredDesktopOpCount, creations: () => retiredDesktopOpCount, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+test("task timing persists native subphase labels, operation correlation, and fractional duration", () => {
+  const f = fixture();
+  try {
+    const accepted = f.store.recordStageTiming(f.task.id, {
+      phase: "input-dispatch",
+      startedAt: "2026-11-05T12:00:00.000Z",
+      endedAt: "2026-11-05T12:00:00.004Z",
+      durationMs: 4.37,
+      status: "ok",
+      operationId: "action-7",
+      detail: "route=native",
+    });
+    assert.equal(accepted, true);
+    assert.deepEqual(f.store.getTask(f.task.id)?.stageTiming?.at(-1), {
+      phase: "input-dispatch",
+      startedAt: "2026-11-05T12:00:00.000Z",
+      endedAt: "2026-11-05T12:00:00.004Z",
+      durationMs: 4.37,
+      status: "ok",
+      operationId: "action-7",
+      detail: "route=native",
+    });
+  } finally { f.cleanup(); }
+});
+
 test("a stalled cursor compositor cannot delay stage preparation or dispatch", async () => {
   const f = fixture(true);
   try {

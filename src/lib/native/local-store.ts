@@ -1044,7 +1044,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
      */
     recordStageTiming(taskId: string, event: StageTimingEvent): boolean {
       if (!/^T[0-9]{1,12}$/.test(taskId)
-        || !["queue_wait", "prepare", "launch", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "foreground-lease", "background-dispatch", "provider-acceptance", "first-visible-action", "completion"].includes(event.phase)
+        || !["queue_wait", "prepare", "launch", "launch-discovery", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "foreground-lease", "background-dispatch", "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation", "provider-acceptance", "first-visible-action", "completion"].includes(event.phase)
         || !["ok", "error"].includes(event.status)
         || !Number.isFinite(event.durationMs) || event.durationMs < 0
         || Number.isNaN(Date.parse(event.startedAt)) || Number.isNaN(Date.parse(event.endedAt))) return false;
@@ -1054,7 +1054,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         phase: event.phase,
         startedAt: event.startedAt,
         endedAt: event.endedAt,
-        durationMs: Math.round(event.durationMs),
+        durationMs: Math.round(event.durationMs * 100) / 100,
         status: event.status,
         ...(event.operationId ? { operationId: event.operationId } : {}),
         ...(detail ? { detail } : {}),

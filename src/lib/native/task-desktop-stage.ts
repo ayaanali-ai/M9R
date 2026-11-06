@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { StageCaptureRefreshError, StageInputNotDispatchedError, StageAuthorizationError, StageValidationError } from "./stage-errors";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -275,7 +276,7 @@ export function createTaskDesktopStageService(input: {
       process.stderr.write(`[native-stage-host-warm] ${error instanceof Error ? error.message : String(error)}\n`);
     });
   }
-  const activeTimingTasks = new Map<string, string>();
+  const activeTimingTasks = new Map<string, { taskId: string; operationId?: string }>();
   const driver = input.driver ?? createCuaStageDriver({
     stage: stageDeps,
     manager,
@@ -284,14 +285,15 @@ export function createTaskDesktopStageService(input: {
     // only; it must never affect stage control or recovery.
     onTiming: (event) => {
       process.stderr.write(`[stage-timing] ${JSON.stringify(event)}\n`);
-      const taskId = event.stageName ? activeTimingTasks.get(event.stageName) : undefined;
-      if (!taskId) return;
-      recordStageTiming(taskId, {
+      const activeTimingTask = event.stageName ? activeTimingTasks.get(event.stageName) : undefined;
+      if (!activeTimingTask) return;
+      recordStageTiming(activeTimingTask.taskId, {
         phase: event.phase,
         startedAt: event.startedAt,
         endedAt: event.endedAt,
         durationMs: event.durationMs,
         status: event.status,
+        ...(activeTimingTask.operationId ? { operationId: activeTimingTask.operationId } : {}),
         ...(event.detail ? { detail: event.detail } : {}),
       });
     },
@@ -360,9 +362,9 @@ export function createTaskDesktopStageService(input: {
     try { input.store.recordStageTiming(taskId, event); } catch { /* telemetry must not alter control flow */ }
   }
 
-  async function withActiveTimingTask<T>(stageName: string, taskId: string, run: () => Promise<T>): Promise<T> {
+  async function withActiveTimingTask<T>(stageName: string, taskId: string, operationId: string | undefined, run: () => Promise<T>): Promise<T> {
     const prior = activeTimingTasks.get(stageName);
-    activeTimingTasks.set(stageName, taskId);
+    activeTimingTasks.set(stageName, { taskId, ...(operationId ? { operationId } : {}) });
     try { return await run(); }
     finally {
       if (prior === undefined) activeTimingTasks.delete(stageName);
@@ -373,15 +375,17 @@ export function createTaskDesktopStageService(input: {
   async function timedStagePhase<T>(taskId: string, phase: Exclude<StageTimingPhase, "queue_wait">,
     operationId: string | undefined, run: () => Promise<T>): Promise<T> {
     const startedMs = Date.now();
+    const startedTick = performance.now();
     const startedAt = new Date(startedMs).toISOString();
     try {
       const result = await run();
       const endedMs = Date.now();
-      recordStageTiming(taskId, { phase, operationId, startedAt, endedAt: new Date(endedMs).toISOString(), durationMs: endedMs - startedMs, status: "ok" });
+      recordStageTiming(taskId, { phase, operationId, startedAt, endedAt: new Date(endedMs).toISOString(),
+        durationMs: performance.now() - startedTick, status: "ok" });
       return result;
     } catch (error) {
       const endedMs = Date.now();
-      recordStageTiming(taskId, { phase, operationId, startedAt, endedAt: new Date(endedMs).toISOString(), durationMs: endedMs - startedMs,
+      recordStageTiming(taskId, { phase, operationId, startedAt, endedAt: new Date(endedMs).toISOString(), durationMs: performance.now() - startedTick,
         status: "error", detail: error instanceof Error ? error.message : String(error) });
       throw error;
     }
@@ -390,11 +394,12 @@ export function createTaskDesktopStageService(input: {
   function enqueueTimedStage<T>(name: string, taskId: string, phase: Exclude<StageTimingPhase, "queue_wait" | "stop">,
     operationId: string | undefined, run: () => Promise<T>, timingStageName = name): Promise<T> {
     const requestedMs = Date.now();
+    const requestedTick = performance.now();
     return enqueueStage(name, async () => {
       const dequeuedMs = Date.now();
       recordStageTiming(taskId, { phase: "queue_wait", startedAt: new Date(requestedMs).toISOString(), endedAt: new Date(dequeuedMs).toISOString(),
-        durationMs: dequeuedMs - requestedMs, status: "ok" });
-      return withActiveTimingTask(timingStageName, taskId, () => timedStagePhase(taskId, phase, operationId, run));
+        durationMs: performance.now() - requestedTick, status: "ok", operationId });
+      return withActiveTimingTask(timingStageName, taskId, operationId, () => timedStagePhase(taskId, phase, operationId, run));
     });
   }
   // The cursor reaper is broker-wide housekeeping unrelated to any one stage's actions;
@@ -1198,7 +1203,13 @@ export function createTaskDesktopStageService(input: {
           // budget is shared by every app; no app-specific timeout is needed.
           const LAUNCH_POLL_BUDGET_MS = 55_000;
           const LAUNCH_POLL_ATTEMPTS = 120;
+          const discoveryStartedAtMs = Date.now();
+          const discoveryStartedTick = performance.now();
+          let discoveryAttempts = 0;
+          let discoveryCompletedAt: { atMs: number; tick: number } | undefined;
+          try {
           for (let attempt = 0; attempt < LAUNCH_POLL_ATTEMPTS && Date.now() - pollStartedAt < LAUNCH_POLL_BUDGET_MS; attempt++) {
+            discoveryAttempts = attempt + 1;
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
             if (launchError) throw launchError;
@@ -1224,6 +1235,7 @@ export function createTaskDesktopStageService(input: {
               ? selectPersonalBrowserWindow(kind, matches, beforeKeys)
               : selectTargetAppWindow(matches, currentForeground);
             if (selected) {
+              discoveryCompletedAt = { atMs: Date.now(), tick: performance.now() };
               ownedApps.set(name, { taskId, appId, pid: selected.pid, windowId: selected.windowId, ownsProcess: false });
               bindBrowserSpace(name, approved.executable, selected.pid, selected.windowId);
               // An explicit owner-preview app launch owns this focus transition:
@@ -1237,6 +1249,17 @@ export function createTaskDesktopStageService(input: {
             await delay(Math.min(400, 100 + attempt * 5));
           }
           throw new Error("The requested application did not expose a new exact window. Its launcher response is not proof it opened.");
+          } finally {
+            recordStageTiming(taskId, {
+              phase: "launch-discovery",
+              startedAt: new Date(discoveryStartedAtMs).toISOString(),
+              endedAt: new Date(discoveryCompletedAt?.atMs ?? Date.now()).toISOString(),
+              durationMs: (discoveryCompletedAt?.tick ?? performance.now()) - discoveryStartedTick,
+              status: discoveryCompletedAt ? "ok" : "error",
+              ...(operationId ? { operationId } : {}),
+              detail: `path=owner-preview;pollAttempts=${discoveryAttempts};pollBudgetMs=${LAUNCH_POLL_BUDGET_MS};window=${discoveryCompletedAt ? "found" : "not-found"}`,
+            });
+          }
         } catch (error) {
           // A failed owner-preview launch must not leave a task-created ordinary
           // app behind. Personal browser launches are delegation stubs and are
@@ -1289,7 +1312,13 @@ export function createTaskDesktopStageService(input: {
       let spawnError: Error | undefined;
       child?.on("error", (error) => { spawnError = error; });
       try {
+        const discoveryStartedAtMs = Date.now();
+        const discoveryStartedTick = performance.now();
+        let discoveryAttempts = 0;
+        let discoveryCompletedAt: { atMs: number; tick: number } | undefined;
+        try {
         for (let attempt = 0; attempt < 40; attempt++) {
+          discoveryAttempts = attempt + 1;
           authorize(token, taskId, mode);
           if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
           // Personal Chromium commonly exits its launcher PID immediately after
@@ -1345,6 +1374,7 @@ export function createTaskDesktopStageService(input: {
           }
           const selectedWindow = selectTargetAppWindow(candidateWindows);
           if (selectedWindow) {
+            discoveryCompletedAt = { atMs: Date.now(), tick: performance.now() };
             authorize(token, taskId, mode);
             if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
             selectedWindowId = selectedWindow.windowId;
@@ -1373,6 +1403,17 @@ export function createTaskDesktopStageService(input: {
         throw new Error(personalBrowser
           ? `Personal ${browserKind === "chrome" ? "Chrome" : "Edge"} did not expose a new task window; the existing personal window was left untouched.`
           : "The app exposes no supported exact-process window; it requires an app-specific launch adapter.");
+          } finally {
+            recordStageTiming(taskId, {
+              phase: "launch-discovery",
+              startedAt: new Date(discoveryStartedAtMs).toISOString(),
+              endedAt: new Date(discoveryCompletedAt?.atMs ?? Date.now()).toISOString(),
+              durationMs: (discoveryCompletedAt?.tick ?? performance.now()) - discoveryStartedTick,
+              status: discoveryCompletedAt ? "ok" : "error",
+              ...(operationId ? { operationId } : {}),
+              detail: `path=stage-launch;pollAttempts=${discoveryAttempts};maxAttempts=40;window=${discoveryCompletedAt ? "found" : "not-found"}`,
+            });
+          }
       } catch (error) {
         if (child && child.exitCode === null && !child.killed) child.kill();
         throw error;
@@ -1392,7 +1433,8 @@ export function createTaskDesktopStageService(input: {
     // because that turn is itself awaiting this call. A real, silent deadlock, not
     // slowness: this is what the ~70s timeouts actually were. skipQueue lets an
     // already-queued caller run this launch immediately instead of behind itself.
-    if (options?.skipQueue) return withActiveTimingTask(initial.name, taskId, () => timedStagePhase(taskId, "launch", operationId, run)) as Promise<StageLaunchResult>;
+    if (options?.skipQueue) return withActiveTimingTask(initial.name, taskId, operationId,
+      () => timedStagePhase(taskId, "launch", operationId, run)) as Promise<StageLaunchResult>;
     return enqueueTimedStage(queueName, taskId, "launch", operationId, run, initial.name) as Promise<StageLaunchResult>;
   }
 

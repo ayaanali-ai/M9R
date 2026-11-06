@@ -763,6 +763,32 @@ test("native capture stays scoped to the registered HWND without starting the cu
   assert.equal(calls.some(call => ["startSession", "getWindowState", "click"].includes(call.method)), false);
 }));
 
+test("native action timings separate observation, targeting, dispatch, and the refreshed observation", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const timings: Array<{ phase: string; stageName?: string; durationMs: number; status: string }> = [];
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls }) as never,
+    onTiming: (event) => timings.push(event),
+  });
+
+  const result = await driver.click("stage", 42, 24);
+  assert.equal(result.outcome.status, "unverified", "instrumentation must not turn OS delivery into semantic success");
+  const phases = timings.map(({ phase }) => phase);
+  for (const phase of ["window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation"]) {
+    assert.ok(phases.includes(phase), `missing measured phase: ${phase}`);
+  }
+  const dispatchIndex = phases.indexOf("input-dispatch");
+  const postObservationIndex = phases.indexOf("post-action-observation");
+  assert.ok(dispatchIndex >= 0 && postObservationIndex > dispatchIndex, "the refreshed observation follows actual input delivery");
+  assert.ok(timings.every((event) => event.stageName === "stage" && Number.isFinite(event.durationMs)
+    && event.durationMs >= 0 && ["ok", "error"].includes(event.status)));
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1,
+    "timing instrumentation must preserve the existing single-dispatch behavior");
+  await driver.shutdown();
+}));
+
 test("moves and verifies Cua's ghost cursor through the typed exact-window API", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

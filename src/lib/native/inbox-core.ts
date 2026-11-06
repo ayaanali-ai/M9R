@@ -162,12 +162,15 @@ export function transitionTaskReceipt(current: TaskReceipt | undefined, transiti
 /** A durable phase boundary for one request handled by the native desktop stage. */
 export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | "close" | "stop"
   | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "foreground-lease" | "background-dispatch"
+  | "window-capture" | "accessibility-read" | "target-resolution" | "input-dispatch" | "post-action-observation"
+  | "launch-discovery"
   | "provider-acceptance" | "first-visible-action" | "completion";
 
 /**
  * Timing is deliberately kept on the task record so a later result or audit can reconcile
  * the complete turn without depending on process stderr or a live broker. It contains no
- * task text, credentials, window identifiers, or desktop pixels.
+ * task text, credentials, window identifiers, or desktop pixels. Post-action observation
+ * measures a fresh capture for the agent; it does not claim the app accepted the action.
  */
 export interface StageTimingEvent {
   phase: StageTimingPhase;

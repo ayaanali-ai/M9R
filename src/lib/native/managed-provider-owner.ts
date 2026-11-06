@@ -1,5 +1,6 @@
 import { isLogicalContinuation, shouldReusePausedTask, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -549,13 +550,13 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
 
   /** Timing is diagnostic only; a broken state write must never change provider control flow. */
   function recordTurnTiming(taskId: string, phase: StageTimingPhase, startedMs: number, endedMs: number,
-    status: "ok" | "error", detail?: string): void {
+    status: "ok" | "error", detail?: string, measuredDurationMs = endedMs - startedMs): void {
     try {
       deps.store.recordStageTiming?.(taskId, {
         phase,
         startedAt: timingStamp(startedMs),
         endedAt: timingStamp(Math.max(startedMs, endedMs)),
-        durationMs: Math.max(0, endedMs - startedMs),
+        durationMs: Math.max(0, measuredDurationMs),
         status,
         operationId: taskId,
         ...(detail ? { detail } : {}),
@@ -582,9 +583,12 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     let completionRecorded = false;
     let terminalObserved = false;
     let dispatchStartedMs: number | undefined;
+    let dispatchStartedTick: number | undefined;
     let latencyTemperature: LatencyTemperature = "cold";
     const turnStartedMs = Date.now();
+    const turnStartedTick = performance.now();
     let runtimeStartedMs = turnStartedMs;
+    let runtimeStartedTick = turnStartedTick;
     const storedTask = deps.store.getTask?.(taskId);
     const createdMs = storedTask ? Date.parse(storedTask.createdAt) : Number.NaN;
     if (Number.isFinite(createdMs) && createdMs <= turnStartedMs) {
@@ -593,12 +597,14 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     const recordCompletion = (status: "ok" | "error", detail?: string): void => {
       if (completionRecorded) return;
       completionRecorded = true;
-      recordTurnTiming(taskId, "completion", turnStartedMs, Date.now(), status, detail);
-      if (dispatchStartedMs !== undefined) {
+      const endedMs = Date.now();
+      const endedTick = performance.now();
+      recordTurnTiming(taskId, "completion", turnStartedMs, endedMs, status, detail, endedTick - turnStartedTick);
+      if (dispatchStartedMs !== undefined && dispatchStartedTick !== undefined) {
         latencyTelemetry.record({
           kind: "action_completion",
           temperature: latencyTemperature,
-          durationMs: Date.now() - dispatchStartedMs,
+          durationMs: endedTick - dispatchStartedTick,
           status,
         });
       }
@@ -606,15 +612,16 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     try {
       emitState(profile);
       runtimeStartedMs = Date.now();
+      runtimeStartedTick = performance.now();
       let connection: ManagedProviderConnection;
       try {
         const prior = supervisor.snapshots().find((candidate) => candidate.connectionId === profile.connectionId);
         latencyTemperature = prior && ["ready", "working", "paused"].includes(prior.status) ? "warm" : "cold";
         connection = await supervisor.ensureConnection(profile);
-        recordTurnTiming(taskId, "runtime-acquire", runtimeStartedMs, Date.now(), "ok");
+        recordTurnTiming(taskId, "runtime-acquire", runtimeStartedMs, Date.now(), "ok", undefined, performance.now() - runtimeStartedTick);
       } catch (error) {
         const detail = errorText(error);
-        recordTurnTiming(taskId, "runtime-acquire", runtimeStartedMs, Date.now(), "error", detail);
+        recordTurnTiming(taskId, "runtime-acquire", runtimeStartedMs, Date.now(), "error", detail, performance.now() - runtimeStartedTick);
         throw error;
       }
       emitState(profile);
@@ -631,7 +638,9 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       const providerPrompt = needsBootstrap ? `${context.prompt}\n\n${text}` : text;
       const task = { taskId, connectionId: profile.connectionId, handle: profile.handle, provider: profile.provider, cwd: profile.cwd, generation, prompt: providerPrompt } as const;
       const dispatchStart = Date.now();
+      const dispatchStartTick = performance.now();
       dispatchStartedMs = dispatchStart;
+      dispatchStartedTick = dispatchStartTick;
       for await (const event of supervisor.dispatch(task)) {
         // A stopped/replaced turn may still yield one queued provider event
         // while its transport is shutting down. Only the currently fenced
@@ -648,11 +657,11 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           try {
             markQueued(profile, taskId, kind, context);
           } catch (error) {
-            recordTurnTiming(taskId, "provider-acceptance", dispatchStart, Date.now(), "error", errorText(error));
+            recordTurnTiming(taskId, "provider-acceptance", dispatchStart, Date.now(), "error", errorText(error), performance.now() - dispatchStartTick);
             acceptanceRecorded = true;
             throw error;
           }
-          recordTurnTiming(taskId, "provider-acceptance", dispatchStart, Date.now(), "ok");
+          recordTurnTiming(taskId, "provider-acceptance", dispatchStart, Date.now(), "ok", undefined, performance.now() - dispatchStartTick);
           acceptanceRecorded = true;
           accepted = true;
           if (needsBootstrap) bootstrappedGenerations.set(profile.connectionId, generation);
@@ -662,15 +671,17 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         else if (event.kind === "text") {
           if (!firstVisibleAction) {
             firstVisibleAction = true;
-            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok");
-            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: Date.now() - dispatchStart, status: "ok" });
+            const firstEventTick = performance.now();
+            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok", undefined, firstEventTick - dispatchStartTick);
+            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: firstEventTick - dispatchStartTick, status: "ok" });
           }
           emit({ kind: "say", handle: profile.handle, provider: profile.provider, text: event.text, runId, ...(event.delta ? { delta: true } : {}) });
         } else if (event.kind === "tool") {
           if (!firstVisibleAction) {
             firstVisibleAction = true;
-            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok");
-            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: Date.now() - dispatchStart, status: "ok" });
+            const firstEventTick = performance.now();
+            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok", undefined, firstEventTick - dispatchStartTick);
+            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: firstEventTick - dispatchStartTick, status: "ok" });
           }
           emit({ kind: "tool", handle: profile.handle, provider: profile.provider, name: event.name, runId });
         }
@@ -678,8 +689,9 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           terminalObserved = true;
           if (!firstVisibleAction) {
             firstVisibleAction = true;
-            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok");
-            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: Date.now() - dispatchStart, status: event.isError ? "error" : "ok" });
+            const firstEventTick = performance.now();
+            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok", undefined, firstEventTick - dispatchStartTick);
+            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: firstEventTick - dispatchStartTick, status: event.isError ? "error" : "ok" });
           }
           emit({ kind: "result", handle: profile.handle, provider: profile.provider, text: event.text, isError: event.isError, runId });
           recordCompletion(event.isError ? "error" : "ok", event.isError ? "provider returned an error result" : undefined);
@@ -713,7 +725,8 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       terminalObserved = true;
       const reason = errorText(error);
       if (!acceptanceRecorded) {
-        recordTurnTiming(taskId, "provider-acceptance", dispatchStartedMs ?? runtimeStartedMs, Date.now(), "error", reason);
+        recordTurnTiming(taskId, "provider-acceptance", dispatchStartedMs ?? runtimeStartedMs, Date.now(), "error", reason,
+          performance.now() - (dispatchStartedTick ?? runtimeStartedTick));
         acceptanceRecorded = true;
       }
       recordCompletion("error", reason);
@@ -728,7 +741,8 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       accept(taskId, { ok: false, error: reason });
     } finally {
       if (!acceptanceRecorded) {
-        recordTurnTiming(taskId, "provider-acceptance", dispatchStartedMs ?? runtimeStartedMs, Date.now(), "error", "provider ended before acceptance");
+        recordTurnTiming(taskId, "provider-acceptance", dispatchStartedMs ?? runtimeStartedMs, Date.now(), "error", "provider ended before acceptance",
+          performance.now() - (dispatchStartedTick ?? runtimeStartedTick));
       }
       recordCompletion(!fenced.has(taskId) && terminalObserved ? "ok" : "error",
         fenced.has(taskId) ? "task was fenced before completion" : terminalObserved ? undefined : "provider ended without a terminal event");
