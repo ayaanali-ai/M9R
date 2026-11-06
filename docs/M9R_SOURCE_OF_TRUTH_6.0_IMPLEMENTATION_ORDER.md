@@ -681,11 +681,25 @@ This is a status record, not a release claim.
   legacy contract failures and are excluded from the aggregate suite; they must
   not be described as passing. Other focused suites passed in the preceding
   verification pass, but that is not a complete release suite.
-- The installed local candidate was built from a dirty source tree. The owner
-  reported that a recent simple task worked, which is useful smoke evidence but
-  does not establish repeatable task acceptance or a clean candidate build.
-- Before demo sign-off, rebuild from a committed clean source tree and verify
-  artifact provenance, broker health, and provider connectivity. Then retain
+- A clean candidate was built from commit `595f3703` at
+  `engine/candidates/2026-11-06T22-14-29-058Z-595f3703`. Its runtime build ID is
+  `fd96a445831ed0073adf0e1dab435bc6afc006d00f0a64ee467003850ee00341`, its
+  package SHA-256 is
+  `1805fcc0c68d20b19797f2a8c2f0d82b27165a5a5b65946ba3f3d0945f4ea922`, and
+  all candidate receipt checks passed. Every one of its 183 artifact hashes
+  matches the binaries currently installed under `%USERPROFILE%\.m9r\bin`.
+  The installed `m9r-build-info.json` still records the older dirty source
+  identity (`e3700b3f`), so installed provenance has not yet been aligned.
+- The candidate was promoted to the local accepted-runtime policy after the
+  installed-artifact comparison. `npm run test:installer` currently reports
+  5/7: its two package tests read stale `engine/dist` (build ID
+  `4cdd5ef3`, source `3ab04a38`) instead of this isolated candidate. The
+  candidate's own package/runtime/checksum verification passed; the installer
+  suite has not yet exercised this candidate package.
+- The owner reported that a recent simple task worked. This is useful smoke
+  evidence but does not establish repeatable task acceptance.
+- Before demo sign-off, install this exact promoted candidate and verify its
+  installed manifest, broker health, and provider connectivity. Then retain
   raw task evidence for: one end-to-end single-agent task with a checked effect;
   two distinct agents coordinating and returning attributed results; a user
   continuing to work during the task without focus or pointer theft; and
