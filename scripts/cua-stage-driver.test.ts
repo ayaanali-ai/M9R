@@ -570,6 +570,7 @@ function makeSdk(options: {
   callToolResult?: Record<string, unknown>;
   callToolErrors?: Record<string, Error>;
   moveCursorError?: Error;
+  moveCursorBarrier?: (input: unknown) => Promise<void>;
   calls: Array<{ method: string; value?: unknown }>;
 }) {
   // Legacy CUA expectations in this file were formerly also the only source
@@ -628,6 +629,7 @@ function makeSdk(options: {
     async setAgentCursorEnabled(input: unknown) { options.calls.push({ method: "setAgentCursorEnabled", value: input }); return { isError: false }; },
     async moveCursor(input: unknown) {
       options.calls.push({ method: "moveCursor", value: input });
+      await options.moveCursorBarrier?.(input);
       if (options.moveCursorError) return { isError: true, text: options.moveCursorError.message };
       return { isError: false };
     },
@@ -786,6 +788,80 @@ test("moves and verifies Cua's ghost cursor through the typed exact-window API",
     "app input does not use the overlay adapter");
   assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession"].includes(method)), ["startSession"],
     "the overlay session supports cursor presentation only and is not involved in app input");
+}));
+
+test("native click waits for the matching overlay position when cursor presentation is healthy", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let releaseMove!: () => void;
+  let announceMove!: () => void;
+  const moveStarted = new Promise<void>((resolve) => { announceMove = resolve; });
+  const moveGate = new Promise<void>((resolve) => { releaseMove = resolve; });
+  let moveCompleted = false;
+  const stage = stageDependencies(root);
+  const invokeNative = stage.invokeNative!;
+  stage.invokeNative = async (request) => {
+    if (request.op === "sendClick") assert.equal(moveCompleted, true, "native pointer delivery must follow its visible cursor move");
+    return invokeNative(request);
+  };
+  const driver = createCuaStageDriver({ stage,
+    loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorBarrier: async () => {
+      announceMove();
+      await moveGate;
+      moveCompleted = true;
+    } }) as never,
+  });
+  const identity = { handle: "codex", sessionId: "cursor-follows-click" };
+  await driver.showAgentCursor("stage", identity);
+  const click = driver.click("stage", 42, 24, identity);
+  await moveStarted;
+  assert.equal(nativeFixture(root).calls.some((call) => call.op === "sendClick"), false,
+    "the real click cannot overtake an in-flight overlay move");
+  releaseMove();
+  await click;
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1);
+  await driver.shutdown();
+}));
+
+test("a stalled overlay move is bounded and cannot block native input", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorBarrier: async () => new Promise<void>(() => {}) }) as never,
+  });
+  const identity = { handle: "codex", sessionId: "cursor-overlay-stall" };
+  await driver.showAgentCursor("stage", identity);
+  const result = await driver.click("stage", 42, 24, identity);
+  assert.equal(result.outcome.status, "unverified");
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1,
+    "a presentation-only compositor stall does not suppress a valid native click");
+  await driver.shutdown();
+}));
+
+test("cursor moves for one agent identity are serialized to preserve action order", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let releaseFirst!: () => void;
+  let announceFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { announceFirst = resolve; });
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorBarrier: async (input) => {
+      if ((input as { x?: number }).x === 10) { announceFirst(); await firstGate; }
+    } }) as never,
+  });
+  const identity = { handle: "codex", sessionId: "cursor-ordered" };
+  await driver.showAgentCursor("stage", identity);
+  const first = driver.moveCursor("stage", 10, 20, identity);
+  await firstStarted;
+  const second = driver.moveCursor("stage", 80, 30, identity);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter((call) => call.method === "moveCursor").map((call) => (call.value as { x: number }).x), [10],
+    "the next overlay move waits behind the currently moving cursor");
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(calls.filter((call) => call.method === "moveCursor").map((call) => (call.value as { x: number }).x), [10, 80]);
+  await driver.shutdown();
 }));
 
 test("a background refusal of the ghost-cursor overlay is a clean typed refusal, never an uncertain plain error", async () => withRoot(async (root) => {
@@ -1238,6 +1314,24 @@ test("shows a distinct agent label on each native cursor and configures adaptive
   for (const identity of identities) await driver.closeAgentCursor(identity);
 }));
 
+test("reapplies the never-hide cursor setting after an idle session refresh", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  let at = new Date("2026-11-05T12:00:00.000Z");
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), now: () => at,
+    loadSdk: async () => makeSdk({ testRoot: root, calls }) as never,
+  });
+  const identity = { handle: "codex", sessionId: "cursor-never-hide-refresh" };
+  await driver.showAgentCursor("stage", identity);
+  at = new Date(at.getTime() + 60_001);
+  await driver.showAgentCursor("stage", identity);
+  const settings = calls.filter((call) => call.method === "setAgentCursorMotion")
+    .map((call) => call.value as { idleHideMs?: number });
+  assert.equal(settings.length, 2, "a refreshed CUA session must reassert cursor visibility policy");
+  assert.ok(settings.every((setting) => setting.idleHideMs === 0), "idleHideMs=0 means the overlay remains visible during long task pauses");
+  await driver.shutdown();
+}));
+
 test("owner desktop capture does not use legacy capture-scope session escalation", async () => withRoot(async (root) => {
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await registerOwnerPreview(root, identity);
@@ -1587,14 +1681,18 @@ test("scroll and drag use native screen coordinates and validate bounds before d
   assert.equal(scroll?.amount, -3);
   assert.equal(scroll?.pid, 4321);
   assert.equal(scroll?.windowId, windowId);
-  await driver.drag("stage", 10, 20, 100, 80);
+  const identity = { handle: "codex", sessionId: "window-drag-cursor" };
+  await driver.showAgentCursor("stage", identity);
+  await driver.drag("stage", 10, 20, 100, 80, identity);
   const drag = native.find((call) => call.op === "sendDrag");
   assert.deepEqual({ fromX: drag?.fromX, fromY: drag?.fromY, toX: drag?.toX, toY: drag?.toY },
     { fromX: 110, fromY: 70, toX: 200, toY: 130 });
   assert.equal(drag?.pid, 4321);
   assert.equal(drag?.windowId, windowId);
+  assert.deepEqual(calls.filter((call) => call.method === "moveCursor").map((call) => (call.value as { x: number; y: number }).x), [10, 100],
+    "the presentation cursor follows the registered-window drag from its grab point to its drop point");
   const callsBeforeInvalid = native.filter((call) => call.op === "sendDrag").length;
-  await assert.rejects(() => driver.drag("stage", 10, 20, 200, 80), /Both drag points must fall inside/);
+  await assert.rejects(() => driver.drag("stage", 10, 20, 200, 80, identity), /Both drag points must fall inside/);
   assert.equal(native.filter((call) => call.op === "sendDrag").length, callsBeforeInvalid);
   assert.equal(calls.some((call) => ["scroll", "drag"].includes(call.method)), false);
 }));

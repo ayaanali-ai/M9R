@@ -402,6 +402,7 @@ interface CursorVisiblePoll {
  * a cursor that never confirms still fails closed and no input is sent.
  */
 const DEFAULT_CURSOR_VISIBLE_POLL: CursorVisiblePoll = { attempts: 6, intervalMs: 150 };
+const CURSOR_PRESENTATION_ACTION_WAIT_MS = 250;
 
 function validCursorVisiblePoll(poll: CursorVisiblePoll | undefined): CursorVisiblePoll {
   if (poll === undefined) return DEFAULT_CURSOR_VISIBLE_POLL;
@@ -1068,10 +1069,35 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const sessionRefreshedAt = new Map<string, number>();
   const sessionRefreshes = new Map<string, Promise<void>>();
   const cursorStartSlots = new Map<string, number>();
+  const cursorPresentationQueues = new Map<string, Promise<void>>();
   // Cursor presentation can be requested concurrently by several provider
   // deliveries. Keep slot reservation and the initial overlay move atomic so
   // two providers cannot observe the same free slot and overlap at startup.
   let cursorSlotQueue: Promise<void> = Promise.resolve();
+
+  async function withCursorPresentation<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const previous = cursorPresentationQueues.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(run);
+    const tail = current.then(() => undefined, () => undefined);
+    cursorPresentationQueues.set(key, tail);
+    try { return await current; }
+    finally { if (cursorPresentationQueues.get(key) === tail) cursorPresentationQueues.delete(key); }
+  }
+
+  async function bestEffortCursorPresentation(key: string, run: () => Promise<unknown>): Promise<void> {
+    // Do not let an unhealthy visual compositor hold up real input. The
+    // queued operation remains serialized if it completes later, so a late
+    // overlay move cannot overtake a newer one and leave the cursor stale.
+    const presentation = withCursorPresentation(key, run).catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([presentation, new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, CURSOR_PRESENTATION_ACTION_WAIT_MS);
+      })]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
   const desktopCaptures = new Map<string, CachedDesktopCapture>();
   const desktopInputTargets = new Map<string, DesktopInputTarget>();
   // Keep the semantics from the observation that issued each raw UIA ref.
@@ -1219,7 +1245,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       // enable/session-state check still fails closed if the transport died.
       const motionStyle = runtime.sdk.CursorMotionStyle?.Adaptive;
       const motionTiming = runtime.sdk.CursorMotionTiming?.Fitts;
-      if (!alreadyTracked && typeof motionStyle === "number" && typeof motionTiming === "number") {
+      if (typeof motionStyle === "number" && typeof motionTiming === "number") {
         try {
           const motion = await timed("cursor-motion", () => runtime.driver.setAgentCursorMotion({
             session: details.session,
@@ -1269,29 +1295,31 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
    */
   async function showAgentCursor(name: string, identity: CuaAgentCursorIdentity): Promise<{ label: string; visible: true }> {
     const { runtime, session } = await ensureAgentSession(identity, name);
-    resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not show the agent cursor before the first desktop action.");
-    await withCursorSlotLock(async () => {
-      if (cursorStartSlots.has(session.key)) return;
-      const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
-      const occupied = new Set(cursorStartSlots.values());
-      let slot = 0;
-      while (occupied.has(slot)) slot++;
-      if (slot >= 16) throw new Error("No free agent cursor starting position is available.");
-      cursorStartSlots.set(session.key, slot);
-      const x = Math.floor(screen.width * ((slot % 4) + 1) / 5);
-      const y = Math.floor(screen.height * (Math.floor(slot / 4) + 1) / 6);
-      try {
-        // The existing window scope is overlay-only in desktop-screen coordinates.
-        // Desktop scope would move the real pointer and must never be used here.
-        resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x, y, session: session.session })), "Cua Driver could not place the agent cursor.");
-        const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
-        if (!state.enabled || state.x !== x || state.y !== y) {
-          throw new DesktopInputNotDispatchedError("Cua Driver did not confirm the agent cursor starting position.", "position-unconfirmed");
+    await withCursorPresentation(session.key, async () => {
+      resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not show the agent cursor before the first desktop action.");
+      await withCursorSlotLock(async () => {
+        if (cursorStartSlots.has(session.key)) return;
+        const screen = screenSizeFromResult(await runtime.driver.getScreenSize({ session: session.session }));
+        const occupied = new Set(cursorStartSlots.values());
+        let slot = 0;
+        while (occupied.has(slot)) slot++;
+        if (slot >= 16) throw new Error("No free agent cursor starting position is available.");
+        cursorStartSlots.set(session.key, slot);
+        const x = Math.floor(screen.width * ((slot % 4) + 1) / 5);
+        const y = Math.floor(screen.height * (Math.floor(slot / 4) + 1) / 6);
+        try {
+          // The existing window scope is overlay-only in desktop-screen coordinates.
+          // Desktop scope would move the real pointer and must never be used here.
+          resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x, y, session: session.session })), "Cua Driver could not place the agent cursor.");
+          const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
+          if (!state.enabled || state.x !== x || state.y !== y) {
+            throw new DesktopInputNotDispatchedError("Cua Driver did not confirm the agent cursor starting position.", "position-unconfirmed");
+          }
+        } catch (error) {
+          cursorStartSlots.delete(session.key);
+          throw error;
         }
-      } catch (error) {
-        cursorStartSlots.delete(session.key);
-        throw error;
-      }
+      });
     });
     if (!await confirmCursorVisible(name, () => runtime.driver.getSession({ session: session.session }))) {
       // A missing compositor is not a dead input connection. Never close a
@@ -1624,48 +1652,51 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y, enabled: false, visible: false };
     }
     if (!requireProof) {
-      // Presentation never authorizes or gates target input. Explicit cursor
-      // tools can request proof; mutations only schedule a best-effort overlay.
-      void (async () => {
+      // Keep the visual cursor in the same order as dispatched actions. This
+      // await is presentation-only: failures remain swallowed and do not gate
+      // the native target action.
+      await bestEffortCursorPresentation(session.key, async () => {
         resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cursor presentation unavailable.");
         if (point.shellControl) {
           await runtime.driver.callTool("move_cursor", JSON.stringify({ scope: "window", x: point.screenPoint.x, y: point.screenPoint.y, session: session.session }));
         } else {
           await runtime.driver.moveCursor({ ...point.localPoint, target: new runtime.sdk.ActionTarget.Window(point.target), session: session.session });
         }
-      })().catch(() => undefined);
+      });
       return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y, enabled: false, visible: false };
     }
-    resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not enable the desktop agent cursor.");
-    if (point.shellControl) {
-      // The Windows shell HWND is not exposed by Cua's window inventory, so it
-      // cannot be represented by ActionTarget.Window. Its documented window
-      // scope moves only this agent's overlay in screen coordinates; Desktop
-      // scope would move the owner's physical pointer and is never used.
-      resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({
-        scope: "window", x: point.screenPoint.x, y: point.screenPoint.y, session: session.session,
-      })), "Cua Driver could not move the labeled shell overlay cursor.");
-    } else {
-      const target = new runtime.sdk.ActionTarget.Window(point.target);
-      resultError(await runtime.driver.moveCursor({ ...point.localPoint, target, session: session.session }), "Cua Driver could not move the labeled cursor on the exact window.");
-    }
-    const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
-    // Cua reports a window-target cursor in the same window-local screenshot
-    // space used by moveCursor. The legacy shell route reports desktop-screen
-    // coordinates because it has no HWND target. Comparing both routes to the
-    // physical screen point made every scaled desktop capture fail even though
-    // the synthetic cursor had moved correctly.
-    const expected = point.shellControl ? point.screenPoint : point.localPoint;
-    await timed("cursor-position", async () => {
-      if (!state.enabled || state.x === undefined || state.y === undefined
-        || Math.abs(state.x - expected.x) > 1 || Math.abs(state.y - expected.y) > 1) {
-        throw new DesktopInputNotDispatchedError(`Cua Driver did not confirm the requested desktop cursor position (expected ${expected.x},${expected.y}; actual ${state.x ?? "missing"},${state.y ?? "missing"}; enabled ${state.enabled}).`, "position-unconfirmed");
+    return withCursorPresentation(session.key, async () => {
+      resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not enable the desktop agent cursor.");
+      if (point.shellControl) {
+        // The Windows shell HWND is not exposed by Cua's window inventory, so it
+        // cannot be represented by ActionTarget.Window. Its documented window
+        // scope moves only this agent's overlay in screen coordinates; Desktop
+        // scope would move the owner's physical pointer and is never used.
+        resultError(await runtime.driver.callTool("move_cursor", JSON.stringify({
+          scope: "window", x: point.screenPoint.x, y: point.screenPoint.y, session: session.session,
+        })), "Cua Driver could not move the labeled shell overlay cursor.");
+      } else {
+        const target = new runtime.sdk.ActionTarget.Window(point.target);
+        resultError(await runtime.driver.moveCursor({ ...point.localPoint, target, session: session.session }), "Cua Driver could not move the labeled cursor on the exact window.");
       }
-    }, { detail: point.shellControl ? "space=desktop-screen" : "space=window-local" });
-    if (!await confirmCursorVisible(undefined, () => runtime.driver.getSession({ session: session.session }))) {
-      throw new DesktopInputNotDispatchedError("Cua Driver moved the cursor but did not confirm its overlay is visible on the owner's desktop within the bounded confirmation window.", "overlay-not-visible");
-    }
-    return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y, enabled: true, visible: true };
+      const state = cursorStateFromResult(await runtime.driver.getAgentCursorState({ session: session.session }));
+      // Cua reports a window-target cursor in the same window-local screenshot
+      // space used by moveCursor. The legacy shell route reports desktop-screen
+      // coordinates because it has no HWND target. Comparing both routes to the
+      // physical screen point made every scaled desktop capture fail even though
+      // the synthetic cursor had moved correctly.
+      const expected = point.shellControl ? point.screenPoint : point.localPoint;
+      await timed("cursor-position", async () => {
+        if (!state.enabled || state.x === undefined || state.y === undefined
+          || Math.abs(state.x - expected.x) > 1 || Math.abs(state.y - expected.y) > 1) {
+          throw new DesktopInputNotDispatchedError(`Cua Driver did not confirm the requested desktop cursor position (expected ${expected.x},${expected.y}; actual ${state.x ?? "missing"},${state.y ?? "missing"}; enabled ${state.enabled}).`, "position-unconfirmed");
+        }
+      }, { detail: point.shellControl ? "space=desktop-screen" : "space=window-local" });
+      if (!await confirmCursorVisible(undefined, () => runtime.driver.getSession({ session: session.session }))) {
+        throw new DesktopInputNotDispatchedError("Cua Driver moved the cursor but did not confirm its overlay is visible on the owner's desktop within the bounded confirmation window.", "overlay-not-visible");
+      }
+      return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y, enabled: true, visible: true };
+    });
   }
 
   async function moveAndVerifyCursor(input: { driver?: CuaDriverLike; sdk?: CuaSdk; session: string; pid: number; windowId: bigint }, x: number, y: number, frame: CuaStageWindowFrame, requireProof = false): Promise<CuaStageCursorProof> {
@@ -1676,25 +1707,30 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { x, y, screenX: x, screenY: y, enabled: false, visible: false };
     }
     if (!requireProof) {
-      void (async () => {
+      // Await the visual move so a fast native click cannot overtake it. The
+      // overlay is optional presentation; any compositor error is ignored and
+      // the native action remains eligible to run.
+      await bestEffortCursorPresentation(input.session, async () => {
         resultError(await driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cursor presentation unavailable.");
         await driver.moveCursor({ x, y, target: new sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session });
-      })().catch(() => undefined);
+      });
       return { x, y, screenX: x, screenY: y, enabled: false, visible: false };
     }
-    const point = cursorScreenPoint(x, y, frame);
-    resultErrorTyped(await driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
-    resultErrorTyped(await driver.moveCursor({ x, y, target: new sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session }), "Cua Driver could not move the agent cursor.");
-    const state = cursorStateFromResult(await driver.getAgentCursorState({ session: input.session }));
-    await timed("cursor-position", async () => {
-      if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - x) > 1 || Math.abs(state.y - y) > 1) {
-        throw new DesktopInputNotDispatchedError(`Cua Driver did not confirm the requested agent cursor position on this stage window (expected ${x},${y}; actual ${state.x ?? "missing"},${state.y ?? "missing"}).`, "position-unconfirmed");
+    return withCursorPresentation(input.session, async () => {
+      const point = cursorScreenPoint(x, y, frame);
+      resultErrorTyped(await driver.setAgentCursorEnabled({ session: input.session, enabled: true }), "Cua Driver could not enable the agent cursor.");
+      resultErrorTyped(await driver.moveCursor({ x, y, target: new sdk.ActionTarget.Window({ pid: input.pid, windowId: input.windowId }), session: input.session }), "Cua Driver could not move the agent cursor.");
+      const state = cursorStateFromResult(await driver.getAgentCursorState({ session: input.session }));
+      await timed("cursor-position", async () => {
+        if (!state.enabled || state.x === undefined || state.y === undefined || Math.abs(state.x - x) > 1 || Math.abs(state.y - y) > 1) {
+          throw new DesktopInputNotDispatchedError(`Cua Driver did not confirm the requested agent cursor position on this stage window (expected ${x},${y}; actual ${state.x ?? "missing"},${state.y ?? "missing"}).`, "position-unconfirmed");
+        }
+      }, { detail: "space=window-local" });
+      if (!await confirmCursorVisible(undefined, () => driver.getSession({ session: input.session }))) {
+        throw new DesktopInputNotDispatchedError("Cua Driver moved the agent cursor but did not confirm that its desktop overlay is visible within the bounded confirmation window.", "overlay-not-visible");
       }
-    }, { detail: "space=window-local" });
-    if (!await confirmCursorVisible(undefined, () => driver.getSession({ session: input.session }))) {
-      throw new DesktopInputNotDispatchedError("Cua Driver moved the agent cursor but did not confirm that its desktop overlay is visible within the bounded confirmation window.", "overlay-not-visible");
-    }
-    return { x, y, screenX: point.x, screenY: point.y, enabled: true as const, visible: true as const };
+      return { x, y, screenX: point.x, screenY: point.y, enabled: true as const, visible: true as const };
+    });
   }
 
   async function hideAgentCursor(driver: CuaDriverLike, session: string): Promise<void> {
@@ -2964,6 +3000,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
             await manager.sendDrag(pid, windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
           }),
       });
+      // The native pointer ends at the drop point. Keep the presentation cursor
+      // there as well so a successful drag does not leave the agent marker at
+      // its old start position after the owner's physical pointer is restored.
+      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, toX, toY, before);
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
