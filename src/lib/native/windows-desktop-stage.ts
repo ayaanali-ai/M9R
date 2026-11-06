@@ -871,17 +871,20 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffff_ffff) throw new Error("Invalid owned process id.");
     const result = await invokeNative({ op: "listOwnedWindows", pid });
     if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Owned-window discovery failed.");
-    if (result.windows.some((window) => window.pid !== pid
-      || typeof window.windowId !== "string" || !WINDOW_ID_RE.test(window.windowId)
-      || !/[^0]/.test(window.windowId.replace(/^0[xX]/, ""))
-      || typeof window.title !== "string" || !Number.isFinite(window.width) || !Number.isFinite(window.height)
-      || window.width < 80 || window.height < 60
-      || (window.zOrder !== undefined && (!Number.isSafeInteger(window.zOrder) || window.zOrder < 0))
-      || (window.processPath != null && (typeof window.processPath !== "string" || window.processPath.length === 0 || window.processPath.length > 32_768))
-      || (window.appUserModelId != null && (typeof window.appUserModelId !== "string" || !/^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(window.appUserModelId))))) {
-      throw new Error("Owned-window discovery returned an invalid identity.");
-    }
-    return result.windows;
+    // Window enumeration can include helper, hidden, or otherwise non-targetable
+    // HWNDs alongside the real app window. Rejecting the entire response because
+    // one sibling is malformed makes a valid app launch fail before exact app
+    // matching gets a chance to select its window. Filter candidates here; the
+    // caller still selects by exact process/app identity and validates the chosen
+    // PID/HWND again before binding or dispatching input.
+    return result.windows.filter((window) => Number.isSafeInteger(window?.pid) && window.pid === pid
+      && typeof window.windowId === "string" && WINDOW_ID_RE.test(window.windowId)
+      && /[^0]/.test(window.windowId.replace(/^0[xX]/, ""))
+      && typeof window.title === "string" && Number.isFinite(window.width) && Number.isFinite(window.height)
+      && window.width >= 80 && window.height >= 60
+      && (window.zOrder === undefined || (Number.isSafeInteger(window.zOrder) && window.zOrder >= 0))
+      && (window.processPath == null || (typeof window.processPath === "string" && window.processPath.length > 0 && window.processPath.length <= 32_768))
+      && (window.appUserModelId == null || (typeof window.appUserModelId === "string" && /^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(window.appUserModelId))));
   }
 
   async function listVisibleWindows() {

@@ -120,8 +120,24 @@ test("owned launch discovery accepts windows only from the exact child process",
   assert.equal((await manager.listOwnedWindows("launch-test", 4321))[0]?.windowId, "1234");
   assert.deepEqual(requests.at(-1), { op: "listOwnedWindows", pid: 4321 });
   wrongProcess = true;
-  await assert.rejects(manager.listOwnedWindows("launch-test", 4321), /invalid identity/);
+  assert.deepEqual(await manager.listOwnedWindows("launch-test", 4321), [],
+    "a mismatched PID is discarded as a candidate and can never be selected for this process");
   await assert.rejects(manager.listOwnedWindows("launch-test", 0), /Invalid owned process/);
+}));
+
+test("owned-window discovery keeps a valid app candidate when sibling HWND records are malformed", async () => withRoot(async (root) => {
+  const expected = { pid: 4321, windowId: "0x1234", title: "Calculator", width: 800, height: 600 };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async (request) => request.op === "listOwnedWindows" ? { ok: true, windows: [
+      { pid: 4321, windowId: "0x1234", title: "Calculator", width: 800, height: 600 },
+      { pid: 4321, windowId: "0x5678", title: "Hidden helper", width: 0, height: 0 },
+      { pid: 9999, windowId: "0x9999", title: "Other process", width: 900, height: 700 },
+      { pid: 4321, windowId: "not-a-hwnd", title: "Malformed helper", width: 800, height: 600 },
+    ] } : { ok: true },
+  });
+  await manager.create("launch-test");
+  assert.deepEqual(await manager.listOwnedWindows("launch-test", 4321), [expected],
+    "non-actionable siblings must not block exact selection of the verified app window");
 }));
 
 function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
