@@ -695,12 +695,15 @@ This is a status record, not a release claim.
   installed package, and started the pill. A post-install hash comparison found
   the installed build ID and source commit match the candidate; all 183
   artifacts match with zero mismatches and `sourceDirty: false`.
-- `npm run test:installer` currently reports 5/7: its two package tests read
-  stale `engine/dist` (build ID `4cdd5ef3`, source `3ab04a38`) instead of this
-  isolated candidate. The candidate package itself passed its runtime manifest,
-  artifact set, accepted pill, and checksum checks, and the actual candidate
-  installer completed. The stale generated `engine/dist` test path remains to
-  be reconciled before claiming the installer suite is fully green.
+- The previous `npm run test:installer` run reported 5/7 because the generated
+  `engine/dist` was stale (build ID `4cdd5ef3`, source `3ab04a38`). The old
+  `engine/dist` and `cli/dist` were preserved under
+  `diagnostics/demo-acceptance-2026-11-06/previous-build-outputs`, and both
+  generated outputs were aligned to this exact candidate and hash-verified.
+  The post-sync installer-suite run then emitted no test results for about 190
+  seconds and was stopped. Therefore the automated installer suite is still
+  unresolved and must not be called green. The actual candidate installer did
+  complete successfully, and its installed manifest/artifact checks passed.
 - The owner reported that a simple task worked before the clean reinstall. No
   fresh owner task has been run after this install, so live task acceptance is
   still open.
