@@ -8,15 +8,15 @@ use windows::Win32::{
         COINIT_MULTITHREADED,
     },
     UI::Accessibility::{
-        CUIAutomation8, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-        IUIAutomationLegacyIAccessiblePattern, IUIAutomationSelectionItemPattern,
-        IUIAutomationTogglePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern,
-        UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
-        UIA_EditControlTypeId, UIA_HyperlinkControlTypeId, UIA_InvokePatternId,
-        UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
-        UIA_MenuItemControlTypeId, UIA_RadioButtonControlTypeId, UIA_SelectionItemPatternId,
-        UIA_TabItemControlTypeId, UIA_TogglePatternId, UIA_TreeItemControlTypeId,
-        UIA_ValuePatternId,
+        CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
+        IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
+        IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+        IUIAutomationValuePattern, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
+        UIA_ComboBoxControlTypeId, UIA_EditControlTypeId, UIA_HyperlinkControlTypeId,
+        UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId,
+        UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId, UIA_RadioButtonControlTypeId,
+        UIA_SelectionItemPatternId, UIA_TabItemControlTypeId, UIA_TogglePatternId,
+        UIA_TreeItemControlTypeId, UIA_ValuePatternId,
     },
     UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -26,6 +26,20 @@ use windows::Win32::{
 
 const MAX_DESKTOP_STRUCTURE_ELEMENTS: usize = 4096;
 const MAX_DESKTOP_STRUCTURE_DEPTH: usize = 64;
+
+/// Create one UI Automation client with implicit target focusing disabled.
+/// Explicitly foregrounded input remains in its separate dispatch path; this
+/// setting only prevents UIA patterns from activating a background target as
+/// a side effect before invoking the requested semantic action.
+fn create_non_focusing_automation() -> windows::core::Result<IUIAutomation> {
+    let automation: IUIAutomation =
+        unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }?;
+    let automation2: IUIAutomation2 = automation.cast()?;
+    unsafe {
+        automation2.SetAutoSetFocus(false)?;
+    }
+    Ok(automation)
+}
 
 struct ComApartment;
 
@@ -61,9 +75,11 @@ pub fn control_at_point(value: &Value, invoke: bool) -> Result<Value, crate::Inp
     }
     let mut root_pid = 0;
     unsafe { GetWindowThreadProcessId(root, Some(&mut root_pid)) };
-    let automation: IUIAutomation =
-        unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
-            .map_err(|e| e.to_string())?;
+    let automation = create_non_focusing_automation().map_err(|error| {
+        crate::InputDispatchError::not_dispatched(format!(
+            "UI Automation could not disable implicit target focus; no control action was sent: {error}"
+        ))
+    })?;
     let hit = unsafe { automation.ElementFromPoint(point) }.map_err(|e| e.to_string())?;
     // A decorative, unnamed icon/glyph child is a common hit target for a
     // normal toolbar/taskbar button (the visible, accessible control is its
@@ -222,9 +238,9 @@ pub fn desktop_structure(value: &Value) -> Result<Value, String> {
         .ok()
         .map_err(|e| e.to_string())?;
     let _apartment = ComApartment;
-    let automation: IUIAutomation =
-        unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
-            .map_err(|e| e.to_string())?;
+    let automation = create_non_focusing_automation().map_err(|error| {
+        format!("UI Automation could not disable implicit target focus: {error}")
+    })?;
     let root = unsafe { automation.GetRootElement() }.map_err(|e| e.to_string())?;
     let walker: IUIAutomationTreeWalker =
         unsafe { automation.ControlViewWalker() }.map_err(|e| e.to_string())?;
@@ -304,9 +320,9 @@ pub fn window_structure(value: &Value) -> Result<Value, String> {
         .ok()
         .map_err(|e| e.to_string())?;
     let _apartment = ComApartment;
-    let automation: IUIAutomation =
-        unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
-            .map_err(|e| e.to_string())?;
+    let automation = create_non_focusing_automation().map_err(|error| {
+        format!("UI Automation could not disable implicit target focus: {error}")
+    })?;
     let hwnd = HWND(handle as *mut core::ffi::c_void);
     let root = unsafe { automation.ElementFromHandle(hwnd) }.map_err(|e| e.to_string())?;
     let walker: IUIAutomationTreeWalker =
@@ -473,16 +489,12 @@ fn walk_window_element(
 pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatchError> {
     use windows::core::BSTR;
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-        COINIT_MULTITHREADED,
-    };
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
     use windows::Win32::UI::Accessibility::{
-        CUIAutomation8, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-        IUIAutomationLegacyIAccessiblePattern, IUIAutomationSelectionItemPattern,
-        IUIAutomationTogglePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern,
-        UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId, UIA_SelectionItemPatternId,
-        UIA_TogglePatternId, UIA_ValuePatternId,
+        IUIAutomationElement, IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
+        IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+        IUIAutomationValuePattern, UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId,
+        UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
 
@@ -584,9 +596,11 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         }
     }
     let _apartment = Apartment;
-    let automation: IUIAutomation =
-        unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
-            .map_err(|e| crate::InputDispatchError::not_dispatched(e.to_string()))?;
+    let automation = create_non_focusing_automation().map_err(|error| {
+        crate::InputDispatchError::not_dispatched(format!(
+            "UI Automation could not disable implicit target focus; no semantic input was sent: {error}"
+        ))
+    })?;
     let walker: IUIAutomationTreeWalker = unsafe { automation.ControlViewWalker() }
         .map_err(|e| crate::InputDispatchError::not_dispatched(e.to_string()))?;
     let mut element: IUIAutomationElement = unsafe { automation.ElementFromHandle(hwnd) }
@@ -814,6 +828,34 @@ fn walk_desktop_elements(
 
 fn truncate_text(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_ui_automation_client_disables_automatic_target_focus() {
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .expect("initialize COM for the UI Automation setting check");
+        struct Apartment;
+        impl Drop for Apartment {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
+        }
+        let _apartment = Apartment;
+
+        let automation = create_non_focusing_automation().expect("create configured UIA client");
+        let automation2: IUIAutomation2 = automation.cast().expect("IUIAutomation2 interface");
+        assert!(
+            !unsafe { automation2.AutoSetFocus() }
+                .expect("read the configured AutoSetFocus value")
+                .as_bool(),
+            "semantic UIA calls must not automatically focus their target"
+        );
+    }
 }
 
 #[allow(non_upper_case_globals)]
