@@ -687,20 +687,25 @@ This is a status record, not a release claim.
   package SHA-256 is
   `1805fcc0c68d20b19797f2a8c2f0d82b27165a5a5b65946ba3f3d0945f4ea922`, and
   all candidate receipt checks passed. Every one of its 183 artifact hashes
-  matches the binaries currently installed under `%USERPROFILE%\.m9r\bin`.
-  The installed `m9r-build-info.json` still records the older dirty source
-  identity (`e3700b3f`), so installed provenance has not yet been aligned.
+  matches the binaries installed under `%USERPROFILE%\.m9r\bin` after the
+  candidate update.
 - The candidate was promoted to the local accepted-runtime policy after the
-  installed-artifact comparison. `npm run test:installer` currently reports
-  5/7: its two package tests read stale `engine/dist` (build ID
-  `4cdd5ef3`, source `3ab04a38`) instead of this isolated candidate. The
-  candidate's own package/runtime/checksum verification passed; the installer
-  suite has not yet exercised this candidate package.
-- The owner reported that a recent simple task worked. This is useful smoke
-  evidence but does not establish repeatable task acceptance.
-- Before demo sign-off, install this exact promoted candidate and verify its
-  installed manifest, broker health, and provider connectivity. Then retain
-  raw task evidence for: one end-to-end single-agent task with a checked effect;
+  installed-artifact comparison and then installed. The installer completed,
+  reported the managed broker as `running-current-build`, verified it from the
+  installed package, and started the pill. A post-install hash comparison found
+  the installed build ID and source commit match the candidate; all 183
+  artifacts match with zero mismatches and `sourceDirty: false`.
+- `npm run test:installer` currently reports 5/7: its two package tests read
+  stale `engine/dist` (build ID `4cdd5ef3`, source `3ab04a38`) instead of this
+  isolated candidate. The candidate package itself passed its runtime manifest,
+  artifact set, accepted pill, and checksum checks, and the actual candidate
+  installer completed. The stale generated `engine/dist` test path remains to
+  be reconciled before claiming the installer suite is fully green.
+- The owner reported that a simple task worked before the clean reinstall. No
+  fresh owner task has been run after this install, so live task acceptance is
+  still open.
+- Before demo sign-off, run and retain raw task evidence for: one fresh
+  end-to-end single-agent task with a checked effect;
   two distinct agents coordinating and returning attributed results; a user
   continuing to work during the task without focus or pointer theft; and
   pause/redirect/recovery without duplicate delivery. Run a three-agent demo
