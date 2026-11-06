@@ -704,11 +704,16 @@ This is a status record, not a release claim.
   seconds and was stopped. Therefore the automated installer suite is still
   unresolved and must not be called green. The actual candidate installer did
   complete successfully, and its installed manifest/artifact checks passed.
-- The owner reported that a simple task worked before the clean reinstall. No
-  fresh owner task has been run after this install, so live task acceptance is
-  still open.
-- Before demo sign-off, run and retain raw task evidence for: one fresh
-  end-to-end single-agent task with a checked effect;
+- The first post-install single-agent acceptance task passed by owner report:
+  Calculator `(29 × 13) + 7` displayed `384`; a new Notepad document with the
+  requested two lines was saved as
+  `C:\Users\kaina\OneDrive\Desktop\M9R-demo-clean-candidate-20261106.txt` and
+  reopened. The attached screenshots corroborate the result, contents, and
+  Desktop file listing. The task ID has not yet been provided, so its stored
+  task-log export and timing record are still pending. This closes one smoke
+  task, not repeatability or multiplayer acceptance.
+- Before demo sign-off, collect this task's raw task-log export and run a second
+  distinct single-agent task with a checked effect; then retain evidence for:
   two distinct agents coordinating and returning attributed results; a user
   continuing to work during the task without focus or pointer theft; and
   pause/redirect/recovery without duplicate delivery. Run a three-agent demo
