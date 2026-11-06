@@ -383,6 +383,14 @@ function buildSettings(actions: ViewActions): ViewHost {
   const voiceNote = h("span", { class: "voice-note" });
   const GLOWS = [{ label: "Status", style: "status" }, { label: "Rainbow", style: "rainbow" }, { label: "Off", style: "off" }] as const;
   const glowButtons = GLOWS.map((g) => h("button", { onclick: () => actions.updateSettings({ glowStyle: g.style }) }, g.label));
+  const glowColorInput = h("input", { class: "glow-color-input", type: "color", tabindex: -1, "aria-hidden": true }) as HTMLInputElement;
+  glowColorInput.addEventListener("change", () => actions.updateSettings({ glowColor: glowColorInput.value }));
+  const glowColorButton = h("button", { class: "glow-picker", type: "button", title: "Choose a custom edge-glow color",
+    "aria-label": "Choose a custom edge-glow color", onclick: () => glowColorInput.click() });
+  const glowColorReset = h("button", { class: "glow-reset", type: "button", text: "Auto", title: "Use the current status colors again",
+    onclick: () => actions.updateSettings({ glowColor: null }) });
+  const glowColorRow = h("div", { class: "settings-row glow-row" }, glowColorButton,
+    h("span", { text: "Edge glow" }), h("div", { class: "seg" }, ...glowButtons), glowColorReset, glowColorInput);
 
   const rows = h(
     "div",
@@ -390,7 +398,7 @@ function buildSettings(actions: ViewActions): ViewHost {
     h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" })),
     h("div", { class: "settings-row" }, voiceSwitch, h("span", { text: "Spoken updates" }), preview, h("div", { class: "seg" }, ...rateButtons)),
     h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, h("div", { class: "seg" }, ...segButtons)),
-    h("div", { class: "settings-row" }, h("span", { class: "glow-swatch", "aria-hidden": "true" }), h("span", { text: "Edge glow" }), h("div", { class: "seg" }, ...glowButtons)),
+    glowColorRow,
     voiceNote,
   );
 
@@ -404,6 +412,10 @@ function buildSettings(actions: ViewActions): ViewHost {
       voiceSwitch.classList.toggle("on", s.voiceEnabled);
       rateButtons.forEach((b, i) => b.classList.toggle("on", s.voiceRate === RATES[i].rate));
       glowButtons.forEach((b, i) => b.classList.toggle("on", s.glowStyle === GLOWS[i].style));
+      glowColorButton.style.setProperty("--glow-picked", s.glowColor ?? "transparent");
+      glowColorButton.classList.toggle("custom", s.glowColor !== null);
+      glowColorReset.hidden = s.glowColor === null;
+      glowColorInput.value = s.glowColor ?? "#FFFFFF";
       const name = voiceName();
       voiceNote.textContent = name ? `Voice: ${name.replace(/^Microsoft\s+/, "").replace(/\s+-.*$/, "")}` : "No voice available on this device.";
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;

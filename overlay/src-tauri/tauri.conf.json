@@ -30,6 +30,23 @@
         "visible": false
       },
       {
+        "label": "screen-glow",
+        "title": "M9R Screen Glow",
+        "url": "edge-glow.html",
+        "width": 1,
+        "height": 1,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "visible": false
+      },
+      {
         "label": "app",
         "title": "M9R",
         "url": "app.html",

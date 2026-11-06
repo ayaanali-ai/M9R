@@ -125,6 +125,8 @@ export interface Settings {
   voiceRate: number;
   /** How the notch's edge lights up: by what's happening, an always-on living rainbow, or never. */
   glowStyle: "status" | "rainbow" | "off";
+  /** Optional owner-selected tint; null keeps the existing per-status colors. */
+  glowColor: string | null;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -134,6 +136,7 @@ export const DEFAULT_SETTINGS: Settings = {
   voiceEnabled: true,
   voiceRate: 1,
   glowStyle: "status",
+  glowColor: null,
 };
 
 export const PROVIDER_COLORS: Record<Provider, string> = {

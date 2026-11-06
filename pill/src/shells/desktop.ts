@@ -110,16 +110,25 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
       await invoke("save_memory", { text });
     },
     saveSettings(settings) {
-      void invoke("save_settings", { soundEnabled: settings.soundEnabled, soundVolume: settings.soundVolume, autoCloseInterval: settings.autoCloseInterval }).catch(() => { /* the running settings still apply; only persistence failed */ });
+      void invoke("save_settings", { soundEnabled: settings.soundEnabled, soundVolume: settings.soundVolume,
+        autoCloseInterval: settings.autoCloseInterval, glowStyle: settings.glowStyle, glowColor: settings.glowColor }).catch(() => { /* the running settings still apply; only persistence failed */ });
     },
     async loadSettings() {
-      const raw = await invoke("load_settings").catch(() => null) as { soundEnabled?: boolean | null; soundVolume?: number | null; autoCloseInterval?: number | null } | null;
+      const raw = await invoke("load_settings").catch(() => null) as {
+        soundEnabled?: boolean | null; soundVolume?: number | null; autoCloseInterval?: number | null;
+        glowStyle?: string | null; glowColor?: string | null;
+      } | null;
       if (!raw) return;
       const out: Partial<Settings> = {};
       if (typeof raw.soundEnabled === "boolean") out.soundEnabled = raw.soundEnabled;
       if (typeof raw.soundVolume === "number" && Number.isFinite(raw.soundVolume)) out.soundVolume = raw.soundVolume;
       if (typeof raw.autoCloseInterval === "number" && Number.isFinite(raw.autoCloseInterval)) out.autoCloseInterval = raw.autoCloseInterval;
+      if (raw.glowStyle === "status" || raw.glowStyle === "rainbow" || raw.glowStyle === "off") out.glowStyle = raw.glowStyle;
+      if (raw.glowColor === null || (typeof raw.glowColor === "string" && /^#[\da-fA-F]{6}$/.test(raw.glowColor))) out.glowColor = raw.glowColor;
       return out;
+    },
+    setScreenGlow(glow) {
+      void invoke("set_screen_glow", glow).catch(() => { /* the pill remains usable if the decorative frame is unavailable */ });
     },
     async dismissTask(taskId) {
       await invoke("dismiss_task", { taskId });

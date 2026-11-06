@@ -611,11 +611,43 @@ body {
 .voice-preview { color: var(--blue); padding: 0 2px; }
 .voice-preview:hover { text-decoration: underline; }
 .voice-note { font: 400 10px var(--font); color: var(--dim-3); }
-.glow-swatch {
-  width: 12px;
-  height: 12px;
+.glow-picker {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  padding: 3px;
+  border: 0;
   border-radius: 50%;
   background: conic-gradient(#ff5f6d, #ffb347, #f9f871, #47e891, #4fc3ff, #8b6cff, #ff5fd2, #ff5f6d);
+  cursor: pointer;
+}
+.glow-picker::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: var(--glow-picked, transparent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.glow-picker:focus-visible, .glow-reset:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.glow-reset {
+  padding: 2px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--dim-2);
+  font: 500 10px var(--font);
+  cursor: pointer;
+}
+.glow-reset[hidden] { display: none; }
+.glow-color-input {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* ── Widgets: right of the drum, only while they have something real ─────── */

@@ -47,6 +47,8 @@ export interface PillTransport {
   /** Window-level hooks; no-ops in the browser shell. */
   setIslandRect?(x: number, y: number, width: number, height: number): void;
   setCollapsed?(collapsed: boolean): void;
+  /** Mirrors the pill's current edge-light state onto the desktop's click-through screen frame. */
+  setScreenGlow?(glow: { visible: boolean; style: "status" | "rainbow"; color: string; live: boolean }): void;
   /** The other pill is showing; hide this one (browser shell). Called only when the answer changes. */
   setSuppressed?(suppressed: boolean): void;
   focusWindow?(focused: boolean): void;

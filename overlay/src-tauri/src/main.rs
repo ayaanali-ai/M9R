@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -87,6 +87,7 @@ impl HoldToTalkState {
 static BROKER_WATCHDOG_STOPPING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) const PILL: &str = "pill";
+const SCREEN_GLOW: &str = "screen-glow";
 /// The full-window Clonk-style app, a real OS window (decorations, taskbar entry, resizable) --
 /// unlike the pill, closing it must never shut down the engine or the pill overlay.
 const APP_WINDOW: &str = "app";
@@ -327,7 +328,28 @@ struct Saved {
     sound_enabled: Option<bool>,
     sound_volume: Option<f64>,
     auto_close_interval: Option<f64>,
+    /// Appearance preferences for the desktop's full-screen, click-through edge light.
+    glow_style: Option<String>,
+    glow_color: Option<String>,
 }
+
+#[derive(Clone, Serialize)]
+struct ScreenGlowSnapshot {
+    revision: u64,
+    visible: bool,
+    style: String,
+    color: String,
+    live: bool,
+}
+
+impl Default for ScreenGlowSnapshot {
+    fn default() -> Self {
+        Self { revision: 0, visible: false, style: "status".into(), color: "#FFFFFF".into(), live: false }
+    }
+}
+
+#[derive(Default)]
+struct ScreenGlowState(Mutex<ScreenGlowSnapshot>);
 
 fn saved_path(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("window.json"))
@@ -796,14 +818,89 @@ async fn dismiss_task(task_id: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+fn valid_glow_color(value: &str) -> bool {
+    value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Keep the presentation window on the pill's primary display, click-through, and non-activating.
+/// The window is hidden while the pill is hidden or a full-screen app owns that display.
+fn apply_screen_glow_window(app: &AppHandle, desired: &ScreenGlowSnapshot) -> Result<(), String> {
+    let glow = app.get_webview_window(SCREEN_GLOW).ok_or("the screen-glow window is not registered")?;
+    let pill = app.get_webview_window(PILL).ok_or("the pill window is not registered")?;
+    let pill_visible = pill.is_visible().unwrap_or(false);
+    let pill_hwnd = pill.hwnd().map(|handle| handle.0 as isize).unwrap_or(0);
+    if !desired.visible || !pill_visible || fullscreen_app_in_front(pill_hwnd) {
+        glow.hide().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let monitor = pill.primary_monitor().map_err(|error| error.to_string())?
+        .ok_or("Windows did not report the pill's primary monitor")?;
+    let position = monitor.position();
+    let size = monitor.size();
+    glow.set_position(PhysicalPosition::new(position.x, position.y)).map_err(|error| error.to_string())?;
+    glow.set_size(PhysicalSize::new(size.width, size.height)).map_err(|error| error.to_string())?;
+    glow.set_focusable(false).map_err(|error| error.to_string())?;
+    glow.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
+    glow.set_always_on_top(true).map_err(|error| error.to_string())?;
+    glow.show().map_err(|error| error.to_string())?;
+    // Keep the interactive pill above the transparent frame without activating it.
+    let _ = pill.set_always_on_top(true);
+    Ok(())
+}
+
+#[tauri::command]
+fn read_screen_glow(state: State<'_, ScreenGlowState>) -> Result<ScreenGlowSnapshot, String> {
+    state.0.lock().map(|snapshot| snapshot.clone()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_screen_glow(
+    app: AppHandle,
+    state: State<'_, ScreenGlowState>,
+    visible: bool,
+    style: String,
+    color: String,
+    live: bool,
+) -> Result<(), String> {
+    if style != "status" && style != "rainbow" {
+        return Err("Edge glow style must be status or rainbow.".into());
+    }
+    if !valid_glow_color(&color) {
+        return Err("Edge glow color must be a six-digit hexadecimal color.".into());
+    }
+    let snapshot = {
+        let mut current = state.0.lock().map_err(|error| error.to_string())?;
+        if current.visible != visible || current.style != style || current.color != color || current.live != live {
+            current.revision = current.revision.saturating_add(1);
+            current.visible = visible;
+            current.style = style;
+            current.color = color;
+            current.live = live;
+        }
+        current.clone()
+    };
+    apply_screen_glow_window(&app, &snapshot)?;
+    app.emit_to(SCREEN_GLOW, "screen-glow-update", snapshot).map_err(|error| error.to_string())
+}
+
 /// Persists the pill's own settings (sound, auto-close delay) beside its saved window
 /// position, so they survive a restart without depending on any provider session.
 #[tauri::command]
-fn save_settings(app: AppHandle, sound_enabled: bool, sound_volume: f64, auto_close_interval: f64) -> Result<(), String> {
+fn save_settings(app: AppHandle, sound_enabled: bool, sound_volume: f64, auto_close_interval: f64,
+    glow_style: String, glow_color: Option<String>) -> Result<(), String> {
+    if glow_style != "status" && glow_style != "rainbow" && glow_style != "off" {
+        return Err("Edge glow style must be status, rainbow, or off.".into());
+    }
+    if glow_color.as_deref().is_some_and(|color| !valid_glow_color(color)) {
+        return Err("Edge glow color must be null or a six-digit hexadecimal color.".into());
+    }
     let mut saved = load_saved(&app);
     saved.sound_enabled = Some(sound_enabled);
     saved.sound_volume = Some(sound_volume);
     saved.auto_close_interval = Some(auto_close_interval);
+    saved.glow_style = Some(glow_style);
+    saved.glow_color = glow_color;
     let path = saved_path(&app).ok_or("No app config directory is available.")?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -820,6 +917,8 @@ fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
         "soundEnabled": saved.sound_enabled,
         "soundVolume": saved.sound_volume,
         "autoCloseInterval": saved.auto_close_interval,
+        "glowStyle": saved.glow_style,
+        "glowColor": saved.glow_color,
     }))
 }
 
@@ -919,9 +1018,15 @@ fn spawn_fullscreen_watcher(app: AppHandle) {
             if fullscreen && !hidden_for_fullscreen {
                 hidden_for_fullscreen = true;
                 let _ = window.hide();
+                if let Ok(snapshot) = app.state::<ScreenGlowState>().0.lock().map(|state| state.clone()) {
+                    let _ = apply_screen_glow_window(&app, &snapshot);
+                }
             } else if !fullscreen && hidden_for_fullscreen {
                 hidden_for_fullscreen = false;
                 let _ = window.show();
+                if let Ok(snapshot) = app.state::<ScreenGlowState>().0.lock().map(|state| state.clone()) {
+                    let _ = apply_screen_glow_window(&app, &snapshot);
+                }
             }
         }
     });
@@ -936,6 +1041,9 @@ fn toggle_pill(app: &AppHandle) {
             let _ = w.hide();
         } else {
             let _ = w.show();
+        }
+        if let Ok(snapshot) = app.state::<ScreenGlowState>().0.lock().map(|state| state.clone()) {
+            let _ = apply_screen_glow_window(app, &snapshot);
         }
     }
 }
@@ -1158,11 +1266,12 @@ fn main() {
                 })
                 .build(),
         )
+        .manage(ScreenGlowState::default())
         // The canonical pill is broker-state based. Do not expose the old
         // merged-feed, provider-session linking, or compatibility decision
         // commands to the production window; those paths could resurrect
         // historical provider/session state after a restart.
-        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings, read_screen_glow, set_screen_glow])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.
@@ -1171,6 +1280,11 @@ fn main() {
                 return Ok(());
             }
             let window = app.get_webview_window(PILL).expect("pill window");
+            if let Some(screen_glow) = app.get_webview_window(SCREEN_GLOW) {
+                let _ = screen_glow.set_focusable(false);
+                let _ = screen_glow.set_ignore_cursor_events(true);
+                let _ = screen_glow.hide();
+            }
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
             let _ = window.set_focusable(false);
             let _ = window.set_always_on_top(true);
@@ -1268,6 +1382,41 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running the M9R overlay");
+}
+
+#[cfg(test)]
+mod screen_glow_tests {
+    use super::{valid_glow_color, Saved, ScreenGlowSnapshot};
+
+    #[test]
+    fn edge_glow_color_accepts_only_rgb_hex_values() {
+        assert!(valid_glow_color("#ffffff"));
+        assert!(valid_glow_color("#A1b2C3"));
+        assert!(!valid_glow_color("white"));
+        assert!(!valid_glow_color("#fff"));
+        assert!(!valid_glow_color("##112233"));
+        assert!(!valid_glow_color("#１２３４５６"));
+    }
+
+    #[test]
+    fn older_window_settings_keep_defaults_and_custom_glow_round_trips() {
+        let old: Saved = serde_json::from_str(r#"{"sound_enabled":true,"auto_close_interval":15.0}"#).unwrap();
+        assert_eq!(old.glow_style, None);
+        assert_eq!(old.glow_color, None);
+
+        let saved = Saved { glow_style: Some("rainbow".into()), glow_color: Some("#32A8FF".into()), ..Saved::default() };
+        let restored: Saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(restored.glow_style.as_deref(), Some("rainbow"));
+        assert_eq!(restored.glow_color.as_deref(), Some("#32A8FF"));
+    }
+
+    #[test]
+    fn screen_frame_starts_hidden_and_non_live() {
+        let state = ScreenGlowSnapshot::default();
+        assert!(!state.visible);
+        assert!(!state.live);
+        assert_eq!(state.style, "status");
+    }
 }
 
 #[cfg(test)]

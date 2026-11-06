@@ -79,6 +79,7 @@ export class Island {
   private homeCollapseAt: number | null = null;
   private lastSyncedView: IslandViewName | null = null;
   private markKey = "";
+  private screenGlowKey = "";
 
   constructor(root: HTMLElement, transport: PillTransport) {
     this.root = root;
@@ -736,7 +737,19 @@ export class Island {
     this.edgeGlow.classList.toggle("on", !!edge || rainbow);
     this.edgeGlow.classList.toggle("rainbow", rainbow);
     this.edgeGlow.classList.toggle("live", !rainbow && !!edge?.live);
-    if (edge && !rainbow) this.edgeGlow.style.setProperty("--edge", edge.color);
+    const edgeColor = State.settings.glowColor ?? edge?.color ?? "#FFFFFF";
+    if (edge && !rainbow) this.edgeGlow.style.setProperty("--edge", edgeColor);
+    const screenGlow = {
+      visible: State.mode !== "hidden" && (!!edge || rainbow),
+      style: rainbow ? "rainbow" as const : "status" as const,
+      color: edgeColor,
+      live: !rainbow && !!edge?.live,
+    };
+    const screenGlowKey = JSON.stringify(screenGlow);
+    if (screenGlowKey !== this.screenGlowKey) {
+      this.screenGlowKey = screenGlowKey;
+      this.transport.setScreenGlow?.(screenGlow);
+    }
 
     // The focused agent's mark; rebuilt only when it changes.
     const focus = State.focusTask;
