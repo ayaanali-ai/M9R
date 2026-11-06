@@ -131,6 +131,10 @@ test("task guidance verifies visual artifacts before save and after reopening th
     assert.match(notice, /each requested datum in its own labeled field/);
     assert.match(notice, /Not shown in inspected source/);
     assert.match(notice, /verify each written field against the source evidence/);
+    assert.match(notice, /Keep the selected title and displayed date tied to the same source entry/);
+    assert.match(notice, /verify that the player title matches that selection/);
+    assert.match(notice, /If an ad is playing, skip it when the user requested ad skipping/);
+    assert.match(notice, /preserve its observed identity and restore that tab/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
