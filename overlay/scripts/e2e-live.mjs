@@ -1,9 +1,11 @@
-// End-to-end check of the whole pipeline with real parts: a real `m9r-cli feed --watch`, a real hook and CLI creating
-// tasks, and the real overlay window, read back through WebView2's debugging port. No mock feed.
-//   node overlay/scripts/e2e-live.mjs <current candidate m9r-overlay.exe>
-// Uses a scratch M9R home (never your real ~/.m9r) and a scratch WebView profile, so nothing of yours is touched.
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+// Live smoke test for the current one-pill desktop UI and its screen-glow window.
+// Build/run this only with an isolated Tauri application identifier; the production
+// single-instance handler intentionally forwards duplicate launches to the live app.
+// The harness uses a scratch M9R home and WebView profile, then closes its own process.
+//   node overlay/scripts/e2e-live.mjs <isolated-m9r-overlay.exe>
+import { spawn } from "node:child_process";
+import { createServer } from "node:net";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,71 +13,197 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..");
 const exe = process.argv[2];
-if (!exe) throw new Error("Pass the current candidate m9r-overlay.exe explicitly; a preserved pill is never selected automatically.");
-const dist = join(repo, "cli", "dist");
-const home = mkdtempSync(join(tmpdir(), "m9r-e2e-"));
-const profile = mkdtempSync(join(tmpdir(), "m9r-e2e-webview-"));
-const port = 9344;
+if (!exe) throw new Error("Pass an isolated Tauri build (unique app identifier); never launch the production identity while it is running.");
+
+const home = join(tmpdir(), `m9r-e2e-${process.pid}`);
+const profile = join(tmpdir(), `m9r-e2e-webview-${process.pid}`);
+mkdirSync(home, { recursive: true });
+mkdirSync(profile, { recursive: true });
+const statePath = join(home, "desktop-pill-state.json");
 const clean = { ...process.env, M9R_HOME: home };
-for (const k of Object.keys(clean)) if (/^(CLAUDECODE|CLAUDE_CODE_|CODEX_)/.test(k)) delete clean[k];
-const agentEnv = { ...clean, CLAUDECODE: "1" };
+for (const key of Object.keys(clean)) if (/^(CLAUDECODE|CLAUDE_CODE_|CODEX_)/.test(key)) delete clean[key];
 let failures = 0;
-const check = (name, ok, detail = "") => { if (!ok) failures += 1; console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  -- ${detail}` : ""}`); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const procs = [];
-
-async function until(fn, ms = 6000) { const t0 = Date.now(); while (Date.now() - t0 < ms) { const v = await fn(); if (v) return { v, took: Date.now() - t0 }; await sleep(60); } return { v: null, took: Date.now() - t0 }; }
-
-try {
-  // Real hook registers Claude; the real feed writer starts; then the real window.
-  spawnSync(process.execPath, [join(dist, "m9r-hook.js"), "SessionStart", "claude-code"], { env: clean, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "cc-e2e", cwd: "C:/p" }), windowsHide: true });
-  const writer = spawn(process.execPath, [join(dist, "m9r.js"), "feed", "--watch"], { env: clean, stdio: "ignore", windowsHide: true }); procs.push(writer);
-  await until(() => spawnSync(process.execPath, ["-e", `process.exit(require("fs").existsSync(${JSON.stringify(join(home, "feed.json"))}) ? 0 : 1)`]).status === 0, 8000);
-  const app = spawn(exe, [], { env: { ...clean, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`, WEBVIEW2_USER_DATA_FOLDER: profile }, stdio: "ignore" }); procs.push(app);
-
-  let page;
-  const found = await until(async () => { try { const t = await (await fetch(`http://127.0.0.1:${port}/json`)).json(); page = t.find((x) => x.type === "page" && !x.url.startsWith("about:")); return page; } catch { return null; } }, 20000);
-  check("the overlay window loads its page", !!found.v, `${found.took} ms`);
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((r) => ws.addEventListener("open", r));
-  let id = 0; const pending = new Map();
-  ws.addEventListener("message", (m) => { const d = JSON.parse(m.data); if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); } });
-  const evalJs = (expression) => new Promise((res) => { id += 1; pending.set(id, (d) => res(d.result?.result?.value)); ws.send(JSON.stringify({ id, method: "Runtime.evaluate", params: { expression, returnByValue: true } })); });
-  const dom = () => evalJs(`JSON.stringify({ dots: [...document.querySelectorAll('#dots .dot')].map(d => d.className.replace('dot ','')), badgeHidden: document.getElementById('badge').hidden, badge: document.getElementById('badge').textContent, pingHidden: document.getElementById('ping').hidden, ping: document.getElementById('ping').textContent })`).then((s) => JSON.parse(s ?? "{}"));
-
-  await sleep(1500);
-  const first = await dom();
-  check("the pill draws the three agents from the real feed (Claude seen, Codex and OpenCode not connected)", first.dots?.length === 3 && first.dots[0] === "seen" && first.dots[1] === "not_connected" && first.dots[2] === "not_connected", JSON.stringify(first.dots));
-  check("nothing needs you yet, so there is no badge and no ping", first.badgeHidden === true && first.pingHidden === true);
-
-  // An agent asks for work; it must show on the pill and announce itself, quietly.
-  const t0 = Date.now();
-  spawnSync(process.execPath, [join(dist, "m9r.js"), "send", "@codex", "Review lease.ts using key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "--from", "claude"], { env: agentEnv, windowsHide: true });
-  const shown = await until(async () => { const d = await dom(); return d.badgeHidden === false && d.pingHidden === false ? d : null; }, 5000);
-  check("a new agent task lights the badge and shows a ping on the real pill", !!shown.v && shown.v.badge === "1" && /^@claude asks @codex: Review lease\.ts/.test(shown.v.ping), `${Date.now() - t0} ms total, ping="${(shown.v?.ping ?? "").slice(0, 70)}"`);
-  check("the secret in the goal never reached the screen", !JSON.stringify(shown.v ?? {}).includes("sk-ant-api03"), "");
-
-  const gone = await until(async () => { const d = await dom(); return d.pingHidden === true ? d : null; }, 9000);
-  check("the ping folds back into the quiet pill after about 6 seconds, the badge stays", !!gone.v && gone.v.badgeHidden === false && gone.took >= 4000 && gone.took <= 8500, `${gone.took} ms`);
-
-  // Deciding elsewhere (a terminal, later the overlay itself) clears it.
-  spawnSync(process.execPath, ["--input-type=module", "-e", `import {createLocalStore} from ${JSON.stringify("file:///" + join(dist, "local-store.js").replace(/\\/g, "/"))}; createLocalStore(${JSON.stringify(home)}).setApproval("T1", "denied");`], { env: clean, windowsHide: true });
-  const cleared = await until(async () => { const d = await dom(); return d.badgeHidden === true ? d : null; }, 4000);
-  check("once the task is decided elsewhere the badge disappears", !!cleared.v, `${cleared.took} ms`);
-
-  // A reset feed (sequence goes backwards) must not silence pings.
-  writer.kill(); await sleep(400);
-  rmSync(join(home, "feed.json"), { force: true }); rmSync(join(home, "state.json"), { force: true });
-  const writer2 = spawn(process.execPath, [join(dist, "m9r.js"), "feed", "--watch"], { env: clean, stdio: "ignore", windowsHide: true }); procs.push(writer2);
-  await sleep(2500);
-  spawnSync(process.execPath, [join(dist, "m9r.js"), "send", "@codex", "After the reset", "--from", "claude"], { env: agentEnv, windowsHide: true });
-  const again = await until(async () => { const d = await dom(); return d.pingHidden === false ? d : null; }, 5000);
-  check("after the feed was reset, a new task still pings", !!again.v && /After the reset/.test(again.v.ping), `${again.took} ms`);
-  ws.close();
-} finally {
-  for (const p of procs) { try { p.kill(); } catch { /* already gone */ } }
-  await sleep(800);
-  for (const d of [home, profile]) { try { rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { console.log(`note: could not delete ${d}; safe to delete by hand`); } }
+const check = (name, ok, detail = "") => {
+  if (!ok) failures += 1;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  -- ${detail}` : ""}`);
+};
+const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+async function until(fn, ms = 7000) {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    const value = await fn();
+    if (value) return { value, took: Date.now() - start };
+    await sleep(80);
+  }
+  return { value: null, took: Date.now() - start };
 }
+async function freePort() {
+  const server = createServer();
+  await new Promise((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Could not reserve a WebView2 debugging port.");
+  const port = address.port;
+  await new Promise((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+  return port;
+}
+function writeState(state) {
+  writeFileSync(statePath, `${JSON.stringify({ version: 1, surface: "desktop-pill", state })}\n`, "utf8");
+}
+function makeState({ approval = false, idle = false } = {}) {
+  const now = new Date().toISOString();
+  return {
+    type: "ui-state",
+    agents: [
+      { id: "claude", provider: "anthropic", folder: "C:/m9r-e2e", state: idle ? "idle" : "working", doing: idle ? "" : "Reviewing lease.ts" },
+      { id: "codex", provider: "openai", folder: "C:/m9r-e2e", state: "idle", doing: "" },
+      { id: "opencode", provider: "opencode", folder: "C:/m9r-e2e", state: "stopped", doing: "" },
+    ],
+    thread: [],
+    approvals: approval ? [{ id: "T-E2E", agent: "codex", provider: "openai", text: "Publish the reviewed draft", action: "publish the reviewed draft" }] : [],
+  };
+}
+function devtools(page) {
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  let nextId = 0;
+  const pending = new Map();
+  ws.addEventListener("message", (event) => {
+    const message = JSON.parse(event.data);
+    if (message.id && pending.has(message.id)) {
+      pending.get(message.id)(message);
+      pending.delete(message.id);
+    }
+  });
+  const ready = new Promise((resolveOpen, reject) => {
+    ws.addEventListener("open", resolveOpen, { once: true });
+    ws.addEventListener("error", reject, { once: true });
+  });
+  const evaluate = async (expression) => {
+    await ready;
+    nextId += 1;
+    const id = nextId;
+    const result = new Promise((resolveResult) => pending.set(id, resolveResult));
+    ws.send(JSON.stringify({ id, method: "Runtime.evaluate", params: { expression, returnByValue: true, awaitPromise: true } }));
+    const message = await result;
+    if (message.exceptionDetails) throw new Error(message.exceptionDetails.text ?? "WebView evaluation failed");
+    return message.result?.result?.value;
+  };
+  return { ws, evaluate };
+}
+
+let app;
+let pill;
+let glow;
+try {
+  const port = await freePort();
+  writeState(makeState());
+  app = spawn(exe, [], {
+    env: {
+      ...clean,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
+      WEBVIEW2_USER_DATA_FOLDER: profile,
+    },
+    stdio: "ignore",
+    windowsHide: true,
+  });
+
+  let targets = [];
+  const pages = await until(async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json`);
+      if (!response.ok) return null;
+      targets = (await response.json()).filter((target) => target.type === "page" && !target.url.startsWith("about:"));
+      const byPath = (suffix) => targets.find((target) => {
+        try { return new URL(target.url).pathname.toLowerCase().endsWith(suffix); } catch { return false; }
+      });
+      const pillPage = byPath("/index.html") ?? targets.find((target) => {
+        try { return new URL(target.url).pathname === "/"; } catch { return false; }
+      });
+      const glowPage = byPath("/edge-glow.html");
+      return pillPage && glowPage ? { pillPage, glowPage } : null;
+    } catch {
+      return null;
+    }
+  }, 20000);
+  check("the pill and screen-glow WebViews load", !!pages.value, `${pages.took} ms; targets=${targets.map((target) => target.url).join(", ") || "none"}`);
+  if (!pages.value) throw new Error("Isolated overlay did not expose both expected WebView pages.");
+
+  pill = devtools(pages.value.pillPage);
+  glow = devtools(pages.value.glowPage);
+  const pillReady = await until(async () => {
+    const raw = await pill.evaluate(`JSON.stringify({
+      root: !!document.querySelector("#root"),
+      island: !!document.querySelector("#island"),
+      connection: document.querySelector(".broker-status")?.dataset.state ?? "",
+      agents: [...document.querySelectorAll(".drum-row")].map((row) => row.textContent.trim()),
+      approval: !!document.querySelector(".approval-view.on"),
+    })`);
+    const dom = JSON.parse(raw ?? "{}");
+    return dom.root && dom.island && dom.connection === "connected" && dom.agents.length === 3 ? dom : null;
+  }, 10000);
+  check("the pill renders the three agents from the broker-owned state envelope", !!pillReady.value, JSON.stringify(pillReady.value ?? {}));
+
+  const statusGlow = await until(async () => {
+    const raw = await glow.evaluate(`JSON.stringify((() => { const el = document.querySelector("#screen-glow"); return el && {
+      visible: el.classList.contains("visible"),
+      rainbow: el.classList.contains("rainbow"),
+      live: el.classList.contains("live"),
+      color: getComputedStyle(el).getPropertyValue("--glow-color").trim(),
+      frame: [document.documentElement.clientWidth, document.documentElement.clientHeight],
+    }; })())`);
+    const state = JSON.parse(raw ?? "null");
+    return state?.visible && !state.rainbow ? state : null;
+  }, 5000);
+  check("working-agent status reaches the full-screen glow frame", !!statusGlow.value, JSON.stringify(statusGlow.value ?? {}));
+
+  writeState(makeState({ approval: true }));
+  const approval = await until(async () => {
+    const raw = await pill.evaluate(`JSON.stringify({
+      active: !!document.querySelector(".approval-view.on"),
+      name: document.querySelector(".approval-view.on .ask-name")?.textContent.trim() ?? "",
+      sentence: document.querySelector(".approval-view.on .ask-sentence")?.textContent.trim() ?? "",
+    })`);
+    const state = JSON.parse(raw ?? "{}");
+    return state.active && state.name ? state : null;
+  }, 7000);
+  check("a new approval opens the approval band for the right agent", !!approval.value && /codex/i.test(approval.value.name) && /publish/i.test(approval.value.sentence), JSON.stringify(approval.value ?? {}));
+
+  const custom = await pill.evaluate(`window.__TAURI_INTERNALS__.invoke("set_screen_glow", {
+    visible: true, style: "rainbow", color: "#32A8FF", live: false
+  }).then(() => true)`);
+  const rainbow = await until(async () => {
+    const raw = await glow.evaluate(`JSON.stringify((() => { const el = document.querySelector("#screen-glow"); return el && {
+      visible: el.classList.contains("visible"), rainbow: el.classList.contains("rainbow"),
+      color: getComputedStyle(el).getPropertyValue("--glow-color").trim().toLowerCase()
+    }; })())`);
+    const state = JSON.parse(raw ?? "null");
+    return state?.visible && state.rainbow && state.color === "#32a8ff" ? state : null;
+  }, 4000);
+  check("custom rainbow glow color reaches the presentation WebView", custom === true && !!rainbow.value, JSON.stringify(rainbow.value ?? {}));
+
+  await pill.evaluate(`window.__TAURI_INTERNALS__.invoke("set_screen_glow", {
+    visible: false, style: "status", color: "#32A8FF", live: false
+  }).then(() => true)`);
+  const hidden = await until(async () => {
+    const raw = await glow.evaluate(`JSON.stringify(document.querySelector("#screen-glow")?.classList.contains("visible") === false)`);
+    return raw === "true" ? true : null;
+  }, 3000);
+  check("the screen glow hides when commanded", !!hidden.value);
+} finally {
+  try { pill?.ws.close(); } catch { /* closed already */ }
+  try { glow?.ws.close(); } catch { /* closed already */ }
+  if (app && app.exitCode === null) {
+    app.kill();
+    await new Promise((resolveExit) => app.once("exit", resolveExit));
+  }
+  await sleep(500);
+  for (const path of [home, profile]) {
+    try { rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 }); }
+    catch { console.log(`note: scratch directory remains: ${path}`); }
+  }
+}
+
 console.log(`\n${failures === 0 ? "all steps passed" : `${failures} step(s) FAILED`}`);
 process.exit(failures ? 1 : 0);
