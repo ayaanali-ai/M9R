@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildId": "0b437d569cfcba5f56832737061b1505c860082094e0b691ad6eb08b3125eae6",
-  "builtAt": "2026-11-04T01:22:29.910Z",
+  "buildId": "03bd8efea761ae48e0e5acc3397a578b2dc815be8d0da74d3ef835886f315c61",
+  "builtAt": "2026-11-06T02:07:51.266Z",
   "artifacts": {
     "cua-driver-runtime/bin/cua-cursor-theme.exe": "27cab49c44aa9ed2013d969ef8b53955bbf4df87ae3522aa9167e1f9e4c33ca0",
     "cua-driver-runtime/bin/cua-driver-uia.exe": "e9dd9f16d55acc3b029d84aec3ae699d8244a1fc72414b206512d52f7ed77f5b",
@@ -185,7 +185,7 @@
     "cua-driver-runtime/node_modules/@ubjs/node/typescript/dist/resolve-lib.js": "133624993961574f194a1bbdac8f3c2bccd49892de92d0359f711f4dbfc1a0da",
     "m9r-engine.exe": "483880d7d43a112b3a525ad721be53a95559fad8ab63f2e4265d52534b22b012",
     "m9r-native-input-host.exe": "658f1a54b674cf9721f7b17194547f7760e70dcde093f7e1f8a6535fa1a84cc8",
-    "m9r-overlay.exe": "255c9a81b6d27c0e8df6c15348088ff90f58bcbf13b66aaaeb0824f5e7f3b7c5",
+    "m9r-overlay.exe": "0044a576f8e127dbc104f522e0e23f03a30e8097962fab1f4d2594bb0ae128fe",
     "m9r-web-broker.exe": "59a4119b9740f456e004bd5ceed79386ab683c582c6c24647fbc575998449f92"
   },
   "source": {
