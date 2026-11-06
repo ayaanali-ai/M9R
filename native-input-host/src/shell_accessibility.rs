@@ -423,14 +423,20 @@ fn walk_window_element(
             .ok()
             .and_then(|pattern| unsafe { pattern.CurrentDefaultAction() }.ok())
             .is_some_and(|action| !action.to_string().trim().is_empty());
-        let supports_value = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }
+        let value_pattern = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }
             .and_then(|p| p.cast::<IUIAutomationValuePattern>())
-            .ok()
-            .is_some_and(|pattern| {
-                unsafe { pattern.CurrentIsReadOnly() }
-                    .map(|read_only| !read_only.as_bool())
-                    .unwrap_or(false)
-            });
+            .ok();
+        let supports_value = value_pattern.as_ref().is_some_and(|pattern| {
+            unsafe { pattern.CurrentIsReadOnly() }
+                .map(|read_only| !read_only.as_bool())
+                .unwrap_or(false)
+        });
+        // Readability is advertised separately from editability. Password
+        // controls are never exposed to the targeted read path.
+        let supports_read_value = value_pattern.is_some()
+            && unsafe { element.CurrentIsPassword() }
+                .map(|password| !password.as_bool())
+                .unwrap_or(false);
         let scroll_state = current_scroll_state(element);
         let supports_scroll = scroll_state.as_ref().is_some_and(|state| {
             state["horizontal"]["scrollable"].as_bool().unwrap_or(false)
@@ -445,7 +451,7 @@ fn walk_window_element(
             "automationId": truncate_text(&automation_id, 256),
             "rect": { "x": bounds.left, "y": bounds.top, "width": bounds.right - bounds.left, "height": bounds.bottom - bounds.top },
             "depth": depth, "enabled": enabled, "focused": focused,
-            "actions": { "invoke": supports_invoke, "select": supports_select, "toggle": supports_toggle, "legacy": supports_legacy, "setValue": supports_value, "scroll": supports_scroll },
+            "actions": { "invoke": supports_invoke, "select": supports_select, "toggle": supports_toggle, "legacy": supports_legacy, "setValue": supports_value, "readValue": supports_read_value, "scroll": supports_scroll },
             "scroll": scroll_state,
         }));
     }
@@ -728,6 +734,35 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         return Ok(
             json!({"dispatched":true,"mechanism":"value-pattern","valueConfirmed":value_confirmed}),
         );
+    }
+    if action == "readValue" {
+        let Ok(pattern) = (unsafe { element.GetCurrentPattern(UIA_ValuePatternId) })
+            .and_then(|pattern| pattern.cast::<IUIAutomationValuePattern>())
+        else {
+            return Ok(
+                json!({"dispatched":false,"read":false,"reason":"value-pattern-unavailable"}),
+            );
+        };
+        let is_password = unsafe { element.CurrentIsPassword() }
+            .map_err(|error| crate::InputDispatchError::not_dispatched(error.to_string()))?
+            .as_bool();
+        if is_password {
+            return Ok(
+                json!({"dispatched":false,"read":false,"redacted":true,"reason":"password-control"}),
+            );
+        }
+        let max_chars = value
+            .get("maxChars")
+            .and_then(Value::as_u64)
+            .filter(|value| (1..=4096).contains(value))
+            .unwrap_or(512) as usize;
+        let current = unsafe { pattern.CurrentValue() }
+            .map_err(|error| crate::InputDispatchError::not_dispatched(error.to_string()))?
+            .to_string();
+        let mut characters = current.chars();
+        let value: String = characters.by_ref().take(max_chars).collect();
+        let truncated = characters.next().is_some();
+        return Ok(json!({"dispatched":false,"read":true,"value":value,"truncated":truncated}));
     }
     if action != "activate" {
         return Err(crate::InputDispatchError::not_dispatched(

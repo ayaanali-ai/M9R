@@ -145,6 +145,24 @@ test("scroll_element routes to the exact app tree ref and carries the bounded gr
     { expectedRole: "List", expectedLabel: "Installed apps", deliveryMode: "owner-preview" }] }]);
 });
 
+test("read_value is a bounded, non-focus, exact app control observation", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const driver = { readElementValue: async (...args: unknown[]) => {
+    calls.push({ method: "readElementValue", args });
+    return { status: "read", value: "432", truncated: false };
+  } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "value-session" };
+  const action = parseTaskStageAction({ kind: "read_value", view: "app", ref: "window-ui-element-a-1", maxChars: 32,
+    expectedRole: "Text", expectedLabel: "Calculator result" });
+  assert.deepEqual(await runTaskStageAction(driver, "calculator", action, identity),
+    { readValue: { status: "read", value: "432", truncated: false } });
+  assert.deepEqual(calls, [{ method: "readElementValue", args: ["calculator", "window-ui-element-a-1", identity,
+    { expectedRole: "Text", expectedLabel: "Calculator result", maxChars: 32 }] }]);
+  assert.throws(() => parseTaskStageAction({ kind: "read_value", view: "desktop", ref: "window-ui-element-a-1" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "read_value", view: "app", ref: "window-ui-element-a-1", maxChars: 4097 }), /1–4096/);
+  assert.throws(() => parseTaskStageAction({ kind: "read_value", view: "app", ref: "window-ui-element-a-1", confirmFocusForeground: true }), /do not accept foreground input/);
+});
+
 test("text and save shortcuts stay on the selected app while modal controls stay on its popup", async () => {
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },

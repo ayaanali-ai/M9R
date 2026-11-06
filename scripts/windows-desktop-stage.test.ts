@@ -65,6 +65,26 @@ test("native input errors preserve whether SendInput dispatched any events", asy
     "an old or malformed helper response cannot be misreported as proof that no input was sent");
 }));
 
+test("targeted UIA value reads revalidate the exact window and bound returned text", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  let semanticAction: { dispatched: boolean; read: boolean; value?: string; truncated?: boolean; redacted?: boolean; reason?: string } =
+    { dispatched: false, read: true, value: "432", truncated: false };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async (request) => {
+    requests.push(request);
+    if (request.op === "inspect") return { ok: true, window: { ...anchor, processGeneration: "0000000000000001" } };
+    if (request.op === "invokeWindowElement") return { ok: true, semanticAction };
+    return { ok: false, error: "Unexpected native operation" };
+  } });
+  const identity = { path: [0, 2], action: "readValue" as const, expectedRole: "Text", expectedLabel: "Calculator result",
+    expectedClassName: "Text", expectedAutomationId: "Result", maxChars: 32 };
+  assert.deepEqual(await manager.invokeWindowElement(anchor.pid, anchor.windowId, identity), semanticAction);
+  assert.deepEqual(requests[1], { op: "invokeWindowElement", pid: anchor.pid, windowId: anchor.windowId, ...identity });
+  semanticAction = { dispatched: false, read: false, redacted: true, reason: "password-control" };
+  assert.deepEqual(await manager.invokeWindowElement(anchor.pid, anchor.windowId, identity), semanticAction,
+    "password controls are reported as redacted without exposing their value");
+  await assert.rejects(() => manager.invokeWindowElement(anchor.pid, anchor.windowId, { ...identity, maxChars: 4097 }), /semantic action identity is invalid/);
+}));
+
 test("reused PIDs and HWNDs cannot satisfy a persisted process-generation binding", async () => withRoot(async (root) => {
   let generation = "0000000000000001";
   const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},

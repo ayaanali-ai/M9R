@@ -149,6 +149,27 @@ test("app captures expose bounded accessibility targets in screenshot coordinate
   assert.deepEqual((await driver.capture("stage")).controls, [{ label: "Search field", role: "Edit", rect: { x: 20, y: 20, width: 200, height: 40 } }]);
 }));
 
+test("targeted UIA value reads return one fresh non-password control without moving focus", async () => withRoot(async (root) => {
+  await registerStage(root);
+  setNativeFixture(root, { state: { elementsComplete: true, windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    elements: [{ role: "Text", label: "Calculator result", className: "Text", automationId: "Result", enabled: true,
+      actions: { readValue: true }, accessibleValue: "432", frame: { x: 120, y: 70, w: 100, h: 30 } }] } });
+  const nativeStructure = await createWindowsDesktopStageManager(stageDependencies(root)).windowStructure(4321, windowId, { maxElements: 4096, maxDepth: 64 });
+  assert.equal(nativeStructure.elements[0]?.actions?.readValue, true, "the native UIA structure advertises a readable value pattern");
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({
+    testRoot: root, state: nativeFixture(root).state as Record<string, unknown>, calls: [],
+  }) as never });
+  const structure = await driver.readStructure("stage");
+  assert.equal(structure.elements[0]?.canReadValue, true, "the provider-neutral app structure exposes targeted readback");
+  assert.ok(structure.elements[0]?.actions?.includes("read_value"));
+  const result = await driver.readElementValue("stage", structure.elements[0]!.ref,
+    undefined, { expectedRole: "Text", expectedLabel: "Calculator result", maxChars: 32 });
+  assert.deepEqual(result, { status: "read", value: "432", truncated: false });
+  assert.equal(nativeFixture(root).calls.some((call) => ["bringToForeground", "sendClick", "sendText", "sendKeyCombo"].includes(String(call.op))), false,
+    "targeted UIA readback is observational and does not take focus or dispatch input");
+  await driver.shutdown();
+}));
+
 test("app structure exposes its absolute window frame separately from local element coordinates", async () => withRoot(async (root) => {
   await registerStage(root);
   const state = { pid: 4321, windowId: BigInt(windowId), appName: "Test App", windowTitle: "Window",
@@ -471,6 +492,7 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
               toggle: actionNames.includes("toggle") || actions.toggle === true,
               legacy: actionNames.includes("legacy") || actions.legacy === true,
               setValue: actionNames.includes("set_value") || actions.setValue === true || actions.set_value === true,
+              readValue: actionNames.includes("read_value") || actions.readValue === true || actions.read_value === true,
               scroll: actionNames.includes("scroll") || actions.scroll === true,
             },
             scroll: (element.scroll ?? null) as NativeWindowStructureElement["scroll"],
@@ -484,14 +506,20 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
         const path = input.path as number[] | undefined;
         const element = (fixture.state?.elements as Array<Record<string, unknown>> | undefined)?.[path?.[0] ?? -1];
         const actions = Array.isArray(element?.actions) ? element.actions.map(String) : [];
-        const canRun = input.action === "setValue" ? actions.includes("set_value")
-          : input.action === "scroll" ? actions.includes("scroll")
+        const elementActions = element?.actions && !Array.isArray(element.actions) && typeof element.actions === "object"
+          ? element.actions as Record<string, unknown> : {};
+        const canRun = input.action === "setValue" ? actions.includes("set_value") || elementActions.setValue === true
+          : input.action === "readValue" ? actions.includes("read_value") || elementActions.readValue === true
+            : input.action === "scroll" ? actions.includes("scroll")
             : actions.some((name) => ["invoke", "click", "select", "toggle", "expand"].includes(name));
         const sameIdentity = element && String(element.role ?? "") === input.expectedRole
           && String(element.label ?? "") === input.expectedLabel
           && String(element.className ?? "") === input.expectedClassName
           && String(element.automationId ?? "") === input.expectedAutomationId;
         if (!sameIdentity) return { ok: false, dispatchState: "not-dispatched", error: "The native semantic target changed; no semantic input was sent." };
+        if (canRun && input.action === "readValue") return { ok: true, semanticAction: {
+          dispatched: false, read: true, value: String(element?.accessibleValue ?? ""), truncated: false,
+        } };
         return canRun
           ? { ok: true, semanticAction: { dispatched: true, mechanism: "test-uia",
             ...(input.action === "setValue" ? { valueConfirmed: fixture.state?.valueConfirmed !== false } : {}),

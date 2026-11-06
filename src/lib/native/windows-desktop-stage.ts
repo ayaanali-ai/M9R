@@ -61,6 +61,7 @@ interface NativeStageResponse {
   desktopStructure?: NativeDesktopStructure;
   windowStructure?: NativeWindowStructure;
   semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
+    read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
     scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null };
   capture?: { dataUrl: string; width: number; height: number; originX?: number; originY?: number };
   input?: { childWindowId: string };
@@ -131,7 +132,7 @@ export interface NativeWindowStructureElement extends NativeDesktopStructureElem
   /** Control View child-index path used for immediate native re-resolution. */
   path: number[];
   automationId: string;
-  actions?: { invoke: boolean; select: boolean; toggle: boolean; legacy: boolean; setValue: boolean; scroll?: boolean };
+  actions?: { invoke: boolean; select: boolean; toggle: boolean; legacy: boolean; setValue: boolean; readValue?: boolean; scroll?: boolean };
   /** UIA ScrollPattern progress when this element is a scroll container. Percent can be null when the provider omits it. */
   scroll?: {
     horizontal: { scrollable: boolean; percent: number | null; viewSize: number | null };
@@ -589,16 +590,19 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   }
 
   async function invokeWindowElement(pid: number, windowId: string, input: {
-    path: number[]; action: "activate" | "setValue" | "scroll"; expectedRole: string; expectedLabel: string;
+    path: number[]; action: "activate" | "setValue" | "readValue" | "scroll"; expectedRole: string; expectedLabel: string;
     expectedClassName: string; expectedAutomationId: string; text?: string; direction?: "up" | "down" | "left" | "right";
-    granularity?: "small" | "large";
+    granularity?: "small" | "large"; maxChars?: number;
   }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
+    read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
     scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null }> {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     if (!Array.isArray(input.path) || input.path.length > 64 || input.path.some((part) => !Number.isSafeInteger(part) || part < 0)
       || !input.expectedRole || (!input.expectedLabel && !input.expectedAutomationId)
       || (input.action === "setValue" && typeof input.text !== "string")
+      || (input.action === "readValue" && input.maxChars !== undefined
+        && (!Number.isSafeInteger(input.maxChars) || input.maxChars < 1 || input.maxChars > 4096))
       || (input.action === "scroll" && (!input.direction || !["up", "down", "left", "right"].includes(input.direction)
         || (input.granularity !== undefined && input.granularity !== "small" && input.granularity !== "large")))) {
       throw new Error("The native semantic action identity is invalid.");
@@ -629,6 +633,12 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       || (semanticAction.mechanism !== undefined && typeof semanticAction.mechanism !== "string")
       || (semanticAction.reason !== undefined && typeof semanticAction.reason !== "string")
       || (semanticAction.valueConfirmed !== undefined && typeof semanticAction.valueConfirmed !== "boolean")
+      || (semanticAction.read !== undefined && typeof semanticAction.read !== "boolean")
+      // Rust limits Unicode scalar values; JavaScript counts UTF-16 code units,
+      // so supplementary characters can occupy two units each.
+      || (semanticAction.value !== undefined && (typeof semanticAction.value !== "string" || semanticAction.value.length > (input.maxChars ?? 512) * 2))
+      || (semanticAction.truncated !== undefined && typeof semanticAction.truncated !== "boolean")
+      || (semanticAction.redacted !== undefined && typeof semanticAction.redacted !== "boolean")
       || (semanticAction.moved !== undefined && semanticAction.moved !== null && typeof semanticAction.moved !== "boolean")
       || ([semanticAction.scrollBefore, semanticAction.scrollAfter].some((position) => position !== undefined
         && (!position || [position.horizontal, position.vertical].some((axis) => axis !== null && (!Number.isFinite(axis) || axis < 0 || axis > 100)))))) {

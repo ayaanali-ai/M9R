@@ -805,7 +805,7 @@ export function createTaskDesktopStageService(input: {
       // The approval wait above can outlast a revocation: recheck before anything executes.
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-      const mutating = action.kind !== "capture" && action.kind !== "read_structure";
+      const mutating = action.kind !== "capture" && action.kind !== "read_structure" && action.kind !== "read_value";
       const receiptInput = mutating && operationId ? {
         handle: identity.handle,
         sessionId: identity.sessionId,

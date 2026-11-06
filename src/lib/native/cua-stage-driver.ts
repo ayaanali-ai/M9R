@@ -242,6 +242,7 @@ export interface CuaStageStructure {
     selected?: boolean;
     actions?: string[];
     canReplaceValue?: boolean;
+    canReadValue?: boolean;
     scroll?: NativeWindowStructureElement["scroll"];
     rect?: { x: number; y: number; width: number; height: number };
   }>;
@@ -1947,7 +1948,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     elementAt: (x: number, y: number) => Promise<string | undefined>;
     elementAtPoint: (x: number, y: number, action?: "click" | "set_value") => Promise<CuaWindowElement | undefined>;
     observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
-    elementByToken: (token: string, expected?: { role?: string; label?: string }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame; nativeElement?: NativeWindowStructureElement } | undefined>;
+    elementByToken: (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame; nativeElement?: NativeWindowStructureElement } | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
     let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
@@ -1988,6 +1989,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           ...(element.actions?.toggle ? ["toggle"] : []),
           ...(element.actions?.legacy ? ["click"] : []),
           ...(element.actions?.setValue ? ["set_value"] : []),
+          ...(element.actions?.readValue ? ["read_value"] : []),
           ...(element.actions?.scroll ? ["scroll"] : []),
         ];
         const mapped = {
@@ -2092,6 +2094,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           elements: elements.map(({ native, mapped }) => ({
             ref: native.ref, depth: native.depth, role: native.role, label: normalizeAccessibleLabel(native.label) ?? "", enabled: native.enabled,
             actions: mapped.actions, ...(native.actions?.setValue ? { canReplaceValue: true } : {}),
+            ...(native.actions?.readValue ? { canReadValue: true } : {}),
             ...(native.scroll ? { scroll: native.scroll } : {}),
             rect: { x: (native.rect.x - frame.windowBounds!.x) * frame.width / frame.windowBounds!.width,
               y: (native.rect.y - frame.windowBounds!.y) * frame.height / frame.windowBounds!.height,
@@ -2119,7 +2122,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           : element.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name)) === true);
     }, { detail: `source=accessibility-tree;action=${action ?? "point"}` });
 
-    const elementByToken = async (token: string, expected?: { role?: string; label?: string }) => {
+    const elementByToken = async (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => {
       const observed = nativeObservedElements.get(observationKey)?.get(token);
       if (!observed) return undefined;
       const normalizedLabel = normalizeAccessibleLabel(observed.label) ?? "";
@@ -2129,7 +2132,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const current = structure.elements.find((candidate) => JSON.stringify(candidate.path) === JSON.stringify(observed.path)
         && candidate.role === observed.role && candidate.label === observed.label
         && candidate.className === observed.className && candidate.automationId === observed.automationId);
-      if (!current || current.enabled === false) return undefined;
+      if (!current || (current.enabled === false && expected?.allowDisabled !== true)) return undefined;
       const fresh = elements.find(({ native }) => native === current);
       if (!fresh) return undefined;
       const frame = await captureNativeFrame();
@@ -2190,6 +2193,36 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
 
   async function readStructure(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageStructure> {
     return withRegisteredWindow(name, async ({ readStructure: read }) => read(), cursorIdentity);
+  }
+
+  async function readElementValue(name: string, ref: string, cursorIdentity?: CuaAgentCursorIdentity,
+    options: { expectedRole?: string; expectedLabel?: string; maxChars?: number } = {}): Promise<{
+      status: "read" | "redacted"; value?: string; truncated?: boolean;
+    }> {
+    const maxChars = options.maxChars ?? 512;
+    if (!Number.isSafeInteger(maxChars) || maxChars < 1 || maxChars > 4096) {
+      throw new DesktopInputNotDispatchedError("The requested accessible-value limit must be from 1 to 4096 characters.");
+    }
+    return withRegisteredWindow(name, async ({ pid, windowId, elementByToken }) => {
+      const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel, allowDisabled: true });
+      if (!selected?.nativeElement || !selected.nativeElement.actions?.readValue) {
+        throw new DesktopInputNotDispatchedError("The exact observed control is stale, unavailable, or does not expose a readable non-password UI Automation value.", "target-identity");
+      }
+      const observed = await manager.invokeWindowElement(pid, windowId.toString(), {
+        path: selected.nativeElement.path,
+        action: "readValue",
+        expectedRole: selected.nativeElement.role,
+        expectedLabel: selected.nativeElement.label,
+        expectedClassName: selected.nativeElement.className,
+        expectedAutomationId: selected.nativeElement.automationId,
+        maxChars,
+      });
+      if (observed.redacted) return { status: "redacted" };
+      if (!observed.read || typeof observed.value !== "string") {
+        throw new DesktopInputNotDispatchedError("The exact UI Automation value could not be read; no input was sent.", "target-identity");
+      }
+      return { status: "read", value: observed.value, truncated: observed.truncated === true };
+    }, cursorIdentity);
   }
 
   async function moveCursor(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity): Promise<{ capture: CuaStageCapture; cursor: CuaStageCursorProof }> {
@@ -3870,7 +3903,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, readStructure, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
+  return { capture, readStructure, readElementValue, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
     clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,
