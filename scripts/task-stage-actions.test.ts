@@ -6,7 +6,9 @@ import test from "node:test";
 import { parseTaskStageAction, runTaskStageAction } from "../src/lib/native/task-stage-actions";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
-import { createWebBrokerClient } from "../src/lib/native/web-broker-client";
+import { createWebBrokerClient, type WebBrokerClient } from "../src/lib/native/web-broker-client";
+import { TASK_STAGE_POLICY_FILE } from "../src/lib/native/task-desktop-stage";
+import { prepareTaskStageNotice } from "../src/lib/native/task-stage-notice";
 
 test("desktop action parser accepts common pointer and keyboard actions but rejects malformed key input", () => {
   assert.deepEqual(parseTaskStageAction({ kind: "double_click", x: 24, y: 68 }), { kind: "double_click", x: 24, y: 68 });
@@ -113,6 +115,19 @@ test("broker client sends owner-preview when stage mode is omitted", async () =>
     await client.taskStageAction!("test-token", "T2", { kind: "capture" });
     await client.taskStageApp!("test-token", "T2", "chrome");
     assert.deepEqual(requests.map((request) => request.body.mode), ["owner-preview", "owner-preview", "owner-preview"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("task guidance verifies visual artifacts before save and after reopening the exact file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-visual-artifact-guidance-"));
+  writeFileSync(join(root, TASK_STAGE_POLICY_FILE), JSON.stringify({ version: 1, handles: ["codex"], controlHandles: ["codex"] }));
+  const web = { prepareTaskStage: async () => ({ ok: true }) } as unknown as WebBrokerClient;
+  try {
+    const notice = await prepareTaskStageNotice(root, web, "test-token", "codex", "T-visual");
+    assert.match(notice, /visual artifact/);
+    assert.match(notice, /fresh capture before saving/);
+    assert.match(notice, /reopen the exact path and inspect the rendered file again/);
+    assert.match(notice, /Report completion only when the requested visual elements are visible/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
