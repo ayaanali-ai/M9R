@@ -76,6 +76,8 @@ interface NativeStageResponse {
   processGeneration?: string;
   rect?: { x?: number; y?: number; width?: number; height?: number };
   text?: string;
+  childWindowId?: string;
+  classes?: string[];
 }
 
 function throwNativeInputFailure(result: NativeStageResponse, fallback: string): never {
@@ -1154,6 +1156,42 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the background-typed text.");
   }
 
+  /**
+   * Posts WM_CLOSE directly to a window, foreground-independent -- the same
+   * property sendTextToWindow has for text. Test-only scaffolding for the
+   * Phase 0 T3 proof (provoking a real app's own unsaved-changes dialog);
+   * production closes an owned app by killing its process, never this.
+   */
+  async function postCloseWindow(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "postCloseWindow", pid, windowId });
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the WM_CLOSE request.");
+  }
+
+  /**
+   * Resolves a window's descendant window whose real class is exactly
+   * "Edit", if any. Used by background text delivery to redirect WM_CHAR to
+   * a real app's actual editable child surface when the top-level frame it
+   * was given is not itself an editable control.
+   */
+  async function findEditChildWindow(pid: number, windowId: string): Promise<string | undefined> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "findEditChildWindow", pid, windowId });
+    if (!result.ok) throw new Error(result.error ?? "Could not search for a classic Edit child window.");
+    return typeof result.childWindowId === "string" ? result.childWindowId : undefined;
+  }
+
+  /** Diagnostic only: every descendant window's own class name, in enumeration order. */
+  async function listChildWindowClasses(pid: number, windowId: string): Promise<string[]> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "listChildWindowClasses", pid, windowId });
+    if (!result.ok || !Array.isArray(result.classes)) throw new Error(result.error ?? "Could not enumerate child window classes.");
+    return result.classes;
+  }
+
   async function setWindowState(name: string, state: "minimized" | "maximized" | "restored") {
     const inspected = await inspectStage(name);
     if (!inspected.anchor) throw new Error("No exact selected window.");
@@ -1240,7 +1278,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
     close: () => persistentHost?.close(),
-    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, getWindowText, windowRect, workArea };
+    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
 }
 
 function parsePid(value: string): number {
@@ -1285,7 +1323,7 @@ function createPersistentWindowsStageHost(executable: string) {
   const pending = new Map<string, PendingNativeStageRequest>();
   let activeRequestId: string | undefined;
   const startAcknowledgementTimeoutMs = 15_000;
-  const inputOperations = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "sendTextToWindow"]);
+  const inputOperations = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "sendTextToWindow", "postCloseWindow"]);
 
 
   const notDispatchedError = (request: Pick<PendingNativeStageRequest, "operation">, message: string): Error => inputOperations.has(request.operation)

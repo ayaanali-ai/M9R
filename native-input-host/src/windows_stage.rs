@@ -305,6 +305,28 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Ok(()) => json!({"ok":true,"requestId":request_id}),
             Err(error) => input_dispatch_failure(request_id, error),
         },
+        // Test-only scaffolding for the Phase 0 T3 proof: provoke a real
+        // app's own close/unsaved-changes dialog without SendInput or
+        // foreground, the same way sendTextToWindow avoids them for text.
+        #[cfg(windows)]
+        Some("postCloseWindow") => match platform::post_close_window(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => input_dispatch_failure(request_id, error),
+        },
+        // Resolves a window's descendant classic-Edit-class child, if any,
+        // so background text delivery can target the real text surface
+        // instead of a wrapping frame. See `win32::find_edit_child_window`.
+        #[cfg(windows)]
+        Some("findEditChildWindow") => match platform::find_edit_child_window(value) {
+            Ok(child) => json!({"ok":true,"requestId":request_id,"childWindowId":child.map(|c| c.to_string())}),
+            Err(error) => input_dispatch_failure(request_id, error),
+        },
+        // Diagnostic only: see `win32::list_child_window_classes`.
+        #[cfg(windows)]
+        Some("listChildWindowClasses") => match platform::list_child_window_classes(value) {
+            Ok(classes) => json!({"ok":true,"requestId":request_id,"classes":classes}),
+            Err(error) => input_dispatch_failure(request_id, error),
+        },
         // Read-only ground-truth verification: the real text GetWindowTextW reports
         // for this window/control, never a UIA read and never an echo of input sent.
         #[cfg(windows)]
@@ -1721,6 +1743,32 @@ mod platform {
         }
         crate::win32::post_text_to_window(window as usize, text)
     }
+
+    pub(super) fn post_close_window(
+        value: &serde_json::Value,
+    ) -> Result<(), crate::InputDispatchError> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        crate::win32::post_close_window(window as usize)
+    }
+
+    /// See `win32::find_edit_child_window` for why this exists.
+    pub(super) fn find_edit_child_window(
+        value: &serde_json::Value,
+    ) -> Result<Option<usize>, crate::InputDispatchError> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        crate::win32::find_edit_child_window(window as usize)
+    }
+
+    /// Diagnostic only. See `win32::list_child_window_classes`.
+    pub(super) fn list_child_window_classes(
+        value: &serde_json::Value,
+    ) -> Result<Vec<String>, crate::InputDispatchError> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        crate::win32::list_child_window_classes(window as usize)
+    }
 }
 
 #[cfg(test)]
@@ -1934,6 +1982,95 @@ mod tests {
         unsafe { DestroyWindow(window) }.ok();
 
         assert_eq!(actual, "m9r background");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn post_close_window_delivers_wm_close_without_requiring_foreground() {
+        // Phase 0 T3 needs a way to provoke a real app's own close/unsaved-
+        // changes dialog without SendInput or foreground, the same property
+        // sendTextToWindow proves for text. A custom window class observes
+        // WM_CLOSE receipt directly (an Edit control would just destroy
+        // itself via DefWindowProc, which proves nothing about *how* the
+        // message arrived).
+        use std::cell::Cell;
+        use windows::core::w;
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow,
+            GetWindowThreadProcessId, PeekMessageW, RegisterClassW, TranslateMessage, MSG,
+            PM_REMOVE, WM_CLOSE, WNDCLASSW, WS_OVERLAPPED,
+        };
+
+        thread_local! {
+            static CLOSE_RECEIVED: Cell<bool> = Cell::new(false);
+        }
+
+        unsafe extern "system" fn wndproc(
+            window: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if message == WM_CLOSE {
+                CLOSE_RECEIVED.with(|flag| flag.set(true));
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+
+        let class_name = w!("M9RPostCloseWindowTest");
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        unsafe { RegisterClassW(&class) };
+        let window = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                class_name,
+                windows::core::PCWSTR::null(),
+                WS_OVERLAPPED,
+                0,
+                0,
+                200,
+                24,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("creating a plain top-level window for the WM_CLOSE test");
+        let handle = window.0 as usize;
+
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+
+        // Never shown, never foreground -- if postCloseWindow secretly needed
+        // real foreground, it would fail closed here instead of delivering.
+        assert_ne!(unsafe { GetForegroundWindow() }, window);
+
+        let response = handle_desktop_stage_request(&json!({
+            "op": "postCloseWindow",
+            "pid": pid,
+            "windowId": format!("{handle}"),
+        }));
+        assert_eq!(response["ok"], true, "{response}");
+
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+
+        assert!(
+            CLOSE_RECEIVED.with(|flag| flag.get()),
+            "the window's own WndProc must have received WM_CLOSE"
+        );
     }
 
     #[test]

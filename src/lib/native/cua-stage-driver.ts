@@ -14,7 +14,7 @@ import { CUA_DRIVER_VERSION, startCuaDriverHost, validateCuaDriverPackageVersion
 import { createWindowsDesktopStageManager, type WindowsStageDependencies, type NativePointControl, type NativeWindowStructureElement, type WindowsSystemControlRequest } from "./windows-desktop-stage";
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
-import { classifySaveAsConflict, findSaveAsButton, findSaveAsNameField, resolveSaveAsTarget } from "./stage-save-as";
+import { classifySaveAsConflict, findDialogButton, findSaveAsButton, findSaveAsNameField, resolveSaveAsTarget } from "./stage-save-as";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
 const PUBLIC_CURSOR_LABEL_MAX_LENGTH = 28;
@@ -1687,6 +1687,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     signal?: AbortSignal;
   }): Promise<CuaStageActionOutcome> {
     const windowId = input.windowId.toString();
+    if (process.env.M9R_DEBUG_CHILD_EDIT_LOOKUP) {
+      console.error(`[deliverTextToExactWindow] entry pid=${input.pid} windowId=${windowId} deliveryMode=${input.deliveryMode} preferForeground=${input.preferForeground} signalAborted=${input.signal?.aborted} hasNativeInput=${Boolean(input.nativeInput)}`);
+    }
     // A live, not-yet-aborted signal is the normal case for every real call (act()
     // always hands one in, purely so an in-flight action can be cancelled). Only an
     // *already aborted* signal is a reason to skip these fast, headless-safe paths;
@@ -1699,7 +1702,31 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     // has a real headless route: WM_CHAR posted straight to its own message queue, which never
     // requires and never steals OS foreground. Try it before giving up as unavailable.
     if (!input.signal?.aborted && !input.preferForeground && input.deliveryMode === "background") {
-      await manager.sendTextToWindow(input.pid, windowId, input.text);
+      // Some real apps (e.g. Windows 11 Notepad) host their actual classic
+      // Edit-class text surface as a CHILD window of the top-level frame
+      // we're given, rather than being an Edit control themselves; posting
+      // WM_CHAR to the frame is correctly queued but never reaches the real
+      // text surface. Prefer a classic Edit-class descendant when one
+      // exists; a control with no such descendant (including one that IS
+      // itself already an Edit control, which has no children to find) is
+      // untouched -- this never changes where WM_CHAR lands for anything
+      // that already worked.
+      let target = windowId;
+      let childLookupError: unknown;
+      try {
+        const child = await manager.findEditChildWindow(input.pid, windowId);
+        if (child) target = child;
+      } catch (error) { childLookupError = error; /* best-effort: fall back to the originally selected window */ }
+      if (process.env.M9R_DEBUG_CHILD_EDIT_LOOKUP) {
+        console.error(`[deliverTextToExactWindow] pid=${input.pid} windowId=${windowId} resolvedTarget=${target} childFound=${target !== windowId} error=${childLookupError instanceof Error ? childLookupError.message : childLookupError}`);
+        if (target === windowId) {
+          try {
+            const classes = await manager.listChildWindowClasses(input.pid, windowId);
+            console.error(`[deliverTextToExactWindow] no Edit-class child found; all descendant classes: ${JSON.stringify(classes)}`);
+          } catch (error) { console.error(`[deliverTextToExactWindow] listChildWindowClasses also failed: ${error instanceof Error ? error.message : error}`); }
+        }
+      }
+      await manager.sendTextToWindow(input.pid, target, input.text);
       return { status: "unverifiable", summary: "Posted text to the target window's own message queue (WM_CHAR, no OS foreground required); application effect requires verification." };
     }
 
@@ -3378,6 +3405,48 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return withRegisteredPopup(name, async ({ capture }) => capture());
   }
 
+  /**
+   * Answers an ordinary confirm/prompt dialog (e.g. an app's "Do you want to
+   * save changes?" with Save / Don't Save / Cancel) by invoking exactly one
+   * enabled button matched by its exact accessible label, via UI Automation
+   * only -- never SendInput, never a point click, never foreground. This is
+   * the generic sibling of saveAs's own Save-button invoke for dialogs that
+   * have no file name field at all; clickPopup's x,y click correctly refuses
+   * in background mode (there is no semantic target behind a bare point), so
+   * this is the only background-safe way to answer such a dialog.
+   */
+  async function confirmDialogButton(name: string, label: string, options: { signal?: AbortSignal } = {}): Promise<CuaStageActionProof> {
+    if (typeof label !== "string" || label.length < 1 || label.length > 64) {
+      throw new DesktopInputNotDispatchedError("A dialog button label is required; no dialog input was sent.");
+    }
+    return withRegisteredPopup(name, async ({ pid, popupWindowId, capture }) => {
+      const before = await capture();
+      options.signal?.throwIfAborted();
+      let structure: Awaited<ReturnType<typeof manager.windowStructure>>;
+      try { structure = await manager.windowStructure(pid, popupWindowId.toString(), { maxElements: 4096, maxDepth: 64 }); }
+      catch (error) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `Could not read the owned dialog's structure before dispatch. ${error instanceof Error ? error.message : String(error)}` } };
+      }
+      const button = findDialogButton(structure.elements, label);
+      if (structure.status !== "complete" || structure.truncated || !button) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: `Could not uniquely resolve an enabled "${label}" button in the owned dialog (status=${structure.status}${structure.truncated ? ", truncated" : ""}).` } };
+      }
+      options.signal?.throwIfAborted();
+      const dispatch = await invokeWindowElementTimed(pid, popupWindowId.toString(), {
+        path: button.path, action: "activate", expectedRole: button.role,
+        expectedLabel: button.label, expectedClassName: button.className, expectedAutomationId: button.automationId,
+      });
+      if (!dispatch.dispatched) {
+        return { capture: before, captureScope: "popup" as const, outcome: { status: "partial" as const,
+          summary: dispatch.reason ?? `Windows did not confirm the "${label}" button was activated.` } };
+      }
+      return captureAfterPopupDispatch(name, before, { status: "unverified" as const,
+        summary: `Activated the "${label}" button via its exact UI Automation invoke pattern; the refreshed capture and any requested effect check are the separate verification.` });
+    });
+  }
+
   async function typeText(name: string, text: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageTextOptions = {}): Promise<CuaStageActionProof> {
     if (typeof text !== "string" || text.length < 1 || text.length > MAX_TEXT_ACTION_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
       throw new DesktopInputNotDispatchedError(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
@@ -3919,7 +3988,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,
-    clickPopup, pressKeyPopup, hotkeyPopup, typeTextPopup, capturePopup, saveAs };
+    clickPopup, pressKeyPopup, hotkeyPopup, typeTextPopup, capturePopup, saveAs, confirmDialogButton };
 }
 
 async function readStageTextFromStdin(): Promise<string> {

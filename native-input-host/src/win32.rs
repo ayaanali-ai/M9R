@@ -55,6 +55,12 @@ extern "system" {
     fn AttachThreadInput(attach_from: u32, attach_to: u32, attach: i32) -> i32;
     fn GetCurrentThreadId() -> u32;
     fn PostMessageW(window: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
+    fn EnumChildWindows(
+        parent: Hwnd,
+        callback: extern "system" fn(Hwnd, isize) -> i32,
+        lparam: isize,
+    ) -> i32;
+    fn GetClassNameW(window: Hwnd, buffer: *mut u16, max_count: i32) -> i32;
 }
 
 const INPUT_MOUSE: u32 = 0;
@@ -377,6 +383,100 @@ pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatc
         }
         input_sent = true;
         unsafe { Sleep(2) };
+    }
+    Ok(())
+}
+
+/// Resolves the first descendant window, in enumeration order, whose real
+/// window class is an Edit/RichEdit variant (see `EDIT_LIKE_CLASSES`). Some
+/// real apps (e.g. Windows 11 Notepad, whose text surface is a RichEditD2DPT
+/// control nested under a NotepadTextBox wrapper) host their actual
+/// text-editing surface as a child window of the top-level frame rather
+/// than being an editable control themselves; `post_text_to_window`'s
+/// caller uses this to redirect WM_CHAR to the real surface instead of the
+/// frame. A window with no such descendant (including one that already IS
+/// an editable control, which has no children) returns `None`, leaving the
+/// caller's original target untouched.
+///
+/// Classic Win32 Edit, plus the RichEdit control class variants, including
+/// "RichEditD2DPT" -- confirmed by direct observation to be the real child
+/// text surface Windows 11's own packaged Notepad hosts internally, under a
+/// "NotepadTextBox" wrapper, inside its top-level frame.
+const EDIT_LIKE_CLASSES: &[&str] = &[
+    "Edit", "RichEdit", "RichEdit20A", "RichEdit20W", "RichEdit50W", "RichEditD2DPT",
+];
+
+extern "system" fn collect_edit_child(window: Hwnd, lparam: isize) -> i32 {
+    let mut class_buffer = [0u16; 64];
+    let written = unsafe { GetClassNameW(window, class_buffer.as_mut_ptr(), class_buffer.len() as i32) };
+    if written > 0 {
+        let class_name = String::from_utf16_lossy(&class_buffer[..written as usize]);
+        if EDIT_LIKE_CLASSES.contains(&class_name.as_str()) {
+            unsafe { *(lparam as *mut Hwnd) = window };
+            return 0; // stop enumeration: found one
+        }
+    }
+    1 // continue enumeration
+}
+
+/// Diagnostic only: collects every descendant window's own class name, in
+/// enumeration order, regardless of what it is. Used to see what a real
+/// app's actual window tree looks like when `find_edit_child_window` finds
+/// nothing, instead of guessing why.
+extern "system" fn collect_all_child_classes(window: Hwnd, lparam: isize) -> i32 {
+    let mut class_buffer = [0u16; 64];
+    let written = unsafe { GetClassNameW(window, class_buffer.as_mut_ptr(), class_buffer.len() as i32) };
+    let class_name = if written > 0 { String::from_utf16_lossy(&class_buffer[..written as usize]) } else { String::new() };
+    let collector = unsafe { &mut *(lparam as *mut Vec<String>) };
+    collector.push(class_name);
+    1 // continue enumeration
+}
+
+pub fn list_child_window_classes(window: usize) -> Result<Vec<String>, InputDispatchError> {
+    let window = window as Hwnd;
+    if window.is_null() {
+        return Err(InputDispatchError::not_dispatched(
+            "list_child_window_classes requires a non-null window handle",
+        ));
+    }
+    let mut collected: Vec<String> = Vec::new();
+    unsafe { EnumChildWindows(window, collect_all_child_classes, &mut collected as *mut Vec<String> as isize) };
+    Ok(collected)
+}
+
+pub fn find_edit_child_window(window: usize) -> Result<Option<usize>, InputDispatchError> {
+    let window = window as Hwnd;
+    if window.is_null() {
+        return Err(InputDispatchError::not_dispatched(
+            "find_edit_child_window requires a non-null window handle",
+        ));
+    }
+    let mut found: Hwnd = std::ptr::null_mut();
+    unsafe { EnumChildWindows(window, collect_edit_child, &mut found as *mut Hwnd as isize) };
+    Ok(if found.is_null() { None } else { Some(found as usize) })
+}
+
+/// `WM_CLOSE`: the standard request for a window to close itself, the same
+/// message Windows sends when the owner clicks a window's own title-bar X.
+/// Posting it directly is foreground-independent and does not require
+/// `SendInput`/focus, the same property `post_text_to_window` relies on.
+/// Test-only scaffolding: used to provoke a real app's own "unsaved changes"
+/// dialog for the Phase 0 T3 proof, never a production action path (a real
+/// agent action closes a window through its UI Automation `WindowPattern`
+/// instead, which this module does not implement).
+const WM_CLOSE: u32 = 0x0010;
+
+pub fn post_close_window(window: usize) -> Result<(), InputDispatchError> {
+    let window = window as Hwnd;
+    if window.is_null() {
+        return Err(InputDispatchError::not_dispatched(
+            "post_close_window requires a non-null window handle",
+        ));
+    }
+    if unsafe { PostMessageW(window, WM_CLOSE, 0, 0) } == 0 {
+        return Err(InputDispatchError::not_dispatched(
+            "Windows declined to queue a WM_CLOSE message for the target window",
+        ));
     }
     Ok(())
 }

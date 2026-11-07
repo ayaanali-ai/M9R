@@ -31,6 +31,7 @@ fn bounded_response_bytes(response: &Value, operation: Option<&str>) -> Result<V
                 | "sendKeyCombo"
                 | "sendText"
                 | "sendTextToWindow"
+                | "postCloseWindow"
         )
     ) {
         fallback["dispatchState"] = json!("uncertain");
@@ -159,8 +160,9 @@ fn run_spawn_test_window(dual: bool) -> ! {
         SendMessageW, TranslateMessage, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG, WINDOW_STYLE,
         WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
-    // EM_SETSEL (there is no typed constant for it in this crate version).
+    // EM_SETSEL/EM_GETMODIFY (there is no typed constant for either in this crate version).
     const EM_SETSEL: u32 = 0x00B1;
+    const EM_GETMODIFY: u32 = 0x00B8;
     const WM_CHAR: u32 = 0x0102;
 
     // Each field is its own real, standalone top-level Edit control -- never a
@@ -238,6 +240,14 @@ fn run_spawn_test_window(dual: bool) -> ! {
     // changes, so the test can read real, current content directly instead
     // of relying on a Win32 API that cannot do this across processes.
     let content_path_for = |hwnd: isize| std::env::temp_dir().join(format!("m9r-test-window-content-{hwnd}.txt"));
+    // T3's isolating control: does a classic Win32 Edit control's OWN internal
+    // modified flag (EM_GETMODIFY, the exact mechanism Notepad itself would
+    // consult to decide whether to prompt on close) actually get set by a
+    // posted WM_CHAR, as it would for real typed input? This answers whether
+    // the WM_CHAR delivery mechanism itself is sound for a classic control,
+    // independent of whatever Notepad's own modern (non-classic) text host
+    // does or does not do with it.
+    let modified_path_for = |hwnd: isize| std::env::temp_dir().join(format!("m9r-test-window-modified-{hwnd}.txt"));
     let mut message = MSG::default();
     loop {
         unsafe {
@@ -249,6 +259,8 @@ fn run_spawn_test_window(dual: bool) -> ! {
                 let written = GetWindowTextW(message.hwnd, &mut buffer);
                 let text = String::from_utf16_lossy(&buffer[..written.max(0) as usize]);
                 let _ = std::fs::write(content_path_for(message.hwnd.0 as isize), text.as_bytes());
+                let modified = SendMessageW(message.hwnd, EM_GETMODIFY, None, None).0 != 0;
+                let _ = std::fs::write(modified_path_for(message.hwnd.0 as isize), if modified { "1" } else { "0" });
             }
         }
     }
@@ -257,6 +269,190 @@ fn run_spawn_test_window(dual: bool) -> ! {
 #[cfg(windows)]
 fn w_edit() -> windows::core::PCWSTR {
     windows::core::w!("Edit")
+}
+
+/// Phase 0 T3 test-only scaffolding: simulates the real owner continuously
+/// typing into a real foreground window of their own, via real `SendInput`
+/// (the same hardware-level channel a human's keyboard uses), while an
+/// M9R agent does real background work elsewhere. This is the control that
+/// proves the background channel never disturbs real foreground input: it
+/// never talks to M9R at all, and reports its own ground truth -- what it
+/// intended to type, what the control actually ended up containing, whether
+/// it ever lost real OS foreground, and whether the real cursor ever moved
+/// -- to a small file the test reads directly. Never reached by any
+/// production action path.
+#[cfg(windows)]
+fn run_spawn_foreground_typer() -> ! {
+    use std::mem::size_of;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, CreateWindowExW, GetCursorPos, GetForegroundWindow, GetWindowTextW,
+        GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, CW_USEDEFAULT, ES_AUTOHSCROLL,
+        SW_MINIMIZE, SW_RESTORE, WINDOW_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    };
+
+    // Minimal, self-contained SendInput plumbing (this binary's test-only
+    // code does not reach into the library crate's private win32 module;
+    // --spawn-test-window already establishes this precedent for other
+    // Win32 calls this harness needs).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct KeyboardInput {
+        vk: u16,
+        scan: u16,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    union InputData {
+        keyboard: KeyboardInput,
+        alignment: usize,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Input {
+        kind: u32,
+        data: InputData,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+        fn Sleep(milliseconds: u32);
+        fn AttachThreadInput(attach_from: u32, attach_to: u32, attach: i32) -> i32;
+        fn GetCurrentThreadId() -> u32;
+    }
+    const INPUT_KEYBOARD: u32 = 1;
+    const KEYEVENTF_UNICODE: u32 = 0x0004;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    let send_unicode_char = |unit: u16| -> bool {
+        let down = Input {
+            kind: INPUT_KEYBOARD,
+            data: InputData {
+                keyboard: KeyboardInput { vk: 0, scan: unit, flags: KEYEVENTF_UNICODE, time: 0, extra_info: 0 },
+            },
+        };
+        let mut up = down;
+        up.data.keyboard.flags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        unsafe {
+            SendInput(1, &down, size_of::<Input>() as i32) == 1
+                && SendInput(1, &up, size_of::<Input>() as i32) == 1
+        }
+    };
+    const VK_MENU: u16 = 0x12;
+    let send_vk_key = |vk: u16, key_up: bool| {
+        let input = Input {
+            kind: INPUT_KEYBOARD,
+            data: InputData {
+                keyboard: KeyboardInput { vk, scan: 0, flags: if key_up { KEYEVENTF_KEYUP } else { 0 }, time: 0, extra_info: 0 },
+            },
+        };
+        unsafe { SendInput(1, &input, size_of::<Input>() as i32) };
+    };
+    let window = unsafe {
+        CreateWindowExW(
+            Default::default(),
+            w_edit(),
+            PCWSTR::null(),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            220,
+            80,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .expect("creating the real foreground-typer window");
+
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+
+    // This test-only window competes for real OS foreground against whatever
+    // app was just activated moments earlier (e.g. the real app under test,
+    // launched right before this spawns) -- a single unguarded
+    // SetForegroundWindow can silently lose that race under Windows'
+    // foreground-activation lock, which would make this harness falsely
+    // report "foreground lost" from its own flaky startup, not from
+    // anything the test actually disturbed. Retry with the same escalation
+    // M9R's own production foreground lease uses (AttachThreadInput, an
+    // Alt-key tap to reset the "last input" lock, then minimize/restore as
+    // a last resort), and verify with GetForegroundWindow() before trusting
+    // it.
+    let try_raise_typer_window = || -> bool {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            let current_thread = GetCurrentThreadId();
+            let mut foreground_thread = 0u32;
+            if !foreground.0.is_null() {
+                GetWindowThreadProcessId(foreground, Some(&mut foreground_thread));
+            }
+            let attached = foreground_thread != 0 && foreground_thread != current_thread
+                && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+            let _ = BringWindowToTop(window);
+            let _ = SetForegroundWindow(window);
+            if attached {
+                AttachThreadInput(current_thread, foreground_thread, 0);
+            }
+            GetForegroundWindow() == window
+        }
+    };
+
+    if !try_raise_typer_window() {
+        send_vk_key(VK_MENU, false);
+        send_vk_key(VK_MENU, true);
+        if !try_raise_typer_window() {
+            unsafe {
+                let _ = ShowWindow(window, SW_MINIMIZE);
+                let _ = ShowWindow(window, SW_RESTORE);
+            }
+            try_raise_typer_window();
+        }
+    }
+
+    let mut cursor_start = POINT::default();
+    unsafe { let _ = GetCursorPos(&mut cursor_start); }
+
+    let report_path = std::env::temp_dir().join(format!("m9r-foreground-typer-{}.json", std::process::id()));
+    let mut foreground_ever_lost = false;
+    let mut cursor_ever_moved = false;
+    let mut intended = String::new();
+    let cycle = "0123456789";
+
+    loop {
+        for ch in cycle.chars() {
+            let unit = ch as u16;
+            let _ = send_unicode_char(unit);
+            intended.push(ch);
+            unsafe { Sleep(60) };
+
+            if unsafe { GetForegroundWindow() } != window {
+                foreground_ever_lost = true;
+            }
+            let mut cursor_now = POINT::default();
+            unsafe { let _ = GetCursorPos(&mut cursor_now); }
+            if (cursor_now.x - cursor_start.x).abs() >= 1 || (cursor_now.y - cursor_start.y).abs() >= 1 {
+                cursor_ever_moved = true;
+            }
+
+            let mut buffer = [0u16; 8192];
+            let written = unsafe { GetWindowTextW(window, &mut buffer) };
+            let actual = String::from_utf16_lossy(&buffer[..written.max(0) as usize]);
+
+            let report = serde_json::json!({
+                "pid": pid,
+                "intended": intended,
+                "actual": actual,
+                "foregroundEverLost": foreground_ever_lost,
+                "cursorEverMoved": cursor_ever_moved,
+            });
+            let _ = std::fs::write(&report_path, report.to_string());
+        }
+    }
 }
 
 fn main() {
@@ -275,6 +471,15 @@ fn main() {
         #[cfg(not(windows))]
         {
             eprintln!("--spawn-test-window-dual is available only on Windows");
+            std::process::exit(2);
+        }
+    }
+    if std::env::args().nth(1).as_deref() == Some("--spawn-foreground-typer") {
+        #[cfg(windows)]
+        run_spawn_foreground_typer();
+        #[cfg(not(windows))]
+        {
+            eprintln!("--spawn-foreground-typer is available only on Windows");
             std::process::exit(2);
         }
     }

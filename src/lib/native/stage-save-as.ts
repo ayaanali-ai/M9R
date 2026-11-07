@@ -75,6 +75,21 @@ export function findSaveAsButton<T extends SaveAsControl>(controls: readonly T[]
   return buttons.length === 1 ? buttons[0] : undefined;
 }
 
+/**
+ * Resolve one explicit, enabled button in a dialog by its exact accessible
+ * label (e.g. "Save", "Don't Save", "Cancel") -- the generic sibling of
+ * findSaveAsButton for ordinary confirm/prompt dialogs that have no file
+ * name field at all. Ambiguity (zero or more than one match) is never
+ * guessed through.
+ */
+export function findDialogButton<T extends SaveAsControl>(controls: readonly T[], label: string): T | undefined {
+  const target = normalizeSaveLabel(label);
+  const buttons = controls.filter((control) => control.enabled && /^button$/i.test(control.role)
+    && (control.actions?.invoke === true || control.actions?.legacy === true)
+    && normalizeSaveLabel(control.label) === target);
+  return buttons.length === 1 ? buttons[0] : undefined;
+}
+
 export interface SaveAsConflictDecision {
   recognized: boolean;
   confirm?: boolean;
