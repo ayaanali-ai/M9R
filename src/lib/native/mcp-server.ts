@@ -1070,7 +1070,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           }
         }
         if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
-        await sleep(300);
+        // Tightened from 300ms: this loop only re-reads the local store (cheap,
+        // bounded arrays), so a shorter interval lowers delivered-task latency
+        // without adding meaningful load. True push delivery (no poll at all)
+        // needs a cross-file event audit and is tracked separately.
+        await sleep(100);
       }
     },
   );

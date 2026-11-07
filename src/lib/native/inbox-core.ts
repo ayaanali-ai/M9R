@@ -241,6 +241,8 @@ export interface Task {
   lifecycle?: TaskLifecycle;
   /** Provider-neutral delivery receipt; old state files may not have this field and are backfilled on mutation. */
   receipt?: TaskReceipt;
+  /** Verified M9R runtime build ids that actually executed one or more turns for this task. */
+  runtimeBuildIds?: string[];
   /** Working directory of the sender; used to pick the target's session when several are open. */
   cwd?: string;
   /** Session id (or unique prefix) the sender pinned, so a push never has to guess. */

@@ -30,6 +30,7 @@ import { canQueue } from "./codex-delivery-core";
 import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
 import type { MultiplayerA2ASendInput, MultiplayerRuntime } from "./multiplayer-runtime";
+import { computerUseLatencySummary } from "./computer-use-latency";
 
 const MAX_BODY_BYTES = 16 * 1024;
 const LOCAL_AWARE_ROOM_ID = "room-local";
@@ -448,7 +449,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     "/web/aware/disclosures/decision", "/web/protocol",
     "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note", "/web/ui/model",
   ]);
-  const ownerPipeReadPaths = new Set(["/web/aware/members", "/web/aware/disclosures"]);
+  const ownerPipeReadPaths = new Set(["/web/aware/members", "/web/aware/disclosures", "/web/diagnostics/latency"]);
   const ownerReply = (ok: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ ok, ...extra });
   function memberPrincipal(body: Record<string, unknown>): string | null {
     const agent = body.agent;
@@ -495,6 +496,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     }
     if (request.path === "/web/protocol" && request.method === "GET") {
       return ownerReply(true, { protocol: "m9r-web/0", messages: protocolLedger.snapshot() });
+    }
+    if (request.path === "/web/diagnostics/latency" && request.method === "GET") {
+      return ownerReply(true, { summary: computerUseLatencySummary() });
     }
     if (request.path === "/web/protocol" && request.method === "POST") {
       if (typeof request.body !== "object" || request.body === null || Array.isArray(request.body)) return ownerReply(false, { error: "protocol message must be an object" });

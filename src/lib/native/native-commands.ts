@@ -990,6 +990,23 @@ export function printNativeStatus(io: NativeIo): void {
  * Saves a fact or decision to the shared project memory that every agent reads at session start (the same store `m9r_note`
  * writes). The room is the folder the broker was set up for, so a note saved from the desktop pill lands where the agents look.
  */
+export async function runLatency(io: NativeIo): Promise<number> {
+  const root = nativePaths(io).m9r;
+  const response = await requestOwnerPipe<{ ok?: boolean; summary?: { sampleCount: number; phases: Record<string, { count: number; avgMs: number; maxMs: number; budgetMs: number; exceededCount: number }> }; error?: string }>(
+    ownerPipePath(root), { method: "GET", path: "/web/diagnostics/latency" }, 2_000);
+  if (!response || !response.ok || !response.summary) {
+    io.err(response?.error ?? "Could not reach the M9R broker for latency diagnostics.");
+    return 1;
+  }
+  const { sampleCount, phases } = response.summary;
+  if (sampleCount === 0) { io.out("No computer-use actions recorded yet in this broker run."); return 0; }
+  io.out(`Computer-use latency over ${sampleCount} recorded action(s):`);
+  for (const [phase, stats] of Object.entries(phases)) {
+    io.out(`  ${phase}: avg ${stats.avgMs}ms, max ${stats.maxMs}ms (budget ${stats.budgetMs}ms), exceeded ${stats.exceededCount}/${stats.count}`);
+  }
+  return 0;
+}
+
 export async function runNote(io: NativeIo, text: string): Promise<number> {
   const note = text.trim();
   if (!note) { io.err("Say what to remember: m9r note \"the staging URL is ...\""); return 1; }
@@ -1075,6 +1092,7 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "note") return runNote(io, positionals.join(" "));
+  if (command === "latency") return runLatency(io);
   if (command === "cloud") return runCloud(io, positionals, value("--url"));
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
   if (command === "pill-send") return runPillSend(io, rest.join(" "));

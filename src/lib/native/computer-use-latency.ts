@@ -23,3 +23,34 @@ export function recordComputerUseLatency(telemetry: ComputerUseTelemetry): void 
 export function computerUseLatencySnapshot() {
   return samples.map((sample) => ({ ...sample, timingsMs: { ...sample.timingsMs }, exceeded: [...sample.exceeded] }));
 }
+
+export interface ComputerUseLatencyPhaseSummary {
+  count: number;
+  avgMs: number;
+  maxMs: number;
+  budgetMs: number;
+  exceededCount: number;
+}
+
+export interface ComputerUseLatencySummary {
+  sampleCount: number;
+  phases: Partial<Record<Phase, ComputerUseLatencyPhaseSummary>>;
+}
+
+/** Aggregated, bounded, process-local. Safe to print or export as a benchmark baseline. */
+export function computerUseLatencySummary(): ComputerUseLatencySummary {
+  const phases: Partial<Record<Phase, ComputerUseLatencyPhaseSummary>> = {};
+  for (const phase of Object.keys(COMPUTER_USE_LATENCY_BUDGET_MS) as Phase[]) {
+    const values = samples.map((sample) => sample.timingsMs[phase]).filter((value): value is number => typeof value === "number");
+    if (values.length === 0) continue;
+    const sum = values.reduce((total, value) => total + value, 0);
+    phases[phase] = {
+      count: values.length,
+      avgMs: Math.round((sum / values.length) * 100) / 100,
+      maxMs: Math.max(...values),
+      budgetMs: COMPUTER_USE_LATENCY_BUDGET_MS[phase],
+      exceededCount: samples.filter((sample) => sample.exceeded.includes(phase)).length,
+    };
+  }
+  return { sampleCount: samples.length, phases };
+}

@@ -1072,6 +1072,19 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
+    /** Associate an execution with the verified owner-runtime build without storing provider credentials or prompts. */
+    recordTaskRuntimeBuild(taskId: string, buildId: string): boolean {
+      const normalizedBuildId = buildId.trim().toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(normalizedBuildId)) return false;
+      return update((s) => {
+        const task = s.tasks.find((candidate) => candidate.id === taskId);
+        if (!task) return false;
+        const prior = Array.isArray(task.runtimeBuildIds) ? task.runtimeBuildIds : [];
+        if (!prior.includes(normalizedBuildId)) task.runtimeBuildIds = [...prior, normalizedBuildId].slice(-8);
+        return true;
+      });
+    },
+
     /** Same idempotency key for the same recipient returns the existing task, so a repeated send delivers once. */
     addTask(input: NewTaskInput): { task: Task; created: boolean } {
       const scopedCwd = projectCwd(root, input.cwd);

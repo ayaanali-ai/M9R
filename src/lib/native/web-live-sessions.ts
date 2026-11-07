@@ -311,6 +311,8 @@ export interface WebLiveSessionsDeps {
     getTask?(id: string): Task | undefined;
     /** Best-effort provider-turn timing evidence; never gates or replays a task. */
     recordStageTiming?(id: string, event: StageTimingEvent): boolean;
+    /** Attach a verified owner-runtime build identity to task evidence. */
+    recordTaskRuntimeBuild?(id: string, buildId: string): boolean;
     /** Close a room task when its provider reports a terminal failure before m9r_result can run. */
     setResult?(id: string, summary: string): unknown;
     /** Record a terminal provider failure without mislabeling it as a completed result. */

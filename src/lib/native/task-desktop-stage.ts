@@ -421,6 +421,11 @@ export function createTaskDesktopStageService(input: {
   };
   const ownedApps = new Map<string, OwnedStageApp>();
   const activeAgentCursors = new Map<string, CuaAgentCursorIdentity>();
+  // A single failed identity/policy lookup is far more likely to be a transient
+  // token-refresh or policy-reload race than a genuinely revoked session. Only
+  // tear the cursor down after several consecutive failed ticks.
+  const cursorAuthFailures = new Map<string, number>();
+  const CURSOR_REVOKE_AFTER_FAILURES = 3;
   let cursorReaperQueued = false;
 
   function recoverPersistedApp(name: string, taskId: string): OwnedStageApp | undefined {
@@ -1533,13 +1538,19 @@ export function createTaskDesktopStageService(input: {
           authorized = Boolean(current && current.sessionId === identity.sessionId
             && normalizeHandle(current.handle) === normalizeHandle(identity.handle)
             && policy.handles.includes(normalizeHandle(identity.handle)));
-        } catch { /* policy or identity storage failure revokes the visual agent session */ }
-        if (!authorized) {
-          try {
-            await driver.closeAgentCursor(identity);
-            activeAgentCursors.delete(key);
-          } catch { /* retry revocation on the next tick; Driver idle-hide is the fail-safe */ }
+        } catch { /* policy or identity storage failure counts as a failed tick below */ }
+        if (authorized) {
+          cursorAuthFailures.delete(key);
+          continue;
         }
+        const failures = (cursorAuthFailures.get(key) ?? 0) + 1;
+        cursorAuthFailures.set(key, failures);
+        if (failures < CURSOR_REVOKE_AFTER_FAILURES) continue;
+        try {
+          await driver.closeAgentCursor(identity);
+          activeAgentCursors.delete(key);
+          cursorAuthFailures.delete(key);
+        } catch { /* retry revocation on the next tick; Driver idle-hide is the fail-safe */ }
       }
     };
     const result = reaperPending.then(reconcile, reconcile);

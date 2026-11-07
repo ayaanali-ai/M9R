@@ -3484,6 +3484,7 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "pill-note":
     case "pill-model":
     case "note":
+    case "latency":
     case "cloud":
     case "tasks":
     case "task-log":

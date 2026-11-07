@@ -27,6 +27,7 @@ import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
 import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
+import { readRuntimeBuildIdentity } from "@/lib/native/runtime-build-identity";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -42,6 +43,9 @@ async function main(): Promise<void> {
   if (projectRootIndex >= 0 && args[projectRootIndex + 1]) process.env.M9R_PROJECT_ROOT = args[projectRootIndex + 1];
   const projectRoot = resolve(process.env.M9R_PROJECT_ROOT?.trim() || process.cwd());
   process.env.M9R_PROJECT_ROOT = projectRoot;
+  const runtimeIdentity = readRuntimeBuildIdentity(process.execPath);
+  const verifiedRuntimeBuildId = runtimeIdentity.status === "verified" ? runtimeIdentity.buildId : undefined;
+  const runtimeBuildFingerprint = verifiedRuntimeBuildId;
   const managedEnvironment: Record<string, string | undefined> = { ...process.env };
   const root = defaultStoreRoot(homedir(), process.env);
   const colorStore = createLocalStore(root);
@@ -129,7 +133,7 @@ async function main(): Promise<void> {
   const stopPillStartup = startDesktopOverlay(root);
   const providerSessions = createManagedProviderOwner({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,
-    store, env: managedEnvironment, onEvent: (event) => ui.onSessionEvent(event),
+    store, env: managedEnvironment, runtimeBuildFingerprint, verifiedRuntimeBuildId, onEvent: (event) => ui.onSessionEvent(event),
     onOwnerTaskCreated: (taskId) => { void taskStages.primeCursorForOwner(taskId); },
   });
   sessionOwner.current = providerSessions;

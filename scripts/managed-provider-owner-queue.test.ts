@@ -76,7 +76,7 @@ test("an error result is durably failed and is not counted as a first action", a
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-result-error-"));
   const store = createLocalStore(root);
   const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
-    repoRoot: root, brokerPort: 0, store, env: {}, createConnection: (profile) => {
+    repoRoot: root, brokerPort: 0, store, env: {}, verifiedRuntimeBuildId: "cd".repeat(32), createConnection: (profile) => {
       const connection: ManagedProviderConnection = {
         profile,
         start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
@@ -107,9 +107,53 @@ test("an error result is durably failed and is not counted as a first action", a
     assert.equal(task.receipt?.state, "failed");
     assert.equal(task.delivery?.state, "failed");
     assert.match(task.receipt?.error ?? "", /API rejected the tool schema/);
+    assert.deepEqual(task.runtimeBuildIds, ["cd".repeat(32)], "the executing verified runtime is attached to task evidence");
     assert.equal(task.stageTiming?.some((event) => event.phase === "first-visible-action"), false,
       "provider prose and a terminal result are not a UI action");
     assert.equal(task.stageTiming?.find((event) => event.phase === "completion")?.status, "error");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an A2A provider error is durably failed with build evidence, not left as accepted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-room-error-"));
+  const store = createLocalStore(root);
+  const task = store.addTask({ from: "web-codex", to: "claude", goal: "Calculate and report the result.", origin: "agent_initiated", idempotencyKey: "room-error" }).task;
+  const events: unknown[] = [];
+  const owner = createManagedProviderOwner({
+    agents: [{ handle: "claude", provider: "claude-code", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, verifiedRuntimeBuildId: "ef".repeat(32), onEvent: (event) => events.push(event),
+    createConnection: (profile) => {
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* () {
+          yield { kind: "accepted" };
+          yield { kind: "result", text: "API rejected the MCP tool schema.", isError: true };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    },
+  });
+  try {
+    assert.equal(owner.deliver("claude", "Run the assigned check.", task.id).ok, true);
+    for (let attempt = 0; attempt < 100 && store.getTask(task.id)?.receipt?.state !== "failed"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    const failed = store.getTask(task.id)!;
+    assert.equal(failed.receipt?.state, "failed", JSON.stringify({ failed, events }));
+    assert.equal(failed.lifecycle?.state, "failed", "A2A tasks use task lifecycle rather than owner transport receipts");
+    assert.match(failed.receipt?.error ?? "", /API rejected the MCP tool schema/);
+    assert.deepEqual(failed.runtimeBuildIds, ["ef".repeat(32)]);
+    assert.equal(failed.resultSummary, undefined, "a provider error is never exposed as a successful answer");
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 

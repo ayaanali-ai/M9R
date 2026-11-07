@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { preDispatchRetry } from "../src/lib/native/computer-use-recovery";
 import { selectActionDelivery } from "../src/lib/native/multiplayer-action-policy";
-import { recordComputerUseLatency, computerUseLatencySnapshot } from "../src/lib/native/computer-use-latency";
+import { computerUseLatencySummary, recordComputerUseLatency, computerUseLatencySnapshot } from "../src/lib/native/computer-use-latency";
 import { createWebBroker } from "../src/lib/native/web-broker-core";
 import { desktopWindowMutationTarget } from "../src/lib/native/multiplayer-dispatch-fence";
 
@@ -30,6 +30,9 @@ test("latency budgets retain bounded internal measurements independently of deli
   assert.deepEqual(snapshot[0]?.exceeded, ["totalMs"]);
   snapshot[0]!.timingsMs.totalMs = 0;
   assert.equal(computerUseLatencySnapshot()[0]?.timingsMs.totalMs, 5_001);
+  const summary = computerUseLatencySummary();
+  assert.equal(summary.sampleCount, 256);
+  assert.deepEqual(summary.phases.totalMs, { count: 256, avgMs: 5_001, maxMs: 5_001, budgetMs: 5_000, exceededCount: 256 });
 });
 
 test("only trusted browser delivery receipts can certify a pre-dispatch refusal", async () => {

@@ -25,8 +25,18 @@ export function stateLabel(t: Task): string {
   if (t.approval === "pending") return "awaiting approval";
   if (t.approval === "denied") return "denied";
   if (t.approval === "expired") return "lapsed";
-  if (t.delivery?.state === "done") return "answered";
   if (t.retiredAt) return "retired from live delivery; history retained";
+  // The receipt describes execution; delivery only describes transport. A turn
+  // can pause or fail while its earlier transport receipt remains queued.
+  if (t.receipt?.state === "canceled") return "canceled";
+  if (t.receipt?.state === "failed") return "failed";
+  if (t.receipt?.state === "paused") return t.completion?.status === "incomplete" ? "paused; incomplete" : "paused";
+  if (t.receipt?.state === "completed") return "answered";
+  if (t.receipt?.state === "uncertain") return "outcome uncertain; inspect before retrying";
+  if (t.receipt?.state === "retryable") return "retryable; waiting for delivery";
+  if (t.completion?.status === "incomplete") return "paused; incomplete";
+  if (t.completion?.status === "completed" || t.resultSummary !== undefined || t.lifecycle?.state === "completed" || t.delivery?.state === "done") return "answered";
+  if (t.lifecycle?.state === "failed") return "failed";
   if (t.delivery?.state === "queued") return "accepted by the session; waiting for a result";
   if (t.delivery?.state === "sending") return "being sent to the session";
   if (t.delivery?.state === "deferred") return "waiting for the preceding task; resumes automatically";
@@ -143,6 +153,7 @@ export function runTaskLog(io: ApprovalIo, storeRoot: string, rawId: string | un
         error: task.receipt.error,
         history: (task.receipt.history ?? []).map(({ state, at, attempt, source, basis, error }) => ({ state, at, attempt, source, basis, error })),
       },
+      runtimeBuildIds: task.runtimeBuildIds ?? [],
       resultSummary: task.resultSummary,
       completion: task.completion,
     },

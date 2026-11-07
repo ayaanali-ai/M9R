@@ -17,7 +17,8 @@ import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 type TestVisibleWindow = { pid: number; windowId: string; title: string; width: number; height: number;
   appName?: string; processName?: string | null; className?: string; zOrder?: number; processPath?: string | null; appUserModelId?: string | null };
 
-function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec) {
+function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
+  readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
@@ -28,6 +29,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   let foregroundWindow = { pid: 123, windowId: "456" };
   const nativeOps: string[] = [];
   const presentedWindows: Array<{ pid: number; windowId: string }> = [];
+  const cursorEvents: string[] = [];
   let visibleWindows: TestVisibleWindow[] = [];
   const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
   const driver = {
@@ -38,8 +40,11 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
       return { capture: previewCapture, outcome: { status: "confirmed" as const } };
     },
     focusWindow: async () => ({ capture: previewCapture, outcome: { status: "confirmed" as const } }),
+    showAgentCursor: async (_stageName: string, cursorIdentity: { handle: string; sessionId: string }) => { cursorEvents.push(`show:${cursorIdentity.sessionId}`); },
+    closeAgentCursor: async (cursorIdentity: { handle: string; sessionId: string }) => { cursorEvents.push(`close:${cursorIdentity.sessionId}`); },
+    shutdown: async () => undefined,
   } as unknown as ReturnType<typeof createCuaStageDriver>;
-  const service = createTaskDesktopStageService({ store, readPolicy: () => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) }), driver,
+  const service = createTaskDesktopStageService({ store, readPolicy: readPolicyOverride ?? (() => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) })), driver,
     ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
     platform: "win32", env: {}, invokeNative: async (request) => {
       nativeOps.push(String(request.op));
@@ -57,10 +62,36 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     },
   } });
   return { root, store, identity, task, service, driver, nativeOps, presentedWindows,
+    cursorEvents,
     setForegroundWindow: (pid: number, windowId: string) => { foregroundWindow = { pid, windowId }; },
     setVisibleWindows: (windows: TestVisibleWindow[]) => { visibleWindows = windows; },
     retiredDesktopOpCount: () => retiredDesktopOpCount, creations: () => retiredDesktopOpCount, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("transient cursor policy reads do not close the agent overlay until three consecutive failures", async () => {
+  let policyUnavailable = false;
+  const f = fixture(false, undefined, () => {
+    if (policyUnavailable) throw new Error("transient policy read failure");
+    return { handles: ["codex"] };
+  });
+  const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 2_100));
+  try {
+    f.store.registerEndpoint({ provider: "codex", sessionId: "session-one" });
+    const shown = await f.service.primeCursor(f.identity.token, f.task.id);
+    assert.equal(shown.shown, true);
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+    policyUnavailable = true;
+    await waitForReaperTick();
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+    await waitForReaperTick();
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+    await waitForReaperTick();
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"]);
+  } finally {
+    await f.service.close();
+    f.cleanup();
+  }
+});
 
 test("task timing persists native subphase labels, operation correlation, and fractional duration", () => {
   const f = fixture();

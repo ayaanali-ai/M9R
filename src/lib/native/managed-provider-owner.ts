@@ -64,6 +64,8 @@ export interface ManagedProviderOwnerDeps {
   openCodeRuntime?: WebLiveSessionsDeps["openCodeRuntime"];
   /** Stable non-secret runtime/build identity used to invalidate readiness proofs after an update. */
   runtimeBuildFingerprint?: string;
+  /** Build id read from a verified runtime manifest; only this value is recorded in task evidence. */
+  verifiedRuntimeBuildId?: string;
   /** Optional injected bounded telemetry store; production creates one per owner. */
   latencyTelemetry?: LatencyTelemetry;
   /** Test seam. Production uses the provider adapters below. */
@@ -574,6 +576,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
 
   async function runTask(profile: ManagedProviderConnectionProfile, taskId: string, text: string, kind: ActiveTask["kind"]): Promise<void> {
     const context = contextFor(profile);
+    if (deps.verifiedRuntimeBuildId) deps.store.recordTaskRuntimeBuild?.(taskId, deps.verifiedRuntimeBuildId);
     // Every provider turn gets a short-lived UI fence. The provider may emit
     // late events while a stop/restart is unwinding; tagging the live turn
     // prevents those fragments from being merged into a later turn from the
@@ -869,7 +872,12 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     }
   }
 
-  const bridgeTimer = setInterval(() => { void bridgeOnce().catch(() => undefined); }, 700);
+  // Tightened from 700ms: bridgeOnce only scans bounded in-memory arrays per
+  // connected profile, so a shorter interval lowers A2A delivery latency
+  // without meaningful cost. True push delivery (fire on the store write
+  // instead of polling at all) needs an audit of every "agent_initiated"
+  // task-write call site and is tracked separately.
+  const bridgeTimer = setInterval(() => { void bridgeOnce().catch(() => undefined); }, 150);
   bridgeTimer.unref?.();
   let shutdownPromise: Promise<void> | undefined;
 
