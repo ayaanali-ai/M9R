@@ -152,94 +152,66 @@ fn run_desktop_stage_server() -> Result<(), String> {
 /// path; only ever invoked directly by test code.
 #[cfg(windows)]
 fn run_spawn_test_window(dual: bool) -> ! {
-    use windows::core::{w, PCWSTR};
+    use windows::core::w;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowThreadProcessId,
-        PostQuitMessage, RegisterClassW, TranslateMessage, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG,
-        WINDOW_STYLE, WM_DESTROY, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        CreateWindowExW, DispatchMessageW, GetMessageW, GetWindowTextW, GetWindowThreadProcessId,
+        SendMessageW, TranslateMessage, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG, WINDOW_STYLE,
+        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
+    // EM_SETSEL (there is no typed constant for it in this crate version).
+    const EM_SETSEL: u32 = 0x00B1;
+    const WM_CHAR: u32 = 0x0102;
 
-    unsafe extern "system" fn wndproc(
-        window: windows::Win32::Foundation::HWND,
-        message: u32,
-        wparam: windows::Win32::Foundation::WPARAM,
-        lparam: windows::Win32::Foundation::LPARAM,
-    ) -> windows::Win32::Foundation::LRESULT {
-        if message == WM_DESTROY {
-            unsafe { PostQuitMessage(0) };
-            return windows::Win32::Foundation::LRESULT(0);
-        }
-        unsafe { DefWindowProcW(window, message, wparam, lparam) }
-    }
-
-    let (top, field1, field2) = unsafe {
-        let class_name = w!("M9RTestHarnessWindow");
-        let class = WNDCLASSW {
-            lpfnWndProc: Some(wndproc),
-            lpszClassName: class_name,
-            ..Default::default()
-        };
-        RegisterClassW(&class);
-        let top = CreateWindowExW(
+    // Each field is its own real, standalone top-level Edit control -- never a
+    // WS_CHILD of a wrapper window. Production window discovery (the same
+    // enumeration `launch()` uses) only surfaces top-level windows, so a
+    // control that is merely a child of one is invisible to it and can never
+    // be selected as the app's window. Making the Edit control itself the
+    // top-level window (exactly as the lower-level send_text_to_window_*
+    // Rust tests already do) keeps this harness consistent with what the
+    // real dispatch/readback path actually resolves and operates on.
+    //
+    // Window discovery also requires GetWindowTextW to return a nonzero
+    // length (a real app's top-level caption is never blank); for an Edit
+    // window that text *is* its content, so starting genuinely empty would
+    // make this window invisible to the same discovery `launch()` relies on.
+    // A one-character placeholder, selected immediately after creation,
+    // satisfies discovery while leaving the field exactly as empty from the
+    // dispatcher's point of view: the first posted WM_CHAR replaces the
+    // selection, same as a user typing over selected text, so the final
+    // content is exactly what was typed -- never the placeholder plus it.
+    let spawn_field = |x: i32| unsafe {
+        let field = CreateWindowExW(
             Default::default(),
-            class_name,
-            w!("M9R Test Window"),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            w_edit(),
+            w!("_"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            x,
             CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            if dual { 420 } else { 220 },
-            120,
+            // Production window discovery filters out anything smaller than
+            // 80x60; stay comfortably above that floor.
+            220,
+            80,
             None,
             None,
             None,
             None,
         )
-        .expect("creating the top-level test harness window");
-        let field1 = CreateWindowExW(
-            Default::default(),
-            w!("Edit"),
-            PCWSTR::null(),
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-            10,
-            10,
-            190,
-            24,
-            Some(top),
-            None,
-            None,
-            None,
-        )
-        .expect("creating test harness field 1");
-        let field2 = if dual {
-            Some(
-                CreateWindowExW(
-                    Default::default(),
-                    w!("Edit"),
-                    PCWSTR::null(),
-                    WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-                    210,
-                    10,
-                    190,
-                    24,
-                    Some(top),
-                    None,
-                    None,
-                    None,
-                )
-                .expect("creating test harness field 2"),
-            )
-        } else {
-            None
-        };
-        (top, field1, field2)
+        .expect("creating a standalone top-level Edit test window");
+        SendMessageW(field, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        field
     };
+
+    let field1 = spawn_field(CW_USEDEFAULT);
+    let field2 = if dual { Some(spawn_field(260)) } else { None };
 
     let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(top, Some(&mut pid)) };
+    unsafe { GetWindowThreadProcessId(field1, Some(&mut pid)) };
     let payload = match field2 {
         Some(field2) => json!({
             "pid": pid,
-            "windowId": format!("{}", top.0 as usize),
+            "windowId": format!("{}", field1.0 as usize),
             "fields": [format!("{}", field1.0 as usize), format!("{}", field2.0 as usize)],
         }),
         None => json!({ "pid": pid, "windowId": format!("{}", field1.0 as usize) }),
@@ -248,14 +220,43 @@ fn run_spawn_test_window(dual: bool) -> ! {
     use std::io::Write;
     let _ = stdout().flush();
 
+    // No custom WM_DESTROY handling: this process is test-only and is always
+    // torn down by the owning test killing it directly, never by a window
+    // close. The message loop just needs to keep running so PostMessageW'd
+    // WM_CHAR input is actually delivered.
+    //
+    // GetWindowTextW is documented to only retrieve a WINDOW'S OWN CACHED
+    // CAPTION when called from a different process than the one that owns
+    // it -- it cannot read a control's live content cross-process, by OS
+    // design, regardless of how correctly WM_CHAR was delivered and
+    // processed. There is no raw-HWND way around this; the only correct
+    // cross-process reads are UI Automation (what the rest of this codebase
+    // already uses for real semantic targets) or, for this disposable
+    // test-only harness with no real UIA label/AutomationId to address, the
+    // window reporting its own live content itself. Write it to a small,
+    // predictable file keyed by this window's own HWND every time it
+    // changes, so the test can read real, current content directly instead
+    // of relying on a Win32 API that cannot do this across processes.
+    let content_path_for = |hwnd: isize| std::env::temp_dir().join(format!("m9r-test-window-content-{hwnd}.txt"));
     let mut message = MSG::default();
-    while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
+    loop {
         unsafe {
+            let _ = GetMessageW(&mut message, None, 0, 0);
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
+            if message.message == WM_CHAR {
+                let mut buffer = [0u16; 512];
+                let written = GetWindowTextW(message.hwnd, &mut buffer);
+                let text = String::from_utf16_lossy(&buffer[..written.max(0) as usize]);
+                let _ = std::fs::write(content_path_for(message.hwnd.0 as isize), text.as_bytes());
+            }
         }
     }
-    std::process::exit(0);
+}
+
+#[cfg(windows)]
+fn w_edit() -> windows::core::PCWSTR {
+    windows::core::w!("Edit")
 }
 
 fn main() {
