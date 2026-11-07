@@ -1687,14 +1687,18 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     signal?: AbortSignal;
   }): Promise<CuaStageActionOutcome> {
     const windowId = input.windowId.toString();
-    if (!input.signal && !input.preferForeground && input.nativeInput && await input.nativeInput()) {
+    // A live, not-yet-aborted signal is the normal case for every real call (act()
+    // always hands one in, purely so an in-flight action can be cancelled). Only an
+    // *already aborted* signal is a reason to skip these fast, headless-safe paths;
+    // the mere presence of a cancellable signal is not.
+    if (!input.signal?.aborted && !input.preferForeground && input.nativeInput && await input.nativeInput()) {
       return { status: "unverifiable", summary: "Posted text to the selected native edit control; application effect requires verification." };
     }
     // Background mode must never fall through to SendInput (see the fail-closed guard in
     // driverInputAction below), but a plain Win32 control that lacks a UIA value pattern still
     // has a real headless route: WM_CHAR posted straight to its own message queue, which never
     // requires and never steals OS foreground. Try it before giving up as unavailable.
-    if (!input.signal && !input.preferForeground && input.deliveryMode === "background") {
+    if (!input.signal?.aborted && !input.preferForeground && input.deliveryMode === "background") {
       await manager.sendTextToWindow(input.pid, windowId, input.text);
       return { status: "unverifiable", summary: "Posted text to the target window's own message queue (WM_CHAR, no OS foreground required); application effect requires verification." };
     }
