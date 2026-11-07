@@ -157,10 +157,18 @@ test("an A2A provider error is durably failed with build evidence, not left as a
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("OpenCode keeps the user's credential data home while isolating M9R tool policy", async () => {
+test("OpenCode preserves owner config, account and model sources while injecting M9R tool policy", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-opencode-home-"));
+  const ownerConfig = join(root, "owner-opencode-config");
   const ownerData = join(root, "owner-opencode-data");
   const ownerCache = join(root, "owner-opencode-cache");
+  const customConfig = join(root, "custom-opencode.json");
+  const inlineConfig = {
+    model: "local/custom-model",
+    provider: { local: { options: { baseURL: "http://127.0.0.1:11434/v1" } } },
+    mcp: { owner_docs: { type: "local", command: ["owner-docs"], enabled: true }, m9r: { command: ["stale-m9r"] } },
+    tools: { owner_docs_search: true, bash: true },
+  };
   const store = createLocalStore(root);
   let capturedEnv: Record<string, string | undefined> | undefined;
   const owner = createManagedProviderOwner({
@@ -169,7 +177,8 @@ test("OpenCode keeps the user's credential data home while isolating M9R tool po
     repoRoot: root,
     brokerPort: 0,
     store,
-    env: { XDG_DATA_HOME: ownerData, XDG_CACHE_HOME: ownerCache, M9R_OPENCODE_MODEL: "openai/gpt-6.1-sol" },
+    env: { XDG_CONFIG_HOME: ownerConfig, XDG_DATA_HOME: ownerData, XDG_CACHE_HOME: ownerCache,
+      OPENCODE_CONFIG: customConfig, OPENCODE_CONFIG_CONTENT: JSON.stringify(inlineConfig), M9R_OPENCODE_MODEL: "openai/gpt-6.1-sol" },
     opencodeExe: () => "opencode",
     openCodeRuntime: ({ env, model }) => {
       capturedEnv = env;
@@ -188,8 +197,56 @@ test("OpenCode keeps the user's credential data home while isolating M9R tool po
     assert.deepEqual(started.failures, []);
     assert.equal(capturedEnv?.XDG_DATA_HOME, ownerData, "OpenCode auth/account data is not hidden in a new M9R directory");
     assert.equal(capturedEnv?.XDG_CACHE_HOME, ownerCache);
-    assert.notEqual(capturedEnv?.XDG_CONFIG_HOME, root, "M9R continues to isolate its provider tool-policy config");
-    assert.match(capturedEnv?.XDG_CONFIG_HOME ?? "", /managed-provider-sessions/);
+    assert.equal(capturedEnv?.XDG_CONFIG_HOME, ownerConfig, "owner provider and model definitions stay visible");
+    assert.equal(capturedEnv?.OPENCODE_CONFIG, customConfig, "custom config remains an OpenCode-owned source");
+    const config = JSON.parse(capturedEnv!.OPENCODE_CONFIG_CONTENT!) as typeof inlineConfig;
+    assert.equal(config.model, inlineConfig.model);
+    assert.deepEqual(config.provider, inlineConfig.provider);
+    assert.deepEqual(config.mcp.owner_docs, inlineConfig.mcp.owner_docs);
+    assert.notDeepEqual(config.mcp.m9r.command, ["stale-m9r"], "only M9R's own MCP entry is refreshed");
+    assert.equal(config.tools.owner_docs_search, true);
+    assert.equal(config.tools.bash, false, "existing M9R builtin policy remains authoritative for this process");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("OpenCode rejects malformed inline owner config without discarding or echoing it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-invalid-config-"));
+  const original = "{invalid-owner-config-content";
+  const environment = { OPENCODE_CONFIG_CONTENT: original };
+  let launched = false;
+  const owner = createManagedProviderOwner({ agents: [{ handle: "opencode", provider: "opencode", folder: root }],
+    storeRoot: root, repoRoot: root, brokerPort: 0, store: createLocalStore(root), env: environment,
+    opencodeExe: () => "opencode", openCodeRuntime: () => { launched = true; throw new Error("must not launch"); } });
+  try {
+    const started = await owner.start();
+    assert.equal(started.failures.length, 1);
+    assert.match(started.failures[0].error, /OpenCode inline configuration is invalid JSON/);
+    assert.equal(started.failures[0].error.includes(original), false, "configuration contents are never copied into the diagnostic");
+    assert.equal(environment.OPENCODE_CONFIG_CONTENT, original);
+    assert.equal(launched, false);
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("OpenCode without explicit home or model overrides keeps provider defaults", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-default-config-"));
+  let captured: Record<string, string | undefined> | undefined;
+  const owner = createManagedProviderOwner({ agents: [{ handle: "opencode", provider: "opencode", folder: root }],
+    storeRoot: root, repoRoot: root, brokerPort: 0, store: createLocalStore(root), env: {}, opencodeExe: () => "opencode",
+    openCodeRuntime: ({ env, model }) => {
+      captured = env;
+      assert.equal(model, undefined, "OpenCode selects its configured default when M9R has no explicit model selection");
+      return { async ready() { return { sessionId: "opencode-default-session" }; }, alive() { return true; },
+        async *prompt() {}, async cancelTurn() {}, close() {} } as never;
+    } });
+  try {
+    assert.deepEqual((await owner.start()).failures, []);
+    for (const key of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "OPENCODE_CONFIG"]) {
+      assert.equal(captured?.[key], undefined, `${key} falls back to OpenCode's own normal location`);
+    }
+    const config = JSON.parse(captured!.OPENCODE_CONFIG_CONTENT!);
+    assert.equal(config.model, undefined);
+    assert.equal(config.provider, undefined);
+    assert.equal(config.mcp.m9r.enabled, true);
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -2,8 +2,8 @@ import { isLogicalContinuation, shouldReusePausedTask, logicalTaskHandoff, COMPL
 import { spawn as nodeSpawn, spawnSync, type ChildProcess } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   createClaudeManagedProviderConnection,
   createCodexAppServerManagedProviderConnection,
@@ -227,15 +227,31 @@ function managedCodexAppServerArgs(context: ManagedProviderOwnerConnectionContex
 }
 
 function openCodeEnvironment(context: ManagedProviderOwnerConnectionContext): Record<string, string | undefined> {
-  const xdg = join(dirname(context.mcpConfigPath), "xdg");
-  mkdirSync(join(xdg, "opencode"), { recursive: true });
+  // OpenCode merges this final, process-local override with the owner's normal
+  // config. Preserve all XDG homes so provider definitions, chosen models and
+  // account authentication remain visible; never read or copy credentials.
+  let existing: Record<string, unknown> = {};
+  const inline = context.environment.OPENCODE_CONFIG_CONTENT;
+  if (inline?.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(inline);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      existing = parsed as Record<string, unknown>;
+    } catch {
+      throw new Error("OpenCode inline configuration is invalid JSON. Its existing configuration was preserved; M9R did not start this provider.");
+    }
+  }
+  const objectValue = (value: unknown): Record<string, unknown> =>
+    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const server = webMcpServerCommand(context.launcher);
   const disabledTools = Object.fromEntries([
     "bash", "edit", "write", "read", "grep", "glob", "list", "webfetch", "websearch", "task", "todowrite", "todoread", "patch", "codesearch", "skill",
   ].map((tool) => [tool, false]));
-  writeFileSync(join(xdg, "opencode", "opencode.json"), JSON.stringify({
+  const config = {
+    ...existing,
     $schema: "https://opencode.ai/config.json",
     mcp: {
+      ...objectValue(existing.mcp),
       m9r: {
         type: "local",
         command: [server.command, ...server.args],
@@ -250,16 +266,11 @@ function openCodeEnvironment(context: ManagedProviderOwnerConnectionContext): Re
         enabled: true,
       },
     },
-    tools: disabledTools,
-  }));
+    tools: { ...objectValue(existing.tools), ...disabledTools },
+  };
   return {
     ...context.environment,
-    XDG_CONFIG_HOME: xdg,
-    // Keep M9R's tool policy isolated in its private config directory, but use
-    // the owner's normal OpenCode data home for saved provider authentication.
-    // Pointing XDG_DATA_HOME at a fresh M9R folder silently hides the user's
-    // OpenCode login and can send them to the free tier. Do not read, copy, or
-    // rewrite the credential store here.
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
   };
 }
 
