@@ -75,6 +75,7 @@ interface NativeStageResponse {
   state?: "minimized" | "maximized" | "restored";
   processGeneration?: string;
   rect?: { x?: number; y?: number; width?: number; height?: number };
+  text?: string;
 }
 
 function throwNativeInputFailure(result: NativeStageResponse, fallback: string): never {
@@ -1177,6 +1178,19 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
   }
 
+  /**
+   * Reads a window's or control's real text directly via GetWindowTextW -- never a UIA tree
+   * read, never an echo of input that was sent. Test-only verification seam: production
+   * correctness relies on the driver's own UIA/capture evidence, not this.
+   */
+  async function getWindowText(pid: number, windowId: string): Promise<string> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "getWindowText", pid, windowId });
+    if (!result.ok || typeof result.text !== "string") throw new Error(result.error ?? "Windows could not read the window's text.");
+    return result.text;
+  }
+
   async function clipboardRead() {
     assertWindows(); assertOwner();
     const result = await invokeNative({ op: "clipboardRead" });
@@ -1226,7 +1240,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
     close: () => persistentHost?.close(),
-    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, windowRect, workArea };
+    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, getWindowText, windowRect, workArea };
 }
 
 function parsePid(value: string): number {

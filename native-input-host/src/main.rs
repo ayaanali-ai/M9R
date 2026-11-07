@@ -141,7 +141,142 @@ fn run_desktop_stage_server() -> Result<(), String> {
     }
 }
 
+/// Test-only fixture: creates one real, visible top-level window hosting one
+/// (`--spawn-test-window`) or two (`--spawn-test-window-dual`) plain Win32
+/// EDIT controls, prints their identity as a single JSON line, then runs a
+/// real Win32 message loop until the process is killed. Exists so
+/// concurrency/serialization proofs can drive the real native-input-host
+/// server against real OS windows instead of mocking window existence --
+/// the window this spawns is exactly the kind of plain control
+/// `sendTextToWindow` exists for. Never reached by any production action
+/// path; only ever invoked directly by test code.
+#[cfg(windows)]
+fn run_spawn_test_window(dual: bool) -> ! {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowThreadProcessId,
+        PostQuitMessage, RegisterClassW, TranslateMessage, CW_USEDEFAULT, ES_AUTOHSCROLL, MSG,
+        WINDOW_STYLE, WM_DESTROY, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    };
+
+    unsafe extern "system" fn wndproc(
+        window: windows::Win32::Foundation::HWND,
+        message: u32,
+        wparam: windows::Win32::Foundation::WPARAM,
+        lparam: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        if message == WM_DESTROY {
+            unsafe { PostQuitMessage(0) };
+            return windows::Win32::Foundation::LRESULT(0);
+        }
+        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+    }
+
+    let (top, field1, field2) = unsafe {
+        let class_name = w!("M9RTestHarnessWindow");
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        RegisterClassW(&class);
+        let top = CreateWindowExW(
+            Default::default(),
+            class_name,
+            w!("M9R Test Window"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            if dual { 420 } else { 220 },
+            120,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("creating the top-level test harness window");
+        let field1 = CreateWindowExW(
+            Default::default(),
+            w!("Edit"),
+            PCWSTR::null(),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            10,
+            10,
+            190,
+            24,
+            Some(top),
+            None,
+            None,
+            None,
+        )
+        .expect("creating test harness field 1");
+        let field2 = if dual {
+            Some(
+                CreateWindowExW(
+                    Default::default(),
+                    w!("Edit"),
+                    PCWSTR::null(),
+                    WS_CHILD | WS_VISIBLE | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                    210,
+                    10,
+                    190,
+                    24,
+                    Some(top),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("creating test harness field 2"),
+            )
+        } else {
+            None
+        };
+        (top, field1, field2)
+    };
+
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(top, Some(&mut pid)) };
+    let payload = match field2 {
+        Some(field2) => json!({
+            "pid": pid,
+            "windowId": format!("{}", top.0 as usize),
+            "fields": [format!("{}", field1.0 as usize), format!("{}", field2.0 as usize)],
+        }),
+        None => json!({ "pid": pid, "windowId": format!("{}", field1.0 as usize) }),
+    };
+    println!("{payload}");
+    use std::io::Write;
+    let _ = stdout().flush();
+
+    let mut message = MSG::default();
+    while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    std::process::exit(0);
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--spawn-test-window") {
+        #[cfg(windows)]
+        run_spawn_test_window(false);
+        #[cfg(not(windows))]
+        {
+            eprintln!("--spawn-test-window is available only on Windows");
+            std::process::exit(2);
+        }
+    }
+    if std::env::args().nth(1).as_deref() == Some("--spawn-test-window-dual") {
+        #[cfg(windows)]
+        run_spawn_test_window(true);
+        #[cfg(not(windows))]
+        {
+            eprintln!("--spawn-test-window-dual is available only on Windows");
+            std::process::exit(2);
+        }
+    }
     if std::env::args().nth(1).as_deref() == Some("--desktop-stage-server") {
         if let Err(error) = run_desktop_stage_server() {
             eprintln!("{error}");

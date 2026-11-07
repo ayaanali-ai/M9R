@@ -305,6 +305,13 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Ok(()) => json!({"ok":true,"requestId":request_id}),
             Err(error) => input_dispatch_failure(request_id, error),
         },
+        // Read-only ground-truth verification: the real text GetWindowTextW reports
+        // for this window/control, never a UIA read and never an echo of input sent.
+        #[cfg(windows)]
+        Some("getWindowText") => match platform::get_window_text(value) {
+            Ok(text) => json!({"ok":true,"requestId":request_id,"text":text}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
         Some("getCursorPosition") => match owner_pointer::get_cursor_position() {
             Ok((x, y)) => {
                 json!({ "ok": true, "requestId": request_id, "position": { "x": x, "y": y } })
@@ -804,6 +811,21 @@ mod platform {
             window_id: (window as usize).to_string(),
             process_generation: process_generation(pid)?,
         })
+    }
+
+    /// Reads a window's or control's actual text directly via `GetWindowTextW` --
+    /// not a UIA tree read, not a trusted echo of what was sent. Exists so a
+    /// caller can verify the real effect of a dispatched action against ground
+    /// truth, the same discipline every input op above this one depends on.
+    pub(super) fn get_window_text(value: &serde_json::Value) -> Result<String, &'static str> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        let mut buffer = [0u16; 8192];
+        let written = unsafe { GetWindowTextW(window, buffer.as_mut_ptr(), buffer.len() as i32) };
+        if written < 0 {
+            return Err("Windows could not read the window's text");
+        }
+        Ok(String::from_utf16_lossy(&buffer[..written as usize]))
     }
 
     pub(super) fn list_owned_popups(
@@ -1897,6 +1919,18 @@ mod tests {
         let mut buffer = [0u16; 64];
         let written = unsafe { GetWindowTextW(window, &mut buffer) };
         let actual = String::from_utf16_lossy(&buffer[..written as usize]);
+
+        // getWindowText is the same read-back primitive Phase 0's concurrency proof
+        // uses to verify real effects; prove it agrees with the direct Win32 read
+        // before the window is destroyed.
+        let read_back = handle_desktop_stage_request(&json!({
+            "op": "getWindowText",
+            "pid": pid,
+            "windowId": format!("{handle}"),
+        }));
+        assert_eq!(read_back["ok"], true, "{read_back}");
+        assert_eq!(read_back["text"], "m9r background");
+
         unsafe { DestroyWindow(window) }.ok();
 
         assert_eq!(actual, "m9r background");
