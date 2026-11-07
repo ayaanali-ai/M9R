@@ -323,12 +323,39 @@ test("background text refusal is reported without activating the window or retry
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls, state,
     typeTextError: driverError,
   }) as never });
+  // Background mode now tries the WM_CHAR channel (sendTextToWindow) before giving up; force
+  // that to fail too, so this exercises the real "nothing works" fail-closed case rather than
+  // the one the new channel is designed to resolve.
+  setNativeFixture(root, { responses: { sendTextToWindow: { ok: false, dispatchState: "not-dispatched",
+    error: "Windows declined to queue a WM_CHAR message for the target window." } } });
 
   await assert.rejects(driver.typeText("stage", "echo M9R_TERM_OK", identity, { deliveryMode: "background" }),
-    error => error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+    error => error instanceof DesktopInputNotDispatchedError && error.code === "native-dispatch-unavailable");
   assert.throws(() => parseTaskStageAction({ kind: "type", text: "echo M9R_TERM_OK", deliveryMode: "foreground" }), /Invalid stage action fields/);
   assert.equal(nativeFixture(root).calls.some((item) => ["bringToForeground", "sendText"].includes(String(item.op))), false,
     "background refusal never retries with global foreground input");
+}));
+
+test("background text delivers through the WM_CHAR channel without touching real foreground input", async () => withRoot(async (root) => {
+  await registerStage(root, "4567");
+  const identity = { handle: "codex", sessionId: "terminal-session" };
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driverError = new Error("Background delivery is not available for target window class 'CASCADIA_HOSTING_WINDOW_CLASS' on this event kind (text_input).");
+  const state = { pid: 4321, windowId: BigInt(4567), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 },
+    images: [{ mimeType: "image/png", dataBase64: imageData }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls, state,
+    typeTextError: driverError,
+  }) as never });
+
+  const proof = await driver.typeText("stage", "echo M9R_TERM_OK", identity, { deliveryMode: "background" });
+  assert.equal(proof.outcome.status, "unverifiable");
+  assert.ok(nativeFixture(root).calls.some((item) => item.op === "sendTextToWindow" && item.pid === 4321 && item.windowId === "4567" && item.text === "echo M9R_TERM_OK"),
+    "background mode dispatches the new WM_CHAR channel to the exact target window");
+  assert.equal(nativeFixture(root).calls.some((item) => ["bringToForeground", "sendText"].includes(String(item.op))), false,
+    "the background-safe channel never falls through to global foreground input");
+  assert.equal(calls.some((call) => ["callTool", "typeText"].includes(call.method)), false,
+    "Cua's own driver is never invoked once the native background channel succeeds");
 }));
 
 test("owner-preview preserves the clicked HWND for the next native text step", async () => withRoot(async (root) => {
@@ -1296,8 +1323,12 @@ test("an explicit background text request never steals focus when no semantic fi
       windowBounds: { x: 0, y: 0, width: 1920, height: 1080 }, elements: [field],
       images: [{ mimeType: "image/png", dataBase64: imageData }] },
   }) as never });
+  // Background mode now tries the WM_CHAR channel (sendTextToWindow) before giving up; force
+  // that to fail too, so this still exercises the true "nothing works" fail-closed case.
+  setNativeFixture(root, { responses: { sendTextToWindow: { ok: false, dispatchState: "not-dispatched",
+    error: "Windows declined to queue a WM_CHAR message for the target window." } } });
   await assert.rejects(driver.typeText("stage", "Strawberry Park latest video", undefined, { deliveryMode: "background" }),
-    error => error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+    error => error instanceof DesktopInputNotDispatchedError && error.code === "native-dispatch-unavailable");
   assert.equal(nativeFixture(root).calls.some((call) => ["bringToForeground", "sendText"].includes(String(call.op))), false);
   assert.equal(calls.some((call) => ["bring_to_front", "typeText"].includes(call.method)), false);
   await driver.shutdown();

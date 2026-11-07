@@ -1139,6 +1139,20 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the typed text.");
   }
 
+  /**
+   * The background-safe sibling of {@link sendText}: posts WM_CHAR directly to the target
+   * window's own message queue instead of SendInput, so it never requires -- and never steals --
+   * OS foreground. Only reaches plain Win32 controls that handle WM_CHAR for text entry; a control
+   * with custom input handling must still go through sendText (real foreground) or a UIA
+   * SetValue/pattern call.
+   */
+  async function sendTextToWindow(pid: number, windowId: string, text: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendTextToWindow", pid, windowId, text });
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the background-typed text.");
+  }
+
   async function setWindowState(name: string, state: "minimized" | "maximized" | "restored") {
     const inspected = await inspectStage(name);
     if (!inspected.anchor) throw new Error("No exact selected window.");
@@ -1212,7 +1226,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
     close: () => persistentHost?.close(),
-    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, windowRect, workArea };
+    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, windowRect, workArea };
 }
 
 function parsePid(value: string): number {
@@ -1257,7 +1271,7 @@ function createPersistentWindowsStageHost(executable: string) {
   const pending = new Map<string, PendingNativeStageRequest>();
   let activeRequestId: string | undefined;
   const startAcknowledgementTimeoutMs = 15_000;
-  const inputOperations = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText"]);
+  const inputOperations = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "sendTextToWindow"]);
 
 
   const notDispatchedError = (request: Pick<PendingNativeStageRequest, "operation">, message: string): Error => inputOperations.has(request.operation)

@@ -1690,6 +1690,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     if (!input.signal && !input.preferForeground && input.nativeInput && await input.nativeInput()) {
       return { status: "unverifiable", summary: "Posted text to the selected native edit control; application effect requires verification." };
     }
+    // Background mode must never fall through to SendInput (see the fail-closed guard in
+    // driverInputAction below), but a plain Win32 control that lacks a UIA value pattern still
+    // has a real headless route: WM_CHAR posted straight to its own message queue, which never
+    // requires and never steals OS foreground. Try it before giving up as unavailable.
+    if (!input.signal && !input.preferForeground && input.deliveryMode === "background") {
+      await manager.sendTextToWindow(input.pid, windowId, input.text);
+      return { status: "unverifiable", summary: "Posted text to the target window's own message queue (WM_CHAR, no OS foreground required); application effect requires verification." };
+    }
 
     return driverInputAction("type_text", {
       pid: input.pid,
