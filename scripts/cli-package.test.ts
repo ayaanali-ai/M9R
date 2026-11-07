@@ -155,6 +155,8 @@ test("built entry has the correct shebang and a relative core import", () => {
   assert.equal(compatibilityEntry, entry, "legacy oathlock entry must remain the same compiled CLI");
   assert.ok(existsSync(resolve(distDir, "adapter-contract.js")));
   assert.ok(existsSync(resolve(distDir, "broker-update-record.js")), "the CLI broker updater must ship its BOM-compatible ownership-record parser");
+  assert.ok(existsSync(resolve(distDir, "broker-startup-core.js")), "the packaged CLI must include its bounded broker startup-health wait");
+  assert.match(entry, /from "\.\/broker-startup-core\.js"/, "the broker updater must use the packaged startup-health wait");
   assert.ok(existsSync(resolve(distDir, "agent-task-routing.js")));
   assert.ok(existsSync(resolve(distDir, "stage-save-as.js")), "the compiled desktop stage must ship its shared Save As path resolver");
   assert.ok(existsSync(resolve(distDir, "opencode-capture-backfill-core.js")));

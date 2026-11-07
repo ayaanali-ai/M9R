@@ -76,6 +76,7 @@ import { refreshManagedOpenCodeIdentityPlugin } from "@/lib/native/opencode-plug
 import { renameStateFile } from "@/lib/native/atomic-file";
 import { loadOrCreateBrokerKey } from "@/lib/native/web-broker-server";
 import { parseBrokerUpdateRecord } from "@/lib/native/broker-update-record";
+import { waitForBrokerHealth } from "@/lib/native/broker-startup-core";
 import {
   buildLocalBrokerAutostartMarker,
   buildLocalBrokerAutostartSpec,
@@ -2044,17 +2045,16 @@ async function startManagedBrokerAfterUpdate(target: NonNullable<Awaited<ReturnT
   }
   await powerShell(buildLocalBrokerScheduledTaskStartScript(WEB_TASK_NAME));
 
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (await brokerAuthenticated(defaultStoreRoot(homeDirectory(), process.env), target.port)) {
-      const running = await readManagedBrokerProcessState(target.brokerPath);
-      const exactImage = running.processes.some((process) => normalizeWindowsPath(process.path) === normalizeWindowsPath(target.brokerPath)
-        && Date.parse(process.startedUtc) > Date.parse(running.fileLastWriteUtc));
-      if (running.fileHash.toLowerCase() === target.installManifest.sha256 && exactImage) return;
-      throw new Error("The broker answered health checks, but its running process could not be proven to have loaded the installed build.");
-    }
-    await new Promise((wait) => setTimeout(wait, 250));
+  const readiness = await waitForBrokerHealth(() => brokerAuthenticated(defaultStoreRoot(homeDirectory(), process.env), target.port));
+  if (!readiness.ready) {
+    throw new Error(`The verified M9R broker task was started, but authenticated broker health did not recover within ${readiness.elapsedMs}ms (${readiness.attempts} checks).`);
   }
-  throw new Error("The verified M9R broker task was started, but authenticated broker health did not recover.");
+  const running = await readManagedBrokerProcessState(target.brokerPath);
+  const exactImage = running.processes.some((process) => normalizeWindowsPath(process.path) === normalizeWindowsPath(target.brokerPath)
+    && Date.parse(process.startedUtc) > Date.parse(running.fileLastWriteUtc));
+  if (running.fileHash.toLowerCase() !== target.installManifest.sha256 || !exactImage) {
+    throw new Error("The broker answered health checks, but its running process could not be proven to have loaded the installed build.");
+  }
 }
 
 async function runManagedBrokerUpdate(args: string[]): Promise<number> {

@@ -164,6 +164,7 @@
   "conversation-delete.test.ts",
   "bridge-runtime-mentions.test.ts",
   "broker-update-record.test.ts",
+  "broker-startup-core.test.ts",
   "workspace-delivery.test.ts",
   "mission-relay-client.test.ts",
   "acp-stdio-adapter-prompt-timeout.test.ts",
