@@ -4,6 +4,8 @@ use m9r_native_input_host::{
 use serde_json::{json, Value};
 use std::io::{stdin, stdout, Read};
 
+mod cursor_overlay;
+
 fn bounded_response_bytes(response: &Value, operation: Option<&str>) -> Result<Vec<u8>, String> {
     let bytes = serde_json::to_vec(response)
         .map_err(|error| format!("could not encode desktop-stage response: {error}"))?;
@@ -480,6 +482,29 @@ fn main() {
         #[cfg(not(windows))]
         {
             eprintln!("--spawn-foreground-typer is available only on Windows");
+            std::process::exit(2);
+        }
+    }
+    if std::env::args().nth(1).as_deref() == Some("--spawn-cursor-overlay") {
+        #[cfg(windows)]
+        cursor_overlay::win::run();
+        #[cfg(not(windows))]
+        {
+            eprintln!("--spawn-cursor-overlay is available only on Windows");
+            std::process::exit(2);
+        }
+    }
+    if let Some(out_path) = std::env::args().nth(1).as_deref().and_then(|flag| {
+        (flag == "--cursor-overlay-selftest").then(|| std::env::args().nth(2))
+    }).flatten() {
+        #[cfg(windows)]
+        {
+            cursor_overlay::win::self_test(&out_path);
+            return;
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--cursor-overlay-selftest is available only on Windows");
             std::process::exit(2);
         }
     }

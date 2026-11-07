@@ -69,6 +69,7 @@ dependencies = [
  "png",
  "serde_json",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]
