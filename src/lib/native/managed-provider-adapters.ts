@@ -1003,6 +1003,7 @@ export interface OpenCodeManagedProviderConnectionOptions {
   exe: string;
   environment: Record<string, string | undefined>;
   missionId: string;
+  model?: string;
   runtimeFactory?: (options: OpenCodeLiveRuntimeOptions) => OpenCodeLiveRuntime;
 }
 
@@ -1074,7 +1075,7 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
         env: this.options.environment,
         handle: this.profile.handle,
         missionId: this.options.missionId,
-        model: this.profile.model,
+        model: this.options.model ?? this.profile.model,
         effort: this.profile.effort,
       });
       this.runtime = runtime;

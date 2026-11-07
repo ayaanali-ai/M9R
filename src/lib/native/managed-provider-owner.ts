@@ -253,8 +253,11 @@ function openCodeEnvironment(context: ManagedProviderOwnerConnectionContext): Re
   return {
     ...context.environment,
     XDG_CONFIG_HOME: xdg,
-    XDG_DATA_HOME: join(xdg, "data"),
-    XDG_CACHE_HOME: join(xdg, "cache"),
+    // Keep M9R's tool policy isolated in its private config directory, but use
+    // the owner's normal OpenCode data home for saved provider authentication.
+    // Pointing XDG_DATA_HOME at a fresh M9R folder silently hides the user's
+    // OpenCode login and can send them to the free tier. Do not read, copy, or
+    // rewrite the credential store here.
   };
 }
 
@@ -376,6 +379,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         exe,
         environment: openCodeEnvironment(context),
         missionId: projectRoomId(profile.cwd),
+        model: profile.model ?? env.M9R_OPENCODE_MODEL,
         ...(runtimeFactory ? { runtimeFactory: runtimeFactory as never } : {}),
       });
     } else {
@@ -671,12 +675,6 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         if (event.kind === "accepted") continue;
         if (event.kind === "status") emitState(profile);
         else if (event.kind === "text") {
-          if (!firstVisibleAction) {
-            firstVisibleAction = true;
-            const firstEventTick = performance.now();
-            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok", undefined, firstEventTick - dispatchStartTick);
-            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: firstEventTick - dispatchStartTick, status: "ok" });
-          }
           emit({ kind: "say", handle: profile.handle, provider: profile.provider, text: event.text, runId, ...(event.delta ? { delta: true } : {}) });
         } else if (event.kind === "tool") {
           if (!firstVisibleAction) {
@@ -689,14 +687,20 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         }
         else if (event.kind === "result") {
           terminalObserved = true;
-          if (!firstVisibleAction) {
-            firstVisibleAction = true;
-            const firstEventTick = performance.now();
-            recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok", undefined, firstEventTick - dispatchStartTick);
-            latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: firstEventTick - dispatchStartTick, status: event.isError ? "error" : "ok" });
-          }
           emit({ kind: "result", handle: profile.handle, provider: profile.provider, text: event.text, isError: event.isError, runId });
-          recordCompletion(event.isError ? "error" : "ok", event.isError ? "provider returned an error result" : undefined);
+          if (event.isError) {
+            const reason = event.text.trim() || "Provider returned an error result.";
+            recordCompletion("error", reason);
+            if (kind === "owner" && !fenced.has(taskId)) {
+              if (deps.store.recordTaskFailure) deps.store.recordTaskFailure(taskId, `Provider session failed: ${reason}`);
+              else deps.store.setDelivery?.(taskId, { state: "failed", threadId: context.sessionId, failedAt: now().toISOString(), correlation: "internal-context", error: reason });
+            } else if (kind === "room" && !fenced.has(taskId)) {
+              deps.store.recordTaskFailure?.(taskId, `Provider session failed: ${reason}`);
+            }
+            accept(taskId, { ok: false, error: reason });
+          } else {
+            recordCompletion("ok");
+          }
           if (kind === "owner" && !event.isError) {
             const current = deps.store.getTask?.(taskId);
             // A provider terminal event proves only that its turn ended. The

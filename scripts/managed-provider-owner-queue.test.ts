@@ -72,6 +72,83 @@ test("a provider turn ending without a completion report preserves unfinished M9
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("an error result is durably failed and is not counted as a first action", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-result-error-"));
+  const store = createLocalStore(root);
+  const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, createConnection: (profile) => {
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* () {
+          yield { kind: "accepted" };
+          yield { kind: "text", text: "Provider is reporting a request error." };
+          yield { kind: "result", text: "API rejected the tool schema.", isError: true };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    } });
+  try {
+    const delivery = owner.deliver("codex", "Run the assigned check.");
+    assert.equal(delivery.ok, true, JSON.stringify(delivery));
+    for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "failed"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    const task = store.getTask("T1")!;
+    assert.equal(task.receipt?.state, "failed");
+    assert.equal(task.delivery?.state, "failed");
+    assert.match(task.receipt?.error ?? "", /API rejected the tool schema/);
+    assert.equal(task.stageTiming?.some((event) => event.phase === "first-visible-action"), false,
+      "provider prose and a terminal result are not a UI action");
+    assert.equal(task.stageTiming?.find((event) => event.phase === "completion")?.status, "error");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("OpenCode keeps the user's credential data home while isolating M9R tool policy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-opencode-home-"));
+  const ownerData = join(root, "owner-opencode-data");
+  const ownerCache = join(root, "owner-opencode-cache");
+  const store = createLocalStore(root);
+  let capturedEnv: Record<string, string | undefined> | undefined;
+  const owner = createManagedProviderOwner({
+    agents: [{ handle: "opencode", provider: "opencode", folder: root }],
+    storeRoot: root,
+    repoRoot: root,
+    brokerPort: 0,
+    store,
+    env: { XDG_DATA_HOME: ownerData, XDG_CACHE_HOME: ownerCache, M9R_OPENCODE_MODEL: "openai/gpt-6.1-sol" },
+    opencodeExe: () => "opencode",
+    openCodeRuntime: ({ env, model }) => {
+      capturedEnv = env;
+      assert.equal(model, "openai/gpt-6.1-sol", "the documented M9R model override reaches the managed owner runtime");
+      return {
+        async ready() { return { sessionId: "opencode-test-session" }; },
+        alive() { return true; },
+        async *prompt() { yield { type: "provider.completed", sessionId: "opencode-test-session", occurredAt: new Date().toISOString(), payload: {} }; },
+        async cancelTurn() {},
+        close() {},
+      } as never;
+    },
+  });
+  try {
+    const started = await owner.start();
+    assert.deepEqual(started.failures, []);
+    assert.equal(capturedEnv?.XDG_DATA_HOME, ownerData, "OpenCode auth/account data is not hidden in a new M9R directory");
+    assert.equal(capturedEnv?.XDG_CACHE_HOME, ownerCache);
+    assert.notEqual(capturedEnv?.XDG_CONFIG_HOME, root, "M9R continues to isolate its provider tool-policy config");
+    assert.match(capturedEnv?.XDG_CONFIG_HOME ?? "", /managed-provider-sessions/);
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("explicit new work gets its own context and leaves the prior paused work intact", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-new-work-"));
   const store = createLocalStore(root);

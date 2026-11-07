@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { McpServer, type RegisteredTool, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { ServerNotification, ServerRequest, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { ListToolsRequestSchema, type ServerNotification, type ServerRequest, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { taskCompletionReport, taskCompletionReportSchema } from "./task-completion-contract";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
@@ -106,6 +106,7 @@ type M9rRequestExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
  */
 class ProviderContextMcpServer extends McpServer {
   private readonly providerCallContext: AsyncLocalStorage<ProviderCallMetadata>;
+  private readonly listedTools = new Map<string, RegisteredTool>();
 
   constructor(
     providerCallContext: AsyncLocalStorage<ProviderCallMetadata>,
@@ -141,7 +142,36 @@ class ProviderContextMcpServer extends McpServer {
       };
       return this.providerCallContext.run(context, () => Reflect.apply(callback, undefined, args));
     }) as ToolCallback<InputArgs>;
-    return super.registerTool(name, config, contextualCallback);
+    const tool = super.registerTool(name, config, contextualCallback);
+    this.listedTools.set(name, tool);
+    let currentName = name;
+    const update = tool.update.bind(tool);
+    tool.update = (updates) => {
+      update(updates);
+      if (updates.name !== undefined && updates.name !== currentName) {
+        this.listedTools.delete(currentName);
+        if (updates.name) {
+          currentName = updates.name;
+          this.listedTools.set(currentName, tool);
+        }
+      }
+    };
+    // SDK 1.30's default tools/list conversion emits draft-7. Generate the
+    // advertised contract from the same Zod schemas used for calls, explicitly
+    // targeting 2020-12 (rather than relabeling a draft-7 document).
+    this.server.setRequestHandler(ListToolsRequestSchema, () => ({
+      tools: [...this.listedTools].filter(([, registered]) => registered.enabled).map(([toolName, registered]) => ({
+        name: toolName,
+        title: registered.title,
+        description: registered.description,
+        inputSchema: z.toJSONSchema((registered.inputSchema ?? z.object({})) as z.ZodType, { target: "draft-2020-12", io: "input" }),
+        ...(registered.outputSchema ? { outputSchema: z.toJSONSchema(registered.outputSchema as z.ZodType, { target: "draft-2020-12", io: "output" }) } : {}),
+        annotations: registered.annotations,
+        execution: registered.execution,
+        _meta: registered._meta,
+      })),
+    }));
+    return tool;
   }
 }
 
