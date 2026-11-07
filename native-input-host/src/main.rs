@@ -24,7 +24,14 @@ fn bounded_response_bytes(response: &Value, operation: Option<&str>) -> Result<V
     }
     if matches!(
         operation,
-        Some("sendClick" | "sendDrag" | "sendScroll" | "sendKeyCombo" | "sendText")
+        Some(
+            "sendClick"
+                | "sendDrag"
+                | "sendScroll"
+                | "sendKeyCombo"
+                | "sendText"
+                | "sendTextToWindow"
+        )
     ) {
         fallback["dispatchState"] = json!("uncertain");
     }

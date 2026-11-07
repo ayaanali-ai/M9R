@@ -296,6 +296,15 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Ok(()) => json!({"ok":true,"requestId":request_id}),
             Err(error) => input_dispatch_failure(request_id, error),
         },
+        // Background-safe text entry: posts WM_CHAR straight to the target
+        // window's own message queue instead of going through SendInput, so
+        // it never requires -- and never steals -- OS foreground. See
+        // `platform::send_text_to_window` and `win32::post_text_to_window`.
+        #[cfg(windows)]
+        Some("sendTextToWindow") => match platform::send_text_to_window(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Err(error) => input_dispatch_failure(request_id, error),
+        },
         Some("getCursorPosition") => match owner_pointer::get_cursor_position() {
             Ok((x, y)) => {
                 json!({ "ok": true, "requestId": request_id, "position": { "x": x, "y": y } })
@@ -1661,6 +1670,35 @@ mod platform {
         }
         crate::win32::send_unicode_text(text)
     }
+
+    /// Types literal text into one specific window via `WM_CHAR` messages
+    /// posted straight to its own message queue -- the background-safe
+    /// sibling of `send_text`. Deliberately does NOT call
+    /// `require_real_foreground`: that is the entire point of this op. It
+    /// still runs `validate_window` so a stale or reused window handle, or a
+    /// handle that does not actually belong to the supplied process id,
+    /// cannot be used to post text into an unrelated window.
+    pub(super) fn send_text_to_window(
+        value: &serde_json::Value,
+    ) -> Result<(), crate::InputDispatchError> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        let text = value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| crate::InputDispatchError::not_dispatched("text must be a string"))?;
+        if text.is_empty()
+            || text.chars().count() > 5_000
+            || text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            return Err(crate::InputDispatchError::not_dispatched(
+                "invalid input text",
+            ));
+        }
+        crate::win32::post_text_to_window(window as usize, text)
+    }
 }
 
 #[cfg(test)]
@@ -1788,6 +1826,92 @@ mod tests {
             &json!({ "op": "restoreCursorPosition", "x": original_x, "y": original_y }),
         );
         assert_eq!(restored["ok"], true);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn send_text_to_window_delivers_real_text_without_requiring_foreground() {
+        // Prove the background-safe channel end to end against a real Win32
+        // control, per the standard: never trust the dispatch return value --
+        // read the control's own actual text back and also confirm the
+        // target never had to become (and never was required to be) the OS
+        // foreground window, which is the entire reason this op exists.
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow, GetWindowTextW,
+            GetWindowThreadProcessId, PeekMessageW, TranslateMessage, ES_AUTOHSCROLL, MSG,
+            PM_REMOVE, WS_OVERLAPPED,
+        };
+
+        let window = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("Edit"),
+                PCWSTR::null(),
+                WS_OVERLAPPED
+                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                0,
+                0,
+                200,
+                24,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("creating a plain EDIT control for the background-input test");
+        let handle = window.0 as usize;
+
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+
+        // This window is never shown and never made foreground. If
+        // `sendTextToWindow` worked by secretly requiring real foreground
+        // (the exact thing it exists to avoid), it would fail closed here
+        // instead of delivering the text.
+        assert_ne!(unsafe { GetForegroundWindow() }, window);
+
+        let request = json!({
+            "op": "sendTextToWindow",
+            "pid": pid,
+            "windowId": format!("{handle}"),
+            "text": "m9r background",
+        });
+        let response = handle_desktop_stage_request(&request);
+        assert_eq!(response["ok"], true, "{response}");
+
+        // `PostMessageW` only queues the message; a real target app's own
+        // message loop is what actually delivers it to the control's
+        // `WndProc`. This test's window has no running loop of its own, so
+        // pump its queue exactly the way a real app would, to prove the
+        // posted WM_CHAR events are genuinely processed, not just queued.
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+
+        let mut buffer = [0u16; 64];
+        let written = unsafe { GetWindowTextW(window, &mut buffer) };
+        let actual = String::from_utf16_lossy(&buffer[..written as usize]);
+        unsafe { DestroyWindow(window) }.ok();
+
+        assert_eq!(actual, "m9r background");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn send_text_to_window_rejects_a_window_handle_from_another_process() {
+        let response = handle_desktop_stage_request(&json!({
+            "op": "sendTextToWindow",
+            "pid": 1,
+            "windowId": "123",
+            "text": "x",
+        }));
+        assert_ne!(response["ok"], true);
     }
 
     #[test]

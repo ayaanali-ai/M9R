@@ -54,6 +54,7 @@ extern "system" {
     fn IsIconic(window: Hwnd) -> i32;
     fn AttachThreadInput(attach_from: u32, attach_to: u32, attach: i32) -> i32;
     fn GetCurrentThreadId() -> u32;
+    fn PostMessageW(window: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 const INPUT_MOUSE: u32 = 0;
@@ -331,6 +332,51 @@ pub fn send_unicode_text(text: &str) -> Result<(), InputDispatchError> {
         }
         input_sent = true;
         unsafe { Sleep(4) };
+    }
+    Ok(())
+}
+
+/// `WM_CHAR`: a UTF-16 code unit delivered as a window message, consumed
+/// directly by `DefWindowProc`/standard edit controls as literal text input.
+/// Unlike `KEYEVENTF_UNICODE`, this is not a hardware-level event at all -- it
+/// never enters the systemwide input queue and carries no notion of "the
+/// foreground window", so it can be posted to a window that is not, and will
+/// not become, the OS foreground window.
+const WM_CHAR: u32 = 0x0102;
+
+/// Types literal text into one specific window by posting `WM_CHAR` directly
+/// to its message queue, one UTF-16 code unit at a time. This is the
+/// background-safe sibling of `send_unicode_text`: it never touches
+/// `SendInput`, never requires (or changes) OS foreground, and cannot steal
+/// focus from whatever window the user is actually looking at. It only
+/// reaches plain Win32 controls that handle `WM_CHAR` for text entry
+/// (standard edit/richedit controls and anything built on them) -- a control
+/// with its own custom input handling that ignores `WM_CHAR` is out of scope
+/// for this channel and must fall back to the real-foreground `SendInput`
+/// path or a UI Automation `SetValue`/pattern call instead.
+///
+/// `PostMessageW` only reports whether the message was successfully queued
+/// for the target thread, not whether the control actually inserted the
+/// character -- the same "best input signal available, verify the real
+/// effect separately" contract every other dispatch primitive in this module
+/// already has.
+pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatchError> {
+    let window = window as Hwnd;
+    if window.is_null() {
+        return Err(InputDispatchError::not_dispatched(
+            "post_text_to_window requires a non-null window handle",
+        ));
+    }
+    let mut input_sent = false;
+    for unit in text.encode_utf16() {
+        if unsafe { PostMessageW(window, WM_CHAR, unit as usize, 0) } == 0 {
+            return Err(dispatch_error(
+                "Windows declined to queue a WM_CHAR message for the target window",
+                input_sent,
+            ));
+        }
+        input_sent = true;
+        unsafe { Sleep(2) };
     }
     Ok(())
 }
