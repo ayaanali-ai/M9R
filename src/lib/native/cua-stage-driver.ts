@@ -16,6 +16,7 @@ import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
 import { classifySaveAsConflict, findDialogButton, findSaveAsButton, findSaveAsNameField, resolveSaveAsTarget } from "./stage-save-as";
 import { nativeValueControlRegion, sameNativeControlEpoch } from "./native-control-region";
+import { createAgentCursorOverlayHost, type AgentCursorOverlayHost } from "./agent-cursor-overlay-host";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
 const PUBLIC_CURSOR_LABEL_MAX_LENGTH = 28;
@@ -399,6 +400,8 @@ export interface CuaStageDriverDependencies {
   foregroundLease?: ForegroundInputLease;
   /** Bounded confirmation window for Cua's compositor-backed cursor overlay. */
   cursorVisiblePoll?: CursorVisiblePoll;
+  /** Optional M9R-owned marker renderer; absence preserves the Cua visual fallback. */
+  cursorOverlayHost?: AgentCursorOverlayHost;
 }
 
 interface CursorVisiblePoll {
@@ -455,7 +458,7 @@ async function waitForCursorVisible(
 }
 
 export interface CuaStageTimingEvent {
-  phase: "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible"
+  phase: "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "cursor-overlay"
     | "foreground-lease" | "background-dispatch" | "window-capture" | "accessibility-read" | "target-resolution"
     | "input-dispatch" | "post-action-observation";
   startedAt: string;
@@ -661,6 +664,22 @@ function agentCursorDetails(identity: CuaAgentCursorIdentity): AgentCursorSessio
     session: publicCursorLabel(handle).slice(0, PUBLIC_CURSOR_LABEL_MAX_LENGTH),
     sessionTag,
   };
+}
+
+function cursorColorForIdentity(identityKey: string): readonly [number, number, number] {
+  const digest = createHash("sha256").update(identityKey).digest();
+  const hue = ((digest[0]! << 8) | digest[1]!) % 360;
+  const saturation = 0.78;
+  const lightness = 0.58;
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
+  const x = chroma * (1 - Math.abs((hue / 60) % 2 - 1));
+  const m = lightness - chroma / 2;
+  const [red, green, blue] = hue < 60 ? [chroma, x, 0]
+    : hue < 120 ? [x, chroma, 0]
+    : hue < 180 ? [0, chroma, x]
+    : hue < 240 ? [0, x, chroma]
+    : hue < 300 ? [x, 0, chroma] : [chroma, 0, x];
+  return [red, green, blue].map((channel) => Math.round((channel + m) * 255)) as [number, number, number];
 }
 
 function parseWindowId(value: string): bigint {
@@ -1092,8 +1111,13 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // foreground input stream. Share the lease through the M9R store so Paint,
   // Calculator, or any other target cannot be focused by two workers at once.
   const foregroundLease = deps.foregroundLease ?? createForegroundInputLease({ lockPath: join(root, "foreground-input-lease") });
+  const cursorOverlayExecutable = deps.stage?.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe");
+  const cursorOverlayHost = deps.cursorOverlayHost
+    ?? (process.platform === "win32" && existsSync(cursorOverlayExecutable)
+      ? createAgentCursorOverlayHost({ executablePath: cursorOverlayExecutable }) : undefined);
   const agentSessions = new Map<string, AgentCursorSession>();
   const cursorSessionNames = new Map<string, string>();
+  const cursorOverlayPresentations = new Map<string, { id: string; label: string; color: readonly [number, number, number] }>();
   const sessionRefreshedAt = new Map<string, number>();
   const sessionRefreshes = new Map<string, Promise<void>>();
   const cursorStartSlots = new Map<string, number>();
@@ -1178,6 +1202,32 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   function emitTiming(event: CuaStageTimingEvent): void {
     try { deps.onTiming?.(event); } catch { /* diagnostics must never affect desktop control */ }
+  }
+
+  async function updateM9rCursorOverlay(session: AgentCursorSession | string, x: number, y: number): Promise<boolean> {
+    const presentation = cursorOverlayPresentations.get(typeof session === "string" ? session : session.session);
+    if (!cursorOverlayHost || !presentation) return false;
+    const startedAt = performance.now();
+    let visible = false;
+    try {
+      visible = await cursorOverlayHost.upsert({ ...presentation, x, y });
+    } catch { /* presentation must never change the input action result */ }
+    emitTiming({ phase: "cursor-overlay", startedAt: now().toISOString(), endedAt: now().toISOString(),
+      durationMs: Math.round((performance.now() - startedAt) * 100) / 100, status: visible ? "ok" : "error",
+      detail: `renderer=m9r;screenPoint=verified;visible=${visible}` });
+    return visible;
+  }
+
+  async function hideCuaCursor(driver: CuaDriverLike, session: string): Promise<boolean> {
+    try {
+      resultError(await driver.setAgentCursorEnabled({ session, enabled: false }), "Cua Driver could not hide its fallback cursor.");
+      return true;
+    } catch { return false; }
+  }
+
+  async function retainCuaFallback(driver: CuaDriverLike, session: string): Promise<void> {
+    try { resultError(await driver.setAgentCursorEnabled({ session, enabled: true }), "Cua Driver could not restore its fallback cursor."); }
+    catch { /* best effort: cursor visuals never gate the desktop action */ }
   }
 
   type TimingDetails = Omit<CuaStageTimingEvent, "phase" | "startedAt" | "endedAt" | "durationMs" | "status">
@@ -1315,6 +1365,11 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       cursorSessionNames.set(details.key, label);
     }
     details.session = label;
+    cursorOverlayPresentations.set(label, {
+      id: `agent-${createHash("sha256").update(details.key).digest("hex")}`,
+      label,
+      color: cursorColorForIdentity(details.key),
+    });
     const refreshedAt = sessionRefreshedAt.get(details.key);
     const at = now().getTime();
     if (alreadyTracked && refreshedAt !== undefined && at >= refreshedAt && at - refreshedAt < 60_000) {
@@ -1398,6 +1453,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   async function showAgentCursor(name: string, identity: CuaAgentCursorIdentity): Promise<{ label: string; visible: boolean }> {
     const { runtime, session } = await ensureAgentSession(identity, name);
     let positioned = false;
+    let overlayScreenPoint: { x: number; y: number } | undefined;
     const presentation = await bestEffortCursorPresentation(session.key, async () => {
       resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not show the agent cursor before the first desktop action.");
       await withCursorSlotLock(async () => {
@@ -1432,6 +1488,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         }
         const screenX = Math.floor(bounds.x + bounds.width * ((slot % 4) + 1) / 5);
         const screenY = Math.floor(bounds.y + bounds.height * (Math.floor(slot / 4) + 1) / 5);
+        overlayScreenPoint = { x: screenX, y: screenY };
         try {
           const pid = foreground.pid;
           const windowId = parseWindowId(foreground.windowId);
@@ -1476,7 +1533,12 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     // Cursor rendering is a best-effort visual aid. A missing compositor or
     // incorrect initial marker position must be visible in diagnostics, but
     // cannot gate a separate native/semantic app action.
-    const visible = await confirmCursorVisible(name, () => runtime.driver.getSession({ session: session.session })).catch(() => false);
+    let visible = false;
+    if (overlayScreenPoint && cursorOverlayHost && await hideCuaCursor(runtime.driver, session.session)) {
+      visible = await updateM9rCursorOverlay(session, overlayScreenPoint.x, overlayScreenPoint.y);
+      if (!visible) await retainCuaFallback(runtime.driver, session.session);
+    }
+    if (!visible) visible = await confirmCursorVisible(name, () => runtime.driver.getSession({ session: session.session })).catch(() => false);
     return { label: session.session, visible };
   }
 
@@ -1888,8 +1950,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         // A visual-only failure is evidence, not a reason to block native input.
       }
       const aligned = presentation.status === "completed" && positionVerified;
+      let ownVisible = false;
+      if (aligned && cursorOverlayHost && await hideCuaCursor(runtime.driver, session.session)) {
+        ownVisible = await updateM9rCursorOverlay(session, point.screenPoint.x, point.screenPoint.y);
+        if (!ownVisible) await retainCuaFallback(runtime.driver, session.session);
+      }
+      const fallbackVisible = !ownVisible && aligned
+        ? await confirmCursorVisible(undefined, () => runtime.driver.getSession({ session: session.session })).catch(() => false)
+        : false;
       return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y,
-        enabled: aligned, visible: aligned };
+        enabled: aligned, visible: ownVisible || fallbackVisible };
     }
     return withCursorPresentation(session.key, async () => {
       resultError(await runtime.driver.setAgentCursorEnabled({ session: session.session, enabled: true }), "Cua Driver could not enable the desktop agent cursor.");
@@ -1926,6 +1996,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }, { detail: point.shellControl ? "space=desktop-screen" : "space=cua-window-screenshot" });
       if (!await confirmCursorVisible(undefined, () => runtime.driver.getSession({ session: session.session }))) {
         throw new DesktopInputNotDispatchedError("Cua Driver moved the cursor but did not confirm its overlay is visible on the owner's desktop within the bounded confirmation window.", "overlay-not-visible");
+      }
+      let ownVisible = false;
+      if (cursorOverlayHost && await hideCuaCursor(runtime.driver, session.session)) {
+        ownVisible = await updateM9rCursorOverlay(session, point.screenPoint.x, point.screenPoint.y);
+        if (!ownVisible) await retainCuaFallback(runtime.driver, session.session);
+      }
+      if (!ownVisible && !await confirmCursorVisible(undefined, () => runtime.driver.getSession({ session: session.session }))) {
+        throw new DesktopInputNotDispatchedError("The M9R cursor marker and Cua fallback are not visible on the owner's desktop.", "overlay-not-visible");
       }
       return { x: point.desktopPoint.x, y: point.desktopPoint.y, screenX: point.screenPoint.x, screenY: point.screenPoint.y, enabled: true, visible: true };
     });
@@ -1964,7 +2042,15 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }
       const point = mappedTarget ?? { x, y, screenX: x, screenY: y, width: frame.width, height: frame.height };
       const aligned = presentation.status === "completed" && positionVerified;
-      return { x, y, screenX: point.screenX, screenY: point.screenY, enabled: aligned, visible: aligned };
+      let ownVisible = false;
+      if (aligned && cursorOverlayHost && await hideCuaCursor(driver, input.session)) {
+        ownVisible = await updateM9rCursorOverlay(input.session, point.screenX, point.screenY);
+        if (!ownVisible) await retainCuaFallback(driver, input.session);
+      }
+      const fallbackVisible = !ownVisible && aligned
+        ? await confirmCursorVisible(undefined, () => driver.getSession({ session: input.session })).catch(() => false)
+        : false;
+      return { x, y, screenX: point.screenX, screenY: point.screenY, enabled: aligned, visible: ownVisible || fallbackVisible };
     }
     return withCursorPresentation(input.session, async () => {
       const point = await mapNativeStagePointToCuaWindow(driver, input.session, input.pid, input.windowId,
@@ -1981,11 +2067,23 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       if (!await confirmCursorVisible(undefined, () => driver.getSession({ session: input.session }))) {
         throw new DesktopInputNotDispatchedError("Cua Driver moved the agent cursor but did not confirm that its desktop overlay is visible within the bounded confirmation window.", "overlay-not-visible");
       }
+      let ownVisible = false;
+      if (cursorOverlayHost && await hideCuaCursor(driver, input.session)) {
+        ownVisible = await updateM9rCursorOverlay(input.session, point.screenX, point.screenY);
+        if (!ownVisible) await retainCuaFallback(driver, input.session);
+      }
+      if (!ownVisible && !await confirmCursorVisible(undefined, () => driver.getSession({ session: input.session }))) {
+        throw new DesktopInputNotDispatchedError("The M9R cursor marker and Cua fallback are not visible on the owner's desktop.", "overlay-not-visible");
+      }
       return { x, y, screenX: point.screenX, screenY: point.screenY, enabled: true as const, visible: true as const };
     });
   }
 
   async function hideAgentCursor(driver: CuaDriverLike, session: string): Promise<void> {
+    const presentation = cursorOverlayPresentations.get(session);
+    if (presentation && cursorOverlayHost) {
+      try { await cursorOverlayHost.hide(presentation.id); } catch { /* cleanup must not mask the action result */ }
+    }
     try {
       await driver.setAgentCursorEnabled({ session, enabled: false });
     } catch {
@@ -4000,27 +4098,30 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
 
   async function closeAgentCursor(cursorIdentity: CuaAgentCursorIdentity): Promise<void> {
     const details = agentCursorDetails(cursorIdentity);
+    const overlaySession = cursorSessionNames.get(details.key) ?? details.session;
+    const presentation = cursorOverlayPresentations.get(overlaySession);
+    cursorOverlayPresentations.delete(overlaySession);
+    try {
+      if (presentation && cursorOverlayHost) await cursorOverlayHost.hide(presentation.id);
+    } catch { /* cursor cleanup must not block stream revocation */ }
     // The input target registry is owned by the logical agent identity, not by
     // the optional cursor process. A target may have been remembered while the
-    // cursor overlay was absent; revoking/closing that agent must clear the
-    // target even when there is no overlay session to dispose.
-    if (!agentRuntimePromise || !agentSessions.has(details.key)) {
-      forgetAgentDesktopInputTargets(cursorIdentity);
-      return;
-    }
-    details.session = agentSessions.get(details.key)!.session;
-    const runtime = await agentRuntimePromise;
+    // cursor overlay was absent; revoking/closing that agent must clear it too.
     try {
-      resultError(await runtime.driver.setAgentCursorEnabled({ session: details.session, enabled: false }), "Cua Driver could not hide the revoked agent cursor.");
-    } finally {
-      try { await runtime.driver.endSession({ session: details.session }); }
-      finally {
-        agentSessions.delete(details.key);
-        sessionRefreshedAt.delete(details.key);
-        cursorSessionNames.delete(details.key);
-        cursorStartSlots.delete(details.key);
-        forgetAgentDesktopInputTargets(cursorIdentity);
+      if (agentRuntimePromise && agentSessions.has(details.key)) {
+        details.session = agentSessions.get(details.key)!.session;
+        const runtime = await agentRuntimePromise;
+        try { await runtime.driver.setAgentCursorEnabled({ session: details.session, enabled: false }); }
+        finally { await runtime.driver.endSession({ session: details.session }); }
       }
+    } finally {
+      agentSessions.delete(details.key);
+      sessionRefreshedAt.delete(details.key);
+      cursorSessionNames.delete(details.key);
+      cursorOverlayPresentations.delete(overlaySession);
+      cursorStartSlots.delete(details.key);
+      cursorPresentationWork.delete(details.key);
+      forgetAgentDesktopInputTargets(cursorIdentity);
     }
   }
 
@@ -4030,17 +4131,20 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     const sessions = [...agentSessions.values()];
     agentSessions.clear();
     cursorSessionNames.clear();
+    cursorOverlayPresentations.clear();
     sessionRefreshedAt.clear();
     cursorStartSlots.clear();
     desktopInputTargets.clear();
-    if (!runtimePromise) return;
     try {
-      const runtime = await runtimePromise;
-      for (const session of sessions) {
-        try { await runtime.driver.endSession({ session: session.session }); } catch { /* continue closing remaining sessions */ }
+      if (runtimePromise) {
+        const runtime = await runtimePromise;
+        for (const session of sessions) {
+          try { await runtime.driver.endSession({ session: session.session }); } catch { /* continue closing remaining sessions */ }
+        }
+        await disposeRuntime(runtime);
       }
-      await disposeRuntime(runtime);
     } catch { /* the runtime never initialized */ }
+    finally { await cursorOverlayHost?.close().catch(() => undefined); }
   }
 
   return { capture, readStructure, readElementValue, readDesktopStructure, describeTarget, describeElementTarget, valueMutationRegion, observedValueMutationRegions, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,

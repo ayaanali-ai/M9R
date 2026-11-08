@@ -7,7 +7,7 @@ import test from "node:test";
 import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
-import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
+import { createWindowsDesktopStageManager, type WindowsStageDependencies } from "../src/lib/native/windows-desktop-stage";
 import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
 import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT, discoverInstalledWindowsApp } from "../src/lib/native/windows-installed-apps";
@@ -20,7 +20,8 @@ type TestVisibleWindow = { pid: number; windowId: string; title: string; width: 
   appName?: string; processName?: string | null; className?: string; zOrder?: number; processPath?: string | null; appUserModelId?: string | null };
 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
-  readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>, fenced = false) {
+  readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>, fenced = false,
+  managerHooks?: { onCloseInputStream?: (streamId: string) => void }) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   setOwnerWorkMode(root, "agents-free"); // legacy-path regression fixture; safe-default coverage is separate
   const store = createLocalStore(root);
@@ -47,9 +48,8 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     closeAgentCursor: async (cursorIdentity: { handle: string; sessionId: string }) => { cursorEvents.push(`close:${cursorIdentity.sessionId}`); },
     shutdown: async () => undefined,
   } as unknown as ReturnType<typeof createCuaStageDriver>;
-  const service = createTaskDesktopStageService({ store, ...(fenced ? { mutationFence: createMultiplayerDispatchFence({ store }) } : {}),
-    readPolicy: readPolicyOverride ?? (() => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) })), driver,
-    ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
+  const mutationFence = fenced ? createMultiplayerDispatchFence({ store }) : undefined;
+  const stage: WindowsStageDependencies = {
     platform: "win32", env: {}, invokeNative: async (request) => {
       nativeOps.push(String(request.op));
       if (retiredDesktopOps.has(String(request.op))) { retiredDesktopOpCount++; return { ok: false, error: "Windows desktop operations are retired." }; }
@@ -64,7 +64,21 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
       if (request.op === "inspect") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } };
       throw new Error("Unexpected native operation; preparation must not move or activate windows.");
     },
-  } });
+  };
+  const manager = managerHooks ? createWindowsDesktopStageManager({ ...stage, root, terminal: true,
+    sharedWindowFence: mutationFence,
+    taskActive: (taskId) => {
+      const current = store.getTask(taskId);
+      return Boolean(current) && current!.resultSummary === undefined && current!.receipt?.state !== "canceled"
+        && current!.lifecycle?.state !== "completed" && current!.lifecycle?.state !== "failed";
+    } }) : undefined;
+  if (manager && managerHooks?.onCloseInputStream) {
+    const closeInputStream = manager.closeInputStream.bind(manager);
+    manager.closeInputStream = (streamId) => { managerHooks.onCloseInputStream!(streamId); closeInputStream(streamId); };
+  }
+  const service = createTaskDesktopStageService({ store, ...(mutationFence ? { mutationFence } : {}), ...(manager ? { manager } : {}),
+    readPolicy: readPolicyOverride ?? (() => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) })), driver,
+    ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage });
   return { root, store, identity, task, service, driver, nativeOps, presentedWindows,
     cursorEvents,
     setForegroundWindow: (pid: number, windowId: string) => { foregroundWindow = { pid, windowId }; },
@@ -133,6 +147,27 @@ test("transient cursor policy reads do not close the agent overlay until three c
     await f.service.close();
     f.cleanup();
   }
+});
+
+test("task completion removes the persistent cursor but preserves the agent-session native input stream", async () => {
+  const closedInputStreams: string[] = [];
+  const f = fixture(true, undefined, undefined, false, { onCloseInputStream: (streamId) => closedInputStreams.push(streamId) });
+  const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 2_100));
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 12, y: 15 }, "owner-preview");
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+    assert.equal(f.service.inputStreamSnapshot().length, 1);
+
+    f.store.markDelivered([f.task.id], f.identity.sessionId);
+    assert.equal(f.store.recordTaskResult(f.identity.token, f.task.id, "Done", { status: "completed", remainingWork: [] }).ok, true);
+    await waitForReaperTick();
+
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"],
+      "a terminal task reaps its marker instead of leaving it on screen");
+    assert.deepEqual(closedInputStreams, [], "task completion must not tear down the agent's persistent native stream");
+    assert.equal(f.service.inputStreamSnapshot().length, 1, "the logical session lane remains reusable for the agent's next task");
+  } finally { await f.service.close(); f.cleanup(); }
 });
 
 test("task timing persists native subphase labels, operation correlation, and fractional duration", () => {

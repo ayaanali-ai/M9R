@@ -452,7 +452,7 @@ export function createTaskDesktopStageService(input: {
   };
   const ownedApps = new Map<string, OwnedStageApp>();
   const observedRegionRevisions = new Map<string, { surfaceId: string; surfaceRevision: number; regions: Map<string, number> }>();
-  const activeAgentCursors = new Map<string, CuaAgentCursorIdentity>();
+  const activeAgentCursors = new Map<string, { identity: CuaAgentCursorIdentity; taskId: string }>();
   // A single failed identity/policy lookup is far more likely to be a transient
   // token-refresh or policy-reload race than a genuinely revoked session. Only
   // tear the cursor down after several consecutive failed ticks.
@@ -536,7 +536,7 @@ export function createTaskDesktopStageService(input: {
 
   async function primeResolvedCursor(target: CursorTarget): Promise<AgentCursorPrimeResult> {
     const key = cursorIdentityKey(target.identity);
-    activeAgentCursors.set(key, target.identity);
+    activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId });
     const run = async (): Promise<AgentCursorPrimeResult> => {
       const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
         showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
@@ -614,7 +614,7 @@ export function createTaskDesktopStageService(input: {
     if (task.receipt?.state === "paused") {
       throw new StageAuthorizationError("This task is paused; no desktop work is allowed for that turn.");
     }
-    activeAgentCursors.set(cursorIdentityKey(identity), { handle, sessionId: identity.sessionId });
+    activeAgentCursors.set(cursorIdentityKey(identity), { identity: { handle, sessionId: identity.sessionId }, taskId });
     // Session-scoped reuse bounds desktop creation; task text never becomes a desktop name.
     const name = cursorStageName(identity, mode);
     return { identity, task, name, mode };
@@ -701,6 +701,8 @@ export function createTaskDesktopStageService(input: {
       const active = activeInputs.get(stageName);
       if (active?.taskId === taskId) active.controller.abort(new Error("Explicit desktop stop requested."));
       inputStreams.cancelTask(streamIdentity, taskId, new Error("Explicit desktop stop requested."));
+      try { await driver.closeAgentCursor(streamIdentity); } catch { /* stop remains effective even if marker cleanup fails */ }
+      activeAgentCursors.delete(cursorIdentityKey(streamIdentity));
       const endedMs = Date.now();
       recordStageTiming(taskId, { phase: "stop", startedAt: new Date(startedMs).toISOString(), endedAt: new Date(endedMs).toISOString(),
         durationMs: endedMs - startedMs, status: "ok" });
@@ -1613,15 +1615,26 @@ export function createTaskDesktopStageService(input: {
     if (activeAgentCursors.size === 0 || cursorReaperQueued) return;
     cursorReaperQueued = true;
     const reconcile = async () => {
-      for (const [key, identity] of activeAgentCursors) {
+      for (const [key, active] of activeAgentCursors) {
+        if (!taskActive(active.taskId)) {
+          try {
+            await driver.closeAgentCursor(active.identity);
+            // The visible marker is task-scoped; the native input host is
+            // agent-session-scoped and must survive a completed task so the
+            // next task keeps the same independent stream identity/process.
+            activeAgentCursors.delete(key);
+            cursorAuthFailures.delete(key);
+          } catch { /* retry terminal-task cleanup on the next tick */ }
+          continue;
+        }
         let authorized = false;
         try {
-          const token = input.store.identityTokenFor(identity.handle, identity.sessionId);
+          const token = input.store.identityTokenFor(active.identity.handle, active.identity.sessionId);
           const current = token ? input.store.verifyIdentity(token) : null;
           const policy = readPolicy();
-          authorized = Boolean(current && current.sessionId === identity.sessionId
-            && normalizeHandle(current.handle) === normalizeHandle(identity.handle)
-            && policy.handles.includes(normalizeHandle(identity.handle)));
+          authorized = Boolean(current && current.sessionId === active.identity.sessionId
+            && normalizeHandle(current.handle) === normalizeHandle(active.identity.handle)
+            && policy.handles.includes(normalizeHandle(active.identity.handle)));
         } catch { /* policy or identity storage failure counts as a failed tick below */ }
         if (authorized) {
           cursorAuthFailures.delete(key);
@@ -1631,8 +1644,8 @@ export function createTaskDesktopStageService(input: {
         cursorAuthFailures.set(key, failures);
         if (failures < CURSOR_REVOKE_AFTER_FAILURES) continue;
         try {
-          await driver.closeAgentCursor(identity);
-          manager.closeInputStream?.(agentInputStreamId(identity));
+          await driver.closeAgentCursor(active.identity);
+          manager.closeInputStream?.(agentInputStreamId(active.identity));
           activeAgentCursors.delete(key);
           cursorAuthFailures.delete(key);
         } catch { /* retry revocation on the next tick; Driver idle-hide is the fail-safe */ }

@@ -1458,6 +1458,44 @@ test("primes an idle agent cursor inside the current foreground window without m
   await driver.shutdown();
 }));
 
+test("uses the M9R marker at verified screen points for the full agent session and cleans it up", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const updates: Array<{ id: string; label: string; color: readonly [number, number, number]; x: number; y: number }> = [];
+  const hidden: string[] = [];
+  let closed = 0;
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    cursorOverlayHost: {
+      upsert: async (point) => { updates.push(point); return true; },
+      hide: async (id) => { hidden.push(id); },
+      close: async () => { closed += 1; },
+    },
+    loadSdk: async () => makeSdk({ testRoot: root, calls }) as never,
+  });
+  const identity = { handle: "codex", sessionId: "m9r-overlay-live-stream" };
+  const shown = await driver.showAgentCursor("stage", identity);
+  assert.equal(shown.visible, true);
+  assert.equal(updates.length, 1);
+  assert.deepEqual({ x: updates[0]!.x, y: updates[0]!.y }, { x: 140, y: 70 },
+    "the first marker position is mapped from the verified owner window into screen coordinates");
+  assert.ok(calls.some((call) => call.method === "setAgentCursorEnabled"
+    && (call.value as { enabled?: boolean }).enabled === false), "CUA's duplicate visual marker is hidden after M9R confirms its frame");
+
+  const moved = await driver.moveCursor("stage", 42, 24, identity);
+  assert.equal(moved.cursor.visible, true);
+  assert.deepEqual({ x: updates.at(-1)!.x, y: updates.at(-1)!.y }, { x: 142, y: 74 },
+    "each target update uses the verified screen point, not a guessed cursor location");
+  assert.equal(updates[0]!.id, updates[1]!.id, "one stable marker identity follows the same agent session");
+  assert.equal(updates[0]!.label, updates[1]!.label);
+  assert.deepEqual(updates[0]!.color, updates[1]!.color, "the per-agent color remains stable across moves");
+
+  await driver.closeAgentCursor(identity);
+  assert.deepEqual(hidden, [updates[0]!.id], "revoking the session removes its persistent marker");
+  await driver.shutdown();
+  assert.equal(closed, 1, "broker shutdown closes the shared overlay process");
+}));
+
 test("coalesces delayed cursor moves to the latest target while native actions continue", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

@@ -1,8 +1,7 @@
-//! M9R's own agent-cursor visual overlay: a per-pixel-alpha layered window
-//! that renders ON TOP OF Cua's existing cursor-position plumbing, never
-//! replacing it. Cua's `moveCursor`/`startSession` calls remain the sole
-//! source of real cursor position and the sole thing Phase 0 (T1-T3)
-//! verified; this module owns only presentation pixels for a custom shape,
+//! M9R's own agent-cursor visual overlay: a per-pixel-alpha layered window.
+//! Cua's `moveCursor`/`startSession` calls remain the position source; when
+//! this host is available, its marker replaces Cua's visible marker. This
+//! module owns only presentation pixels for a custom shape,
 //! persistent per-agent color/label, and fading agent-to-agent chatter
 //! bubbles -- it never dispatches input and is never on the action path.
 //!
@@ -16,7 +15,7 @@
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{stdin, BufRead};
+use std::io::{stdin, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -244,14 +243,21 @@ pub mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetSystemMetrics, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage,
+        GetSystemMetrics, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage,
         UpdateLayeredWindow, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-        SM_YVIRTUALSCREEN, ULW_ALPHA, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+        SM_YVIRTUALSCREEN, ULW_ALPHA, WM_DESTROY, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
+    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows_numerics::{Matrix3x2, Vector2};
 
     type R<T> = windows::core::Result<T>;
+
+    fn protocol_line(output: &Arc<Mutex<std::io::Stdout>>, value: serde_json::Value) {
+        let mut stdout = output.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _ = writeln!(stdout, "{value}");
+        let _ = stdout.flush();
+    }
 
     // Palette taken from the approved preview's CSS.
     const PANEL: Rgb = Rgb(0x1c, 0x20, 0x26);
@@ -981,22 +987,7 @@ pub mod win {
     /// interfere with Cua's or anything else's real input dispatch.
     pub fn run() -> ! {
         let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
-        {
-            let state = state.clone();
-            std::thread::spawn(move || {
-                let stdin = stdin();
-                for line in stdin.lock().lines() {
-                    let line = match line {
-                        Ok(l) => l,
-                        Err(_) => break,
-                    };
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    apply_command(&state, line.trim());
-                }
-            });
-        }
+        let output = Arc::new(Mutex::new(std::io::stdout()));
 
         unsafe {
             let class_name = w!("M9RCursorOverlay");
@@ -1022,7 +1013,29 @@ pub mod win {
             let mut renderer = Renderer::new().ok();
             SetTimer(Some(hwnd), 1, 33, None);
 
+            // The reader owns only the presentation command pipe. EOF means
+            // the broker has shut down; wake the UI thread so the layered
+            // window and process are always reaped instead of orphaned.
+            let ui_thread_id = GetCurrentThreadId();
+            let reader_state = state.clone();
+            let reader_output = output.clone();
+            std::thread::spawn(move || {
+                let stdin = stdin();
+                for line in stdin.lock().lines() {
+                    let line = match line { Ok(line) => line, Err(_) => break };
+                    if line.trim().is_empty() { continue; }
+                    let request_id = serde_json::from_str::<serde_json::Value>(&line).ok()
+                        .and_then(|value| value.get("requestId").and_then(serde_json::Value::as_u64));
+                    let ok = apply_command(&reader_state, line.trim());
+                    if let Some(request_id) = request_id {
+                        protocol_line(&reader_output, serde_json::json!({ "event": "ack", "requestId": request_id, "ok": ok }));
+                    }
+                }
+                let _ = PostThreadMessageW(ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            });
+
             let mut message = MSG::default();
+            let mut ready_sent = false;
             loop {
                 let got = GetMessageW(&mut message, None, 0, 0);
                 if got.0 <= 0 {
@@ -1035,8 +1048,16 @@ pub mod win {
                     let guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
                     // Expire finished bubbles and advance blink timers without
                     // holding the lock across the (possibly slower) render.
-                    let snapshot = guard.clone();
+                    let mut snapshot = guard.clone();
                     drop(guard);
+                    // `AgentState` stores physical screen coordinates. The
+                    // layered window's backing DIB starts at the virtual
+                    // desktop origin, which may be negative on multi-monitor
+                    // layouts; translate only the render snapshot.
+                    for agent in snapshot.values_mut() {
+                        agent.x -= x as f32;
+                        agent.y -= y as f32;
+                    }
                     {
                         let mut guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
                         for agent in guard.values_mut() {
@@ -1082,7 +1103,7 @@ pub mod win {
                         SourceConstantAlpha: 255,
                         AlphaFormat: AC_SRC_ALPHA as u8,
                     };
-                    let _ = UpdateLayeredWindow(
+                    let presented = UpdateLayeredWindow(
                         hwnd, None,
                         Some(&dst_pt as *const POINT),
                         Some(&size as *const SIZE),
@@ -1091,7 +1112,11 @@ pub mod win {
                         COLORREF(0),
                         Some(&blend as *const BLENDFUNCTION),
                         ULW_ALPHA,
-                    );
+                    ).is_ok();
+                    if presented && !ready_sent {
+                        protocol_line(&output, serde_json::json!({ "event": "ready" }));
+                        ready_sent = true;
+                    }
                 }
             }
             let _ = DestroyWindow(hwnd);

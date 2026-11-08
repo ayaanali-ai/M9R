@@ -162,7 +162,7 @@ export function transitionTaskReceipt(current: TaskReceipt | undefined, transiti
 /** A durable phase boundary for one request handled by the native desktop stage. */
 export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | "close" | "stop"
   | "launch-preflight" | "stage-recovery"
-  | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "foreground-lease" | "background-dispatch"
+  | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "cursor-overlay" | "foreground-lease" | "background-dispatch"
   | "window-capture" | "accessibility-read" | "target-resolution" | "input-dispatch" | "post-action-observation"
   | "launch-discovery"
   | "provider-acceptance" | "first-visible-action" | "completion";

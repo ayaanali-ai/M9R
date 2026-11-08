@@ -9,7 +9,7 @@ The original checkout and its four modified provider files are excluded. Edge/no
 3. [x] Owner work mode and scoped foreground approval, end-to-end through pill/broker/dispatch.
 4. [x] Per-action background capabilities; semantic-first delivery with no unapproved physical fallback.
 5. [x] Bounded foreground handoff with safe owner-context restoration.
-6. [ ] Existing custom cursor renderer driven by live streams and exact targets, persistent task lifetime and cleanup.
+6. [x] Existing custom cursor renderer driven by live streams and exact targets, persistent task lifetime and cleanup.
 7. [ ] Provider-to-provider task coordination, assignment/claim/help/yield/resume, delivery/wakeup, verified completion and bounded stop.
 8. [ ] Final integrated checks and repeatable acceptance/evidence plan.
 
@@ -83,3 +83,11 @@ An approved foreground operation now captures the exact visible, non-minimized o
 Physical input detection uses temporary low-level keyboard/mouse hooks only during an approved foreground handoff. The callbacks read only each event's injected flag and increment an in-memory epoch for physical events; they do not retain or log key codes, text, pointer coordinates, or buttons. Agent-injected events do not count as owner input. Hooks are explicitly removed in the handoff's `finally` path, including restore failure/revocation. If hook setup or owner-context capture fails, no foreground action is sent.
 
 Verification in the isolated worktree: Windows-stage suite passed (28), focused owner-work-mode/stage integration passed (3), native input-host unit tests passed (20), native input-stream TypeScript check passed, root TypeScript check passed, native `cargo check` passed, and `git diff --check` passed. Those tests exercise authorization, exact target scope, fail-closed capture, owner-input interruption, safe restoration, and hook-flag classification. They do not simulate real user input through installed hooks; that behavior remains part of post-install live acceptance. No runtime was installed or published.
+
+## Item 6: persistent per-agent visual cursor
+
+The existing Direct2D renderer is now wired as a presentation-only child of the owner broker. It starts lazily and reports ready only after its first layered frame was successfully presented. Each authenticated agent session receives a stable private marker ID, public label, and deterministic color. The existing CUA session remains the verified position source; its visual marker is hidden only after the M9R renderer acknowledges the matching screen-coordinate marker. If the renderer is missing or fails to acknowledge, the CUA marker is restored as fallback. This path sends no input and is never used as action-delivery or effect evidence.
+
+Cursor target points are sent after CUA position verification and are in absolute screen coordinates; the renderer translates them against the virtual-screen origin for multi-monitor layouts. The marker remains visible between actions for that task. Explicit stop, task terminal state, identity revocation, or broker shutdown removes it. Task completion does **not** close the agent-session input host; that stream persists for the next task. Renderer startup/ack timing is recorded separately from action evidence.
+
+Verification: the cursor host protocol and CUA-stage suites plus the full task desktop-stage suite passed (129 tests, 0 failures) with Windows test temp storage inside the isolated worktree; root TypeScript check and native `cargo check --offline --manifest-path native-input-host/Cargo.toml` passed. The native renderer self-test generated and visually verified its transparent/on-light/on-dark frames. These are build/unit/self-test results, not a live installed-runtime acceptance test. The implementation remains isolated and is not installed or published.
