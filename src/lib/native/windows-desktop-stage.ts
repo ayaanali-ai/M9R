@@ -85,6 +85,9 @@ interface NativeStageResponse {
   position?: { x: number; y: number };
   windowState?: "closed" | "minimized" | "occluded" | "hidden" | "visible";
   foregroundWindow?: { pid: number; windowId: string; title?: string; className?: string; visible?: boolean; minimized?: boolean };
+  foregroundContext?: { pid: number; windowId: string; processGeneration: string; physicalInputEpoch: number; visible: boolean; minimized: boolean };
+  physicalInputEpoch?: number;
+  restoration?: { restored: boolean; reason?: string };
   result?: unknown;
   state?: "minimized" | "maximized" | "restored";
   processGeneration?: string;
@@ -183,6 +186,8 @@ export interface WindowsStageDependencies {
   nativeHostFactory?: (streamId?: string) => { invoke(request: Record<string, unknown>): Promise<NativeStageResponse>; close(): void };
   /** Internal API-call evidence. This callback never changes an action's outcome. */
   onNativeDispatch?: (evidence: NativeDispatchEvidence) => void;
+  /** Safe foreground restoration outcome; diagnostics only, never changes action success. */
+  onForegroundRestoration?: (outcome: { status: "restored" | "skipped" | "failed"; reason?: string }) => void;
   /** Whether a process id still exists; injectable for tests. */
   processAlive?: (pid: number) => boolean;
   /** Whether the task that most recently used a stage is still unfinished. Used only to
@@ -454,8 +459,13 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime());
   }
   const streamContext = new AsyncLocalStorage<string>();
-  const foregroundAuthority = new AsyncLocalStorage<(request: Record<string, unknown>) => Promise<void>>();
-  const foregroundOperations = new Set(["bringToForeground", "setWindowState", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "restoreCursorPosition"]);
+  const foregroundAuthority = new AsyncLocalStorage<(request: Record<string, unknown>) => Promise<{ restoreOwnerContext: boolean } | void>>();
+  const foregroundHandoff = new AsyncLocalStorage<{
+    restoreOwnerContext: boolean;
+    owner?: NonNullable<NativeStageResponse["foregroundContext"]>;
+    targets: Map<string, { pid: number; windowId: string }>;
+  }>();
+  const foregroundOperations = new Set(["bringToForeground", "setWindowState", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "restoreCursorPosition", "restoreForegroundContext"]);
   const hostFactory = deps.nativeHostFactory ?? (() => createPersistentWindowsStageHost(
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe")));
   const persistentHost = deps.invokeNative ? undefined : hostFactory();
@@ -465,12 +475,47 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (managerClosed) return Promise.reject(new Error("The native desktop-stage manager is closed."));
     const operation = String(request.op);
     const globalMediaInput = operation === "systemControl" && request.control === "media";
+    let authorization: { restoreOwnerContext: boolean } | void = undefined;
     if (foregroundOperations.has(operation) || globalMediaInput) {
       const authorize = foregroundAuthority.getStore();
       if (!authorize) throw new DesktopInputNotDispatchedError(globalMediaInput
         ? "Global media input requires an owner-authorized task turn; no media key was sent."
         : "Foreground dispatch requires an owner-authorized task turn; no input was sent.", "foreground-approval");
-      await authorize(request);
+      authorization = await authorize(request);
+      if (operation === "restoreForegroundContext" && authorization?.restoreOwnerContext !== true) {
+        return { ok: true, restoration: { restored: false, reason: "foreground-grant-revoked" } };
+      }
+    }
+    const handoff = foregroundHandoff.getStore();
+    if (handoff && operation !== "restoreForegroundContext" && !globalMediaInput
+      && authorization?.restoreOwnerContext === true) {
+      const target = foregroundRequestTarget(request);
+      if (target) {
+        handoff.targets.set(foregroundIdentityKey(target.pid, target.windowId), target);
+        if (!handoff.owner) {
+          const captured = await invokeNative({ op: "captureForegroundContext" });
+          const owner = captured.foregroundContext;
+          if (!captured.ok || !owner || !Number.isSafeInteger(owner.pid) || owner.pid < 1
+            || !WINDOW_ID_RE.test(owner.windowId) || !/^[a-f0-9]{16}$/i.test(owner.processGeneration)
+            || !Number.isSafeInteger(owner.physicalInputEpoch) || owner.physicalInputEpoch < 0
+            || !owner.visible || owner.minimized) {
+            throw new DesktopInputNotDispatchedError(
+              "The owner foreground context could not be captured safely; no foreground input was sent.",
+              "foreground-approval");
+          }
+          handoff.owner = owner;
+        }
+        handoff.restoreOwnerContext = true;
+      }
+    }
+    if (handoff?.restoreOwnerContext && handoff.owner && foregroundOperations.has(operation)
+      && operation !== "restoreForegroundContext") {
+      const input = await invokeNative({ op: "physicalInputEpoch" });
+      if (!input.ok || input.physicalInputEpoch !== handoff.owner.physicalInputEpoch) {
+        throw new DesktopInputNotDispatchedError(
+          "Owner input changed during the approved foreground turn; no further foreground input was sent.",
+          "foreground-approval");
+      }
     }
     if (deps.invokeNative) return deps.invokeNative(request);
     const streamId = streamContext.getStore();
@@ -484,8 +529,47 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (managerClosed) throw new Error("The native desktop-stage manager is closed.");
     return streamContext.run(streamId, operation);
   }
-  function withForegroundAuthorization<T>(authorize: (request: Record<string, unknown>) => Promise<void>, operation: () => Promise<T>): Promise<T> {
-    return foregroundAuthority.run(authorize, operation);
+  function withForegroundAuthorization<T>(authorize: (request: Record<string, unknown>) => Promise<{ restoreOwnerContext: boolean } | void>, operation: () => Promise<T>): Promise<T> {
+    const handoff: {
+      restoreOwnerContext: boolean;
+      owner?: NonNullable<NativeStageResponse["foregroundContext"]>;
+      targets: Map<string, { pid: number; windowId: string }>;
+    } = { restoreOwnerContext: false, targets: new Map<string, { pid: number; windowId: string }>() };
+    const restore = async () => {
+      if (!handoff.owner) return;
+      try {
+        if (!handoff.restoreOwnerContext || !handoff.targets.size) return;
+        const current = await currentForegroundWindow();
+        const authorizedCurrentProcess = [...handoff.targets.values()].some((target) => target.pid === current.pid);
+        if (!authorizedCurrentProcess) {
+          deps.onForegroundRestoration?.({ status: "skipped", reason: "foreground-changed" });
+          return;
+        }
+        const owner = handoff.owner;
+        if (sameForegroundIdentity(owner, current)) {
+          deps.onForegroundRestoration?.({ status: "restored", reason: "already-owner-window" });
+          return;
+        }
+        const result = await invokeNative({ op: "restoreForegroundContext", pid: current.pid, windowId: current.windowId,
+          ownerPid: owner.pid, ownerWindowId: owner.windowId, ownerProcessGeneration: owner.processGeneration,
+          physicalInputEpoch: owner.physicalInputEpoch });
+        if (result.restoration?.restored) deps.onForegroundRestoration?.({ status: "restored", reason: result.restoration.reason });
+        else deps.onForegroundRestoration?.({ status: "skipped", reason: result.restoration?.reason ?? result.error ?? "restore-unavailable" });
+      } catch (error) {
+        deps.onForegroundRestoration?.({ status: "failed", reason: error instanceof Error ? error.message : String(error) });
+      } finally {
+        try {
+          const released = await invokeNative({ op: "releaseForegroundContextMonitor" });
+          if (!released.ok) deps.onForegroundRestoration?.({ status: "failed", reason: released.error ?? "owner-input-monitor-release-failed" });
+        } catch (error) {
+          deps.onForegroundRestoration?.({ status: "failed", reason: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    };
+    return foregroundHandoff.run(handoff, () => foregroundAuthority.run(authorize, async () => {
+      try { return await operation(); }
+      finally { await restore(); }
+    }));
   }
   function closeInputStream(streamId: string): void {
     streamHosts.get(streamId)?.close();
@@ -1391,6 +1475,24 @@ function parsePid(value: string): number {
 function parseWindowId(value: string): string {
   if (!WINDOW_ID_RE.test(value) || !/[^0]/.test(value.replace(/^0[xX]/, ""))) throw new Error("Window id must be a non-zero decimal or 0x-prefixed handle from the listed window.");
   return value;
+}
+
+function foregroundIdentityKey(pid: number, windowId: string): string {
+  try { return `${pid}:${BigInt(windowId).toString()}`; }
+  catch { return `${pid}:${windowId}`; }
+}
+
+function sameForegroundIdentity(left: { pid: number; windowId: string }, right: { pid: number; windowId: string }): boolean {
+  return foregroundIdentityKey(left.pid, left.windowId) === foregroundIdentityKey(right.pid, right.windowId);
+}
+
+function foregroundRequestTarget(request: Record<string, unknown>): { pid: number; windowId: string } | undefined {
+  const pid = typeof request.pid === "number" ? request.pid
+    : typeof request.pid === "string" && /^\d+$/.test(request.pid) ? Number(request.pid) : NaN;
+  const windowId = typeof request.windowId === "string" ? request.windowId
+    : typeof request.windowId === "number" && Number.isSafeInteger(request.windowId) ? String(request.windowId) : undefined;
+  if (!Number.isSafeInteger(pid) || pid < 1 || !windowId || !WINDOW_ID_RE.test(windowId)) return undefined;
+  return { pid, windowId };
 }
 
 interface PendingNativeStageRequest {

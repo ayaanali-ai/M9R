@@ -235,6 +235,26 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
         },
         #[cfg(windows)]
+        Some("captureForegroundContext") => match platform::capture_foreground_context() {
+            Ok(context) => json!({"ok":true,"requestId":request_id,"foregroundContext":context}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("physicalInputEpoch") => match crate::win32::physical_input_epoch() {
+            Ok(epoch) => json!({"ok":true,"requestId":request_id,"physicalInputEpoch":epoch}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("restoreForegroundContext") => match platform::restore_foreground_context(value) {
+            Ok(restoration) => json!({"ok":true,"requestId":request_id,"restoration":restoration}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
+        Some("releaseForegroundContextMonitor") => match platform::release_foreground_context_monitor() {
+            Ok(()) => json!({"ok":true,"requestId":request_id,"released":true}),
+            Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
+        },
+        #[cfg(windows)]
         Some("setWindowState") => match platform::set_window_state(value) {
             Ok(state) => json!({"ok":true,"requestId":request_id,"state":state}),
             Err(error) => json!({"ok":false,"requestId":request_id,"error":error}),
@@ -1142,6 +1162,84 @@ mod platform {
             "visible": unsafe { IsWindowVisible(window) != 0 },
             "minimized": unsafe { IsIconic(window) != 0 },
         }))
+    }
+
+    /// Captures the exact visible foreground HWND and physical-input epoch
+    /// around the read. Hooks are limited to the approved foreground handoff;
+    /// if the owner changes focus or inputs during capture, discard the sample.
+    pub(super) fn capture_foreground_context() -> Result<serde_json::Value, &'static str> {
+        crate::win32::start_physical_input_monitor()?;
+        let captured = (|| {
+        let before_input_epoch = crate::win32::physical_input_epoch()?;
+        let foreground = current_foreground_window()?;
+        let pid = foreground["pid"].as_u64().ok_or("foreground process identity is unavailable")? as u32;
+        let window_id = foreground["windowId"].as_str().ok_or("foreground window identity is unavailable")?;
+        let handle = window_id.parse::<usize>().map_err(|_| "foreground window identity is invalid")?;
+        if unsafe { GetForegroundWindow() } != handle as Hwnd {
+            return Err("foreground window changed while owner context was captured");
+        }
+        let generation = process_generation(pid)?;
+        let after_input_epoch = crate::win32::physical_input_epoch()?;
+        if before_input_epoch != after_input_epoch || unsafe { GetForegroundWindow() } != handle as Hwnd {
+            return Err("owner input or foreground changed while context was captured");
+        }
+        Ok(serde_json::json!({
+            "pid": pid,
+            "windowId": window_id,
+            "processGeneration": generation,
+            "physicalInputEpoch": after_input_epoch,
+            "visible": foreground["visible"],
+            "minimized": foreground["minimized"],
+        }))
+        })();
+        if captured.is_err() { let _ = crate::win32::stop_physical_input_monitor(); }
+        captured
+    }
+
+    /// Returns a non-restored disposition rather than taking over after the
+    /// owner has interacted, the expected agent HWND lost foreground, or the
+    /// captured owner HWND/process is no longer the same visible window.
+    pub(super) fn restore_foreground_context(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let owner_pid = value.get("ownerPid").and_then(serde_json::Value::as_u64)
+            .filter(|pid| *pid > 0 && *pid <= u32::MAX as u64).ok_or("invalid captured owner process id")? as u32;
+        let owner_window_text = value.get("ownerWindowId").and_then(serde_json::Value::as_str)
+            .ok_or("captured owner window id is missing")?;
+        let owner_window = owner_window_text.parse::<usize>().map_err(|_| "captured owner window id is invalid")?;
+        let owner_generation = value.get("ownerProcessGeneration").and_then(serde_json::Value::as_str)
+            .ok_or("captured owner process generation is missing")?;
+        let expected_input_epoch = value.get("physicalInputEpoch").and_then(serde_json::Value::as_u64)
+            .ok_or("captured owner input epoch is invalid")?;
+        let (expected_pid, expected_window) = super::parse_window_identity(&serde_json::json!({
+            "pid": value.get("pid").and_then(serde_json::Value::as_u64),
+            "windowId": value.get("windowId").and_then(serde_json::Value::as_str),
+        })).map_err(str::to_owned)?;
+
+        if crate::win32::physical_input_epoch().map_err(str::to_owned)? != expected_input_epoch {
+            return Ok(serde_json::json!({"restored":false,"reason":"owner-input-changed"}));
+        }
+        let owner = validate_window(owner_pid, owner_window).map_err(str::to_owned)?;
+        if process_generation(owner_pid).map_err(str::to_owned)? != owner_generation
+            || unsafe { IsWindowVisible(owner) } == 0 || unsafe { IsIconic(owner) } != 0 {
+            return Ok(serde_json::json!({"restored":false,"reason":"owner-window-no-longer-valid"}));
+        }
+        let expected = validate_window(expected_pid, expected_window).map_err(str::to_owned)?;
+        if unsafe { GetForegroundWindow() } != expected {
+            return Ok(serde_json::json!({"restored":false,"reason":"foreground-changed"}));
+        }
+        if owner == expected {
+            return Ok(serde_json::json!({"restored":true,"reason":"already-owner-window"}));
+        }
+        if !crate::win32::restore_window_to_foreground(owner as usize) {
+            return Ok(serde_json::json!({"restored":false,"reason":"windows-declined-restore"}));
+        }
+        Ok(serde_json::json!({
+            "restored": unsafe { GetForegroundWindow() } == owner,
+            "reason": if unsafe { GetForegroundWindow() } == owner { "restored" } else { "windows-declined-restore" },
+        }))
+    }
+
+    pub(super) fn release_foreground_context_monitor() -> Result<(), &'static str> {
+        crate::win32::stop_physical_input_monitor()
     }
 
     pub(super) fn window_at_point(

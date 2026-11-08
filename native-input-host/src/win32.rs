@@ -1,6 +1,10 @@
 use crate::{InputDispatchError, InputDispatchState, MouseButton};
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::thread;
 
 type Hwnd = *mut c_void;
 
@@ -54,6 +58,14 @@ extern "system" {
     fn IsIconic(window: Hwnd) -> i32;
     fn AttachThreadInput(attach_from: u32, attach_to: u32, attach: i32) -> i32;
     fn GetCurrentThreadId() -> u32;
+    fn SetWindowsHookExW(id_hook: i32, callback: Option<unsafe extern "system" fn(i32, usize, isize) -> isize>, module: *mut c_void, thread_id: u32) -> *mut c_void;
+    fn UnhookWindowsHookEx(hook: *mut c_void) -> i32;
+    fn CallNextHookEx(hook: *mut c_void, code: i32, wparam: usize, lparam: isize) -> isize;
+    fn GetMessageW(message: *mut HookMessage, window: Hwnd, minimum: u32, maximum: u32) -> i32;
+    fn TranslateMessage(message: *const HookMessage) -> i32;
+    fn DispatchMessageW(message: *const HookMessage) -> isize;
+    fn PeekMessageW(message: *mut HookMessage, window: Hwnd, minimum: u32, maximum: u32, remove: u32) -> i32;
+    fn PostThreadMessageW(thread_id: u32, message: u32, wparam: usize, lparam: isize) -> i32;
     fn PostMessageW(window: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn EnumChildWindows(
         parent: Hwnd,
@@ -61,6 +73,79 @@ extern "system" {
         lparam: isize,
     ) -> i32;
     fn GetClassNameW(window: Hwnd, buffer: *mut u16, max_count: i32) -> i32;
+}
+
+const WH_KEYBOARD_LL: i32 = 13;
+const WH_MOUSE_LL: i32 = 14;
+const LLKHF_INJECTED: u32 = 0x10;
+const LLMHF_INJECTED: u32 = 0x01;
+const PM_NOREMOVE: u32 = 0;
+const WM_M9R_INPUT_MONITOR_START: u32 = 0x8001;
+const WM_M9R_INPUT_MONITOR_STOP: u32 = 0x8002;
+static PHYSICAL_INPUT_EPOCH: AtomicU64 = AtomicU64::new(0);
+static PHYSICAL_INPUT_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PHYSICAL_INPUT_MONITOR_STATUS: AtomicU8 = AtomicU8::new(0);
+static PHYSICAL_INPUT_MONITOR_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+static PHYSICAL_INPUT_MONITOR_THREAD: OnceLock<Result<(), &'static str>> = OnceLock::new();
+static PHYSICAL_INPUT_MONITOR_CONTROL: Mutex<()> = Mutex::new(());
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HookPoint { x: i32, y: i32 }
+
+#[repr(C)]
+struct HookMessage {
+    window: Hwnd,
+    message: u32,
+    wparam: usize,
+    lparam: isize,
+    time: u32,
+    point: HookPoint,
+    private: u32,
+}
+
+#[repr(C)]
+struct LowLevelKeyboardEvent {
+    virtual_key: u32,
+    scan_code: u32,
+    flags: u32,
+    time: u32,
+    extra_info: usize,
+}
+
+#[repr(C)]
+struct LowLevelMouseEvent {
+    point: HookPoint,
+    mouse_data: u32,
+    flags: u32,
+    time: u32,
+    extra_info: usize,
+}
+
+fn note_physical_input(flags: u32, injected_mask: u32) {
+    if flags & injected_mask == 0 {
+        PHYSICAL_INPUT_EPOCH.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+unsafe extern "system" fn keyboard_input_monitor(code: i32, wparam: usize, lparam: isize) -> isize {
+    if code >= 0 && lparam != 0 {
+        // The callback reads only the injected flag; key values and timing are
+        // deliberately neither retained nor logged.
+        let event = unsafe { &*(lparam as *const LowLevelKeyboardEvent) };
+        note_physical_input(event.flags, LLKHF_INJECTED);
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+unsafe extern "system" fn mouse_input_monitor(code: i32, wparam: usize, lparam: isize) -> isize {
+    if code >= 0 && lparam != 0 {
+        // The callback reads only the injected flag; coordinates and button
+        // data are deliberately neither retained nor logged.
+        let event = unsafe { &*(lparam as *const LowLevelMouseEvent) };
+        note_physical_input(event.flags, LLMHF_INJECTED);
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
 const INPUT_MOUSE: u32 = 0;
@@ -216,6 +301,128 @@ fn try_raise_to_foreground(window: Hwnd) -> bool {
         }
         raised || GetForegroundWindow() == window
     }
+}
+
+fn ensure_physical_input_monitor_thread() -> Result<(), &'static str> {
+    *PHYSICAL_INPUT_MONITOR_THREAD.get_or_init(|| {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        thread::Builder::new().name("m9r-physical-input-watch".to_owned()).spawn(move || {
+            // Hooks are installed only for a foreground handoff. Between
+            // handoffs this thread waits for private control messages and does
+            // not observe owner input.
+            let mut message = HookMessage {
+                window: std::ptr::null_mut(), message: 0, wparam: 0, lparam: 0,
+                time: 0, point: HookPoint { x: 0, y: 0 }, private: 0,
+            };
+            unsafe { PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_NOREMOVE); }
+            PHYSICAL_INPUT_MONITOR_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+            if ready_tx.send(()).is_err() { return; }
+            let (mut keyboard, mut mouse): (*mut c_void, *mut c_void) = (std::ptr::null_mut(), std::ptr::null_mut());
+            loop {
+                let result = unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) };
+                if result <= 0 { break; }
+                match message.message {
+                    WM_M9R_INPUT_MONITOR_START => {
+                        if keyboard.is_null() {
+                            keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_input_monitor), std::ptr::null_mut(), 0) };
+                            if keyboard.is_null() {
+                                PHYSICAL_INPUT_MONITOR_STATUS.store(2, Ordering::Release);
+                                continue;
+                            }
+                            mouse = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_input_monitor), std::ptr::null_mut(), 0) };
+                            if mouse.is_null() {
+                                unsafe { UnhookWindowsHookEx(keyboard); }
+                                keyboard = std::ptr::null_mut();
+                                PHYSICAL_INPUT_MONITOR_STATUS.store(2, Ordering::Release);
+                                continue;
+                            }
+                        }
+                        PHYSICAL_INPUT_MONITOR_ACTIVE.store(true, Ordering::Release);
+                        PHYSICAL_INPUT_MONITOR_STATUS.store(1, Ordering::Release);
+                    }
+                    WM_M9R_INPUT_MONITOR_STOP => {
+                        PHYSICAL_INPUT_MONITOR_ACTIVE.store(false, Ordering::Release);
+                        if !keyboard.is_null() { unsafe { UnhookWindowsHookEx(keyboard); } keyboard = std::ptr::null_mut(); }
+                        if !mouse.is_null() { unsafe { UnhookWindowsHookEx(mouse); } mouse = std::ptr::null_mut(); }
+                        PHYSICAL_INPUT_MONITOR_STATUS.store(0, Ordering::Release);
+                    }
+                    _ => unsafe { TranslateMessage(&message); DispatchMessageW(&message); },
+                }
+            }
+            PHYSICAL_INPUT_MONITOR_ACTIVE.store(false, Ordering::Release);
+            if !keyboard.is_null() { unsafe { UnhookWindowsHookEx(keyboard); } }
+            if !mouse.is_null() { unsafe { UnhookWindowsHookEx(mouse); } }
+            PHYSICAL_INPUT_MONITOR_THREAD_ID.store(0, Ordering::Release);
+        }).map_err(|_| "Windows could not create the physical input-monitor thread")?;
+        ready_rx.recv().map_err(|_| "Windows physical input-monitor thread stopped before initialization")
+    })
+}
+
+fn wait_for_physical_input_monitor_status(expected: u8) -> Result<(), &'static str> {
+    for _ in 0..1_000 {
+        match PHYSICAL_INPUT_MONITOR_STATUS.load(Ordering::Acquire) {
+            status if status == expected => return Ok(()),
+            2 => return Err("Windows could not install the physical input-monitor hooks"),
+            _ => thread::sleep(std::time::Duration::from_millis(1)),
+        }
+    }
+    Err("Windows physical input-monitor did not acknowledge the handoff")
+}
+
+pub fn start_physical_input_monitor() -> Result<(), &'static str> {
+    let _guard = PHYSICAL_INPUT_MONITOR_CONTROL.lock().map_err(|_| "physical input-monitor control is unavailable")?;
+    if PHYSICAL_INPUT_MONITOR_ACTIVE.load(Ordering::Acquire) { return Ok(()); }
+    ensure_physical_input_monitor_thread()?;
+    PHYSICAL_INPUT_MONITOR_STATUS.store(0, Ordering::Release);
+    let thread_id = PHYSICAL_INPUT_MONITOR_THREAD_ID.load(Ordering::Acquire);
+    if thread_id == 0 || unsafe { PostThreadMessageW(thread_id, WM_M9R_INPUT_MONITOR_START, 0, 0) } == 0 {
+        return Err("Windows could not start monitoring owner input during the foreground handoff");
+    }
+    wait_for_physical_input_monitor_status(1)
+}
+
+pub fn stop_physical_input_monitor() -> Result<(), &'static str> {
+    let _guard = PHYSICAL_INPUT_MONITOR_CONTROL.lock().map_err(|_| "physical input-monitor control is unavailable")?;
+    if !PHYSICAL_INPUT_MONITOR_ACTIVE.load(Ordering::Acquire) { return Ok(()); }
+    let thread_id = PHYSICAL_INPUT_MONITOR_THREAD_ID.load(Ordering::Acquire);
+    if thread_id == 0 || unsafe { PostThreadMessageW(thread_id, WM_M9R_INPUT_MONITOR_STOP, 0, 0) } == 0 {
+        return Err("Windows could not stop the owner-input monitor after the foreground handoff");
+    }
+    wait_for_physical_input_monitor_status(0)
+}
+
+/// Returns an in-memory generation advanced only by non-injected keyboard or
+/// mouse events. The low-level hooks inspect only the injected bit; they never
+/// store key names, text, cursor coordinates, or button data. Agent SendInput
+/// is excluded so an approved agent turn can restore focus unless the owner
+/// supplied physical input during that turn.
+pub fn physical_input_epoch() -> Result<u64, &'static str> {
+    if !PHYSICAL_INPUT_MONITOR_ACTIVE.load(Ordering::Acquire) {
+        return Err("Windows physical input-monitor thread is no longer active");
+    }
+    Ok(PHYSICAL_INPUT_EPOCH.load(Ordering::Acquire))
+}
+
+#[cfg(test)]
+mod physical_input_monitor_tests {
+    #[test]
+    fn injected_events_do_not_advance_owner_input_epoch() {
+        let before = super::PHYSICAL_INPUT_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+        super::note_physical_input(super::LLKHF_INJECTED, super::LLKHF_INJECTED);
+        assert_eq!(super::PHYSICAL_INPUT_EPOCH.load(std::sync::atomic::Ordering::Relaxed), before);
+        super::note_physical_input(0, super::LLKHF_INJECTED);
+        assert_eq!(super::PHYSICAL_INPUT_EPOCH.load(std::sync::atomic::Ordering::Relaxed), before + 1);
+    }
+}
+
+/// Restores one previously captured owner window without synthetic keystrokes,
+/// minimize/restore tricks, or showing a hidden window. The caller must first
+/// verify the captured physical-input epoch and that the foreground is still the
+/// exact authorized agent target.
+pub fn restore_window_to_foreground(window: usize) -> bool {
+    let window = window as Hwnd;
+    !window.is_null() && unsafe { IsWindowVisible(window) != 0 && IsIconic(window) == 0 }
+        && try_raise_to_foreground(window)
 }
 
 /// Brings a window to the real OS foreground (the one that receives

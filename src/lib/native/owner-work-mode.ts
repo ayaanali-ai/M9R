@@ -8,6 +8,14 @@ import type { StageApprovalRequest } from "./web-broker-core";
 
 export type OwnerWorkMode = "working" | "agents-free";
 export function isOwnerWorkMode(value: unknown): value is OwnerWorkMode { return value === "working" || value === "agents-free"; }
+export interface ForegroundAuthorizationResult { readonly restoreOwnerContext: boolean }
+
+function foregroundGrantKey(pid: unknown, windowId: unknown): string | undefined {
+  const processId = typeof pid === "number" ? pid : typeof pid === "string" && /^\d+$/.test(pid) ? Number(pid) : NaN;
+  const handle = typeof windowId === "string" && /^(?:0[xX][0-9a-f]+|[0-9]+)$/i.test(windowId) ? windowId : undefined;
+  if (!Number.isSafeInteger(processId) || processId < 1 || !handle) return undefined;
+  try { return `foreground:${processId}:${BigInt(handle).toString()}`; } catch { return undefined; }
+}
 export function readOwnerWorkPreference(root: string): { mode: OwnerWorkMode; revision: string } {
   const path = join(root, "owner-work-mode.json");
   if (!existsSync(path)) return { mode: "working", revision: "unset" };
@@ -39,28 +47,35 @@ export function createOwnerWorkPolicy(root: string, approvals: () => { requestAp
       turn.signal.throwIfAborted(); turn.assertActive?.();
       const current = readOwnerWorkPreference(root);
       if (current.mode === "agents-free") return;
-      if (turn.grants.get(`desktop:app:${appId}`) === current.revision) turn.grants.set(`foreground:${pid}:${windowId}`, current.revision);
+      if (turn.grants.get(`desktop:app:${appId}`) === current.revision) {
+        const key = foregroundGrantKey(pid, windowId);
+        if (key) turn.grants.set(key, current.revision);
+      }
     },
-    async authorize(request: Record<string, unknown>): Promise<void> {
+    async authorize(request: Record<string, unknown>): Promise<ForegroundAuthorizationResult> {
       const turn = context.getStore();
       if (!turn) throw new DesktopInputNotDispatchedError("Foreground input requires an active broker-owned task turn; no input was sent.", "foreground-lease");
       turn.signal.throwIfAborted();
       turn.assertActive?.();
       const preference = readOwnerWorkPreference(root);
-      if (preference.mode === "agents-free") return;
+      if (preference.mode === "agents-free") return { restoreOwnerContext: false };
+      if (request.op === "restoreForegroundContext") {
+        const key = foregroundGrantKey(request.pid, request.windowId);
+        return { restoreOwnerContext: Boolean(key && turn.grants.get(key) === preference.revision) };
+      }
       const globalMediaInput = request.op === "systemControl" && request.control === "media";
       if (globalMediaInput && !["play_pause", "next", "previous"].includes(String(request.action))) {
         throw new DesktopInputNotDispatchedError("The requested global media key is not supported; no media input was sent.", "foreground-approval");
       }
       if (request.op === "restoreCursorPosition" && [...turn.grants.entries()].some(([key, revision]) =>
-        key.startsWith("foreground:") && revision === preference.revision)) return;
+        key.startsWith("foreground:") && revision === preference.revision)) return { restoreOwnerContext: false };
       const launchTarget = request.op === "launch" && typeof request.windowId === "string"
         && /^app:[a-z0-9._-]{1,80}$/i.test(request.windowId)
         ? `desktop:${request.windowId}` : undefined;
       const target = globalMediaInput
         ? `global:media:${String(request.action)}`
-        : launchTarget ?? `foreground:${request.pid ?? "desktop"}:${request.windowId ?? "desktop"}`;
-      if (turn.grants.get(target) === preference.revision) return;
+        : launchTarget ?? foregroundGrantKey(request.pid, request.windowId) ?? `foreground:desktop:${String(request.windowId ?? "desktop")}`;
+      if (turn.grants.get(target) === preference.revision) return { restoreOwnerContext: !globalMediaInput };
       const route = approvals();
       if (!route) throw new DesktopInputNotDispatchedError(globalMediaInput
         ? "I'm Working is active. This global media action needs owner approval; the approval route is unavailable. No media key was sent."
@@ -82,12 +97,13 @@ export function createOwnerWorkPolicy(root: string, approvals: () => { requestAp
       turn.signal.throwIfAborted();
       turn.assertActive?.();
       const current = readOwnerWorkPreference(root);
-      if (current.mode === "agents-free") return;
+      if (current.mode === "agents-free") return { restoreOwnerContext: false };
       if (current.revision !== preference.revision) throw new DesktopInputNotDispatchedError("The owner changed the work mode while this foreground turn was waiting. No input was sent; request a new turn.", "foreground-approval");
       if (!accepted) throw new DesktopInputNotDispatchedError(globalMediaInput
         ? "The global media action is waiting for owner approval. No media key was sent; retry when approved or switch to Agents Free."
         : "The foreground turn is waiting for owner approval. No input was sent; retry when approved or switch to Agents Free.", "foreground-approval");
       turn.grants.set(target, current.revision);
+      return { restoreOwnerContext: !globalMediaInput };
     },
   };
 }

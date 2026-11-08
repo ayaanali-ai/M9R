@@ -8,7 +8,7 @@ The original checkout and its four modified provider files are excluded. Edge/no
 2. [x] Same-window independent semantic targets; revalidated stable identities and region fencing, same-target serialization retained; real two-field harness.
 3. [x] Owner work mode and scoped foreground approval, end-to-end through pill/broker/dispatch.
 4. [x] Per-action background capabilities; semantic-first delivery with no unapproved physical fallback.
-5. [ ] Bounded foreground handoff with safe owner-context restoration.
+5. [x] Bounded foreground handoff with safe owner-context restoration.
 6. [ ] Existing custom cursor renderer driven by live streams and exact targets, persistent task lifetime and cleanup.
 7. [ ] Provider-to-provider task coordination, assignment/claim/help/yield/resume, delivery/wakeup, verified completion and bounded stop.
 8. [ ] Final integrated checks and repeatable acceptance/evidence plan.
@@ -66,7 +66,7 @@ The optional real same-window test also passed under the new default Working pol
 
 Known baseline failures, left unchanged: `pill-shells.test.ts:197` expects a settings payload without the already-existing `glowStyle`/`glowColor`; `web-broker-server.test.ts:169` and `:219` expect terminal `resultSummary` values but get `undefined`. All three failures were reproduced with HEAD versions of changed broker/core/UI/desktop modules through a temporary read-only source loader (3 tests, same 3 failures). No fix is included in this item. The unchanged `pill-state.test.ts` cannot run with the repository's Node loader because it imports a provider SVG; Vite compilation and pill TypeScript check pass. These are not reported as passing tests.
 
-Still requires post-install owner acceptance: the visible pill toggle in the actual overlay, approval/restoration behavior while the owner works in real apps, and provider-level live tasks. This item does not claim new background capabilities or change the broader per-action router; that remains item 4. Exact safe context restoration is item 5.
+Still requires post-install owner acceptance: the visible pill toggle in the actual overlay, approval/restoration behavior while the owner works in real apps, and provider-level live tasks. The safe context restoration path is implemented in item 5 below; it has not yet been live-tested with installed hooks.
 
 ## Item 4: per-action delivery and foreground boundary
 
@@ -75,3 +75,11 @@ Each task-stage and Computer Use action now has an explicit delivery profile. Th
 An explicit background-only request refuses when no safe semantic route exists, even if the call carries an escalation hint or an old owner lease. If a foreground turn is needed, the caller must issue that specific action as a foreground request; the native owner-work policy then approves the one bounded turn or refuses before dispatch. A typed zero-dispatch result may be retried only through that explicit path. Uncertain delivery is never replayed. This removes silent route escalation while preserving owner-preview and Agents Free behavior.
 
 Verification: focused planner/recovery/stage-action tests passed (23); full focused integration set passed (208), covering action routing, task stage, CUA stage driver, Windows stage manager, computer-use programs/recovery, native input channels, dispatch fences, web UI bridge, and owner work mode. Root TypeScript, native-input-stream TypeScript, and `git diff --check` passed. The first restricted-sandbox run exposed the explicit-background escalation bug and failed unrelated temp-rename/loopback tests; after correcting the policy, the full 208-test integration run passed outside the restricted sandbox. No installed runtime, provider configuration, extension, or glow file was changed.
+
+## Item 5: bounded foreground handoff and owner-context restoration
+
+An approved foreground operation now captures the exact visible, non-minimized owner HWND and its process generation before dispatch. If the context is absent, invalid, or changes while it is sampled, the action is refused before input. Each subsequent foreground dispatch checks that the physical-input epoch still matches; owner mouse/keyboard activity stops further foreground actions. At operation end, M9R restores the captured owner HWND only when the exact authorized target process is still foreground, the owner window is still the same live process/window, and no physical owner input occurred. The restore path does not synthesize input, show/minimize windows, or restore after the owner resumes input. It reports restored/skipped/failed as diagnostics, not as task-effect proof.
+
+Physical input detection uses temporary low-level keyboard/mouse hooks only during an approved foreground handoff. The callbacks read only each event's injected flag and increment an in-memory epoch for physical events; they do not retain or log key codes, text, pointer coordinates, or buttons. Agent-injected events do not count as owner input. Hooks are explicitly removed in the handoff's `finally` path, including restore failure/revocation. If hook setup or owner-context capture fails, no foreground action is sent.
+
+Verification in the isolated worktree: Windows-stage suite passed (28), focused owner-work-mode/stage integration passed (3), native input-host unit tests passed (20), native input-stream TypeScript check passed, root TypeScript check passed, native `cargo check` passed, and `git diff --check` passed. Those tests exercise authorization, exact target scope, fail-closed capture, owner-input interruption, safe restoration, and hook-flag classification. They do not simulate real user input through installed hooks; that behavior remains part of post-install live acceptance. No runtime was installed or published.

@@ -41,6 +41,97 @@ test("window frame accepts every positive size exposed by the action contract an
   assert.equal(requests.length, 1, "invalid geometry is rejected before reaching the native host");
 }));
 
+test("an approved foreground turn restores only the captured owner window and yields to owner input", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const outcomes: Array<{ status: string; reason?: string }> = [];
+  const owner = { pid: 10, windowId: "100", title: "Owner work", className: "OwnerWindow", visible: true, minimized: false };
+  let foreground = owner;
+  let physicalInputEpoch = 77;
+  let ownerTypedDuringTurn = false;
+  const manager = createManager({ platform: "win32", root, terminal: true, env: {},
+    onForegroundRestoration: outcome => outcomes.push(outcome),
+    invokeNative: async request => {
+      requests.push({ ...request });
+      if (request.op === "captureForegroundContext") return { ok: true, foregroundContext: {
+        pid: owner.pid, windowId: owner.windowId, processGeneration: "000000000000000a", physicalInputEpoch,
+        visible: owner.visible, minimized: owner.minimized,
+      } };
+      if (request.op === "physicalInputEpoch") return { ok: true, physicalInputEpoch };
+      if (request.op === "bringToForeground") {
+        foreground = { pid: Number(request.pid), windowId: String(request.windowId), title: "Agent target", className: "AgentWindow", visible: true, minimized: false };
+        return { ok: true };
+      }
+      if (request.op === "sendText" && ownerTypedDuringTurn) physicalInputEpoch += 1;
+      if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: foreground };
+      if (request.op === "restoreForegroundContext") {
+        if (request.physicalInputEpoch !== physicalInputEpoch) return { ok: true, restoration: { restored: false, reason: "owner-input-changed" } };
+        foreground = owner;
+        return { ok: true, restoration: { restored: true, reason: "restored" } };
+      }
+      return { ok: true };
+    } });
+  try {
+    const authorize = async () => ({ restoreOwnerContext: true });
+    await manager.withForegroundAuthorization(authorize, async () => {
+      await manager.bringToForeground(20, "200");
+      await manager.sendText(20, "200", "bounded input");
+    });
+    assert.deepEqual(foreground, owner);
+    assert.deepEqual(requests.map(request => request.op), ["captureForegroundContext", "physicalInputEpoch", "bringToForeground", "physicalInputEpoch", "sendText", "currentForegroundWindow", "restoreForegroundContext", "releaseForegroundContextMonitor"]);
+    assert.deepEqual(outcomes, [{ status: "restored", reason: "restored" }]);
+    const restoreRequest = requests.find(request => request.op === "restoreForegroundContext");
+    assert.equal(restoreRequest?.ownerWindowId, owner.windowId);
+    assert.equal(restoreRequest?.windowId, "200", "the restore is authorized against the exact agent target HWND");
+
+    requests.length = 0; outcomes.length = 0; physicalInputEpoch = 77; foreground = owner; ownerTypedDuringTurn = true;
+    await manager.withForegroundAuthorization(authorize, async () => {
+      await manager.bringToForeground(20, "200");
+      await manager.sendText(20, "200", "owner used the desktop");
+    });
+    assert.equal(foreground.pid, 20, "the manager never takes focus back after the owner's input tick changes");
+    assert.equal(requests.find(request => request.op === "restoreForegroundContext")?.physicalInputEpoch, 77,
+      "native restoration checks the physical-input epoch after the operation");
+    assert.equal(requests.at(-1)?.op, "releaseForegroundContextMonitor", "the temporary physical-input hook is always removed after the handoff");
+    assert.deepEqual(outcomes, [{ status: "skipped", reason: "owner-input-changed" }]);
+  } finally { manager.close(); }
+}));
+
+test("foreground actions dispatch nothing when the owner context cannot be captured safely", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const manager = createManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async request => { requests.push({ ...request }); return { ok: false, error: "physical input monitor unavailable" }; } });
+  try {
+    await assert.rejects(manager.withForegroundAuthorization(async () => ({ restoreOwnerContext: true }),
+      () => manager.bringToForeground(20, "200")), /owner foreground context could not be captured safely/);
+    assert.deepEqual(requests.map(request => request.op), ["captureForegroundContext"],
+      "the foreground target receives no request after owner-context capture fails");
+  } finally { manager.close(); }
+}));
+
+test("physical owner input after approval stops the foreground action before dispatch", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const owner = { pid: 10, windowId: "100", title: "Owner work", className: "OwnerWindow", visible: true, minimized: false };
+  const manager = createManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async request => {
+      requests.push({ ...request });
+      if (request.op === "captureForegroundContext") return { ok: true, foregroundContext: {
+        pid: owner.pid, windowId: owner.windowId, processGeneration: "000000000000000a", physicalInputEpoch: 5,
+        visible: true, minimized: false,
+      } };
+      if (request.op === "physicalInputEpoch") return { ok: true, physicalInputEpoch: 6 };
+      if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: owner };
+      if (request.op === "releaseForegroundContextMonitor") return { ok: true, released: true };
+      return { ok: true };
+    } });
+  try {
+    await assert.rejects(manager.withForegroundAuthorization(async () => ({ restoreOwnerContext: true }),
+      () => manager.bringToForeground(20, "200")), /Owner input changed during the approved foreground turn/);
+    assert.equal(requests.some(request => request.op === "bringToForeground"), false,
+      "the target never receives a foreground request after physical owner input");
+    assert.equal(requests.at(-1)?.op, "releaseForegroundContextMonitor");
+  } finally { manager.close(); }
+}));
+
 test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };

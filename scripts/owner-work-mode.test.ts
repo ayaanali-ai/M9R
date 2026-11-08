@@ -25,7 +25,16 @@ test("safe default, scoped approvals and Agents Free guard the actual native for
   let accepted = false; const approvals: string[] = []; const dispatched: string[] = [];
   const policy = createOwnerWorkPolicy(root, () => ({ requestApproval: async request => { approvals.push(`${request.agent}:${request.sessionId}`); return accepted; } }));
   const manager = createWindowsDesktopStageManager({ root, platform: "win32", terminal: true, env: {},
-    invokeNative: async request => { dispatched.push(String(request.op)); return { ok: true, input: { childWindowId: "456" }, foregroundWindow: { pid: 123, windowId: "456" } }; } });
+    invokeNative: async request => {
+      if (request.op === "captureForegroundContext") return { ok: true, foregroundContext: {
+        pid: 123, windowId: "456", processGeneration: "000000000000000a", physicalInputEpoch: 0, visible: true, minimized: false,
+      } };
+      if (request.op === "physicalInputEpoch") return { ok: true, physicalInputEpoch: 0 };
+      if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: { pid: 123, windowId: "456" } };
+      if (request.op === "releaseForegroundContextMonitor") return { ok: true, released: true };
+      dispatched.push(String(request.op));
+      return { ok: true, input: { childWindowId: "456" }, foregroundWindow: { pid: 123, windowId: "456" } };
+    } });
   const turn = (taskId: string, operation: () => Promise<unknown>) => policy.run({ agent: "codex", provider: "codex", sessionId: "one", taskId,
     signal: new AbortController().signal }, () => manager.withForegroundAuthorization(policy.authorize, operation));
   try {
@@ -93,6 +102,24 @@ test("global media keys require a distinct owner grant and cannot reuse a window
   } finally { manager.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("foreground context restoration is limited to the exact approved HWND and current work-mode revision", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-work-restore-scope-"));
+  const policy = createOwnerWorkPolicy(root, () => ({ requestApproval: async () => true }));
+  try {
+    await policy.run({ agent: "codex", provider: "codex", sessionId: "one", taskId: "M2", signal: new AbortController().signal }, async () => {
+      const grant = await policy.authorize({ op: "sendText", pid: 123, windowId: "456" });
+      assert.deepEqual(grant, { restoreOwnerContext: true });
+      assert.deepEqual(await policy.authorize({ op: "restoreForegroundContext", pid: 123, windowId: "0x1c8" }),
+        { restoreOwnerContext: true }, "decimal and hexadecimal spellings of the same HWND share the one target grant");
+      assert.deepEqual(await policy.authorize({ op: "restoreForegroundContext", pid: 123, windowId: "789" }),
+        { restoreOwnerContext: false }, "a different HWND is outside the approved foreground turn");
+      setOwnerWorkMode(root, "agents-free");
+      assert.deepEqual(await policy.authorize({ op: "restoreForegroundContext", pid: 123, windowId: "456" }),
+        { restoreOwnerContext: false }, "switching to Agents Free invalidates the pending restore");
+    });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("foreground denial, timeout and cancellation remove the real broker approval and dispatch nothing", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-work-wait-"));
   const broker = createWebBroker({ send: () => true, authority: createWebAuthority({ ownerId: "owner" }) });
@@ -125,6 +152,12 @@ test("task service gates focus and new-process launch while semantic observation
   const launched = () => existsSync(marker) ? Number(readFileSync(marker, "utf8")) : undefined;
   const manager = createWindowsDesktopStageManager({ root, terminal: true, platform: "win32", env: {}, invokeNative: async request => {
     calls.push(String(request.op));
+    if (request.op === "captureForegroundContext") return { ok: true, foregroundContext: {
+      pid: 123, windowId: "456", processGeneration: "000000000000000a", physicalInputEpoch: 0, visible: true, minimized: false,
+    } };
+    if (request.op === "physicalInputEpoch") return { ok: true, physicalInputEpoch: 0 };
+    if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: { pid: 123, windowId: "456" } };
+    if (request.op === "releaseForegroundContextMonitor") return { ok: true, released: true };
     if (request.op === "inspect" || request.op === "presentOwnerWindow") return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } };
     if (request.op === "listVisibleWindows") {
       if (revokeAfterSpawn && launched() && !launchRevoked) { launchRevoked = true; setOwnerWorkMode(root, "working"); accepted = false; }
