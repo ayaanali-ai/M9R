@@ -57,9 +57,13 @@ fn has_agent_context(mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>)
         .any(|name| lookup(name).is_some_and(|value| !value.to_string_lossy().trim().is_empty()))
 }
 
+fn cursor_overlay_spawn_blocked(lookup: impl FnMut(&str) -> Option<std::ffi::OsString>) -> bool {
+    has_agent_context(lookup)
+}
+
 #[cfg(test)]
 mod stage_cli_tests {
-    use super::has_agent_context;
+    use super::{cursor_overlay_spawn_blocked, has_agent_context};
     use std::ffi::OsString;
 
     #[test]
@@ -70,6 +74,17 @@ mod stage_cli_tests {
         }));
         assert!(!has_agent_context(|name| {
             (name == "OPENCODE").then(|| OsString::from("  "))
+        }));
+    }
+
+    #[test]
+    fn cursor_overlay_spawn_refuses_agent_context_markers() {
+        assert!(!cursor_overlay_spawn_blocked(|_| None));
+        assert!(cursor_overlay_spawn_blocked(|name| {
+            (name == "CLAUDECODE").then(|| OsString::from("1"))
+        }));
+        assert!(!cursor_overlay_spawn_blocked(|name| {
+            (name == "CODEX_THREAD_ID").then(|| OsString::from("  "))
         }));
     }
 }
@@ -486,6 +501,10 @@ fn main() {
         }
     }
     if std::env::args().nth(1).as_deref() == Some("--spawn-cursor-overlay") {
+        if cursor_overlay_spawn_blocked(|name| std::env::var_os(name)) {
+            eprintln!("agent context cannot draw the owner's agent cursor overlay");
+            std::process::exit(1);
+        }
         #[cfg(windows)]
         cursor_overlay::win::run();
         #[cfg(not(windows))]
