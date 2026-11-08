@@ -234,7 +234,18 @@ export function createTaskDesktopStageService(input: {
   mutationFence?: MultiplayerDispatchFence;
 }) {
   const root = input.store.root;
-  const ownerWorkPolicy = createOwnerWorkPolicy(root, () => input.approvals?.());
+  const ownerWorkPolicy = createOwnerWorkPolicy(root, () => input.approvals?.(), { isTaskActive: (taskId) => {
+    const task = input.store.getTask(taskId);
+    return Boolean(task) && task!.resultSummary === undefined && task!.receipt?.state !== "canceled"
+      && task!.receipt?.state !== "paused" && task!.delivery?.state !== "done"
+      && task!.lifecycle?.state !== "completed" && task!.lifecycle?.state !== "failed";
+  }, onTaskRevoked: (owner, leaseKey) => {
+    const streamId = agentInputStreamId({ handle: owner.agent, sessionId: owner.sessionId });
+    void manager.releaseOwnerInputMonitor(leaseKey, streamId).catch(() => {
+      // Revocation remains effective in policy even if the OS monitor needs the
+      // helper to exit; closing the stream/task tears down its hook as fallback.
+    });
+  } });
   const browserSpaces: BrowserSpaceLedger = createBrowserSpaceLedger(root);
   function bindBrowserSpace(stageName: string, executable: string, pid: number, windowId: string): void {
     const browser = stageBrowserKind(executable);
@@ -421,7 +432,11 @@ export function createTaskDesktopStageService(input: {
       // its own persistent helper, so a blocked UIA call cannot queue other agents
       // behind that helper's one active request.
       const operation = () => ownerWorkPolicy.run({ agent: identity.handle, provider: identity.provider ?? identity.handle,
-        sessionId: identity.sessionId, taskId, signal: context.signal, assertActive: () => {
+        sessionId: identity.sessionId, taskId, signal: context.signal,
+        readOwnerInputEpoch: () => manager.physicalInputEpoch(),
+        captureOwnerInputEpoch: (leaseKey) => manager.captureOwnerInputEpoch(leaseKey),
+        releaseOwnerInputMonitor: (leaseKey) => manager.releaseOwnerInputMonitor(leaseKey),
+        assertActive: () => {
           const credential = input.store.identityCredentialForSession(identity.provider ?? identity.handle, identity.sessionId);
           if (!credential || normalizeHandle(credential.identity.handle) !== normalizeHandle(identity.handle)) throw new DesktopInputNotDispatchedError("This agent turn is no longer active; no foreground input was sent.", "foreground-approval");
           authorize(credential.token, taskId, "owner-preview");
@@ -716,6 +731,8 @@ export function createTaskDesktopStageService(input: {
     if (action.kind === "stop") {
       const startedMs = Date.now();
       stoppedTaskInputs.add(`${stageName}\0${taskId}`);
+      ownerWorkPolicy.revokeTask({ agent: streamIdentity.handle, provider: streamIdentity.provider ?? streamIdentity.handle,
+        sessionId: streamIdentity.sessionId, taskId });
       const active = activeInputs.get(stageName);
       if (active?.taskId === taskId) active.controller.abort(new Error("Explicit desktop stop requested."));
       inputStreams.cancelTask(streamIdentity, taskId, new Error("Explicit desktop stop requested."));
@@ -1638,11 +1655,17 @@ export function createTaskDesktopStageService(input: {
   }
 
   const cursorReaper = setInterval(() => {
+    // Foreground approvals carry a native physical-input hook while they are
+    // valid. Reap paused/completed tasks and mode revisions even when no cursor
+    // happens to be registered (for example after an owner closes the pill).
+    ownerWorkPolicy.reapRevokedGrants();
     if (activeAgentCursors.size === 0 || cursorReaperQueued) return;
     cursorReaperQueued = true;
     const reconcile = async () => {
       for (const [key, active] of activeAgentCursors) {
         if (!taskActive(active.taskId)) {
+          ownerWorkPolicy.revokeTask({ agent: active.identity.handle, provider: active.identity.handle,
+            sessionId: active.identity.sessionId, taskId: active.taskId });
           try {
             await driver.closeAgentCursor(active.identity);
             // The visible marker is task-scoped; the native input host is

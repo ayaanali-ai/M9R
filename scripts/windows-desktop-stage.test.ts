@@ -132,6 +132,59 @@ test("physical owner input after approval stops the foreground action before dis
   } finally { manager.close(); }
 }));
 
+test("owner input between approval and native dispatch expires the foreground turn before target activation", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const manager = createManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async request => {
+    requests.push({ ...request });
+    if (request.op === "captureForegroundContext") return { ok: true, foregroundContext: {
+      pid: 10, windowId: "100", processGeneration: "000000000000000a", physicalInputEpoch: 78, visible: true, minimized: false,
+    } };
+    if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: { pid: 10, windowId: "100" } };
+    if (request.op === "releaseForegroundContextMonitor") return { ok: true, released: true };
+    return { ok: true };
+  } });
+  try {
+    await assert.rejects(manager.withForegroundAuthorization(async () => ({ restoreOwnerContext: true, ownerInputEpoch: 77 }),
+      () => manager.bringToForeground(20, "200")), /Owner input changed after foreground approval/);
+    assert.equal(requests.some(request => request.op === "bringToForeground"), false,
+      "a physical input after approval prevents target activation and dispatch");
+  } finally { manager.close(); }
+}));
+
+test("a task lease keeps its physical-input monitor across foreground handoffs and releases it when revoked", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  let foreground = { pid: 10, windowId: "100" };
+  const manager = createManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async request => {
+    requests.push({ ...request });
+    if (request.op === "captureForegroundContext") return { ok: true, foregroundContext: {
+      pid: 10, windowId: "100", processGeneration: "000000000000000a", physicalInputEpoch: 77, visible: true, minimized: false,
+    } };
+    if (request.op === "physicalInputEpoch") return { ok: true, physicalInputEpoch: 77 };
+    if (request.op === "sendText") foreground = { pid: Number(request.pid), windowId: String(request.windowId) };
+    if (request.op === "currentForegroundWindow") return { ok: true, foregroundWindow: foreground };
+    if (request.op === "restoreForegroundContext") { foreground = { pid: 10, windowId: "100" }; return { ok: true, restoration: { restored: true, reason: "restored" } }; }
+    if (request.op === "releaseForegroundContextMonitor") return { ok: true, released: true };
+    return { ok: true };
+  } });
+  const streamId = `stream-${"a".repeat(24)}`;
+  const authorize = async () => ({ restoreOwnerContext: true, ownerInputEpoch: 77, retainOwnerInputMonitor: true });
+  try {
+    await manager.withInputStream(streamId, async () => {
+      assert.equal(await manager.captureOwnerInputEpoch("task-lease"), 77);
+      for (const text of ["first action", "second action"]) {
+        await manager.withForegroundAuthorization(authorize, () => manager.sendText(20, "200", text));
+        assert.equal(requests.some(request => request.op === "releaseForegroundContextMonitor"), false,
+          "a bounded foreground action must not tear down the still-authorized task monitor");
+      }
+      await manager.releaseOwnerInputMonitor("task-lease");
+    });
+    assert.equal(requests.filter(request => request.op === "releaseForegroundContextMonitor").length, 1,
+      "revoking the final task lease releases the native hook exactly once");
+    assert.equal(requests.filter(request => request.op === "sendText").length, 2,
+      "the same approved task can perform multiple foreground operations without another per-operation lease");
+  } finally { manager.close(); }
+}));
+
 test("shell point inspection and invocation preserve exact control identity without global input", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };

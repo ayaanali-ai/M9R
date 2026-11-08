@@ -459,9 +459,12 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime());
   }
   const streamContext = new AsyncLocalStorage<string>();
-  const foregroundAuthority = new AsyncLocalStorage<(request: Record<string, unknown>) => Promise<{ restoreOwnerContext: boolean } | void>>();
+  const foregroundAuthority = new AsyncLocalStorage<(request: Record<string, unknown>) => Promise<{
+    restoreOwnerContext: boolean; ownerInputEpoch?: number; retainOwnerInputMonitor?: boolean;
+  } | void>>();
   const foregroundHandoff = new AsyncLocalStorage<{
     restoreOwnerContext: boolean;
+    retainOwnerInputMonitor: boolean;
     owner?: NonNullable<NativeStageResponse["foregroundContext"]>;
     targets: Map<string, { pid: number; windowId: string }>;
   }>();
@@ -470,12 +473,15 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe")));
   const persistentHost = deps.invokeNative ? undefined : hostFactory();
   const streamHosts = new Map<string, ReturnType<typeof hostFactory>>();
+  const foregroundMonitorLeases = new Map<string, Set<string>>();
+  const activeForegroundMonitorHosts = new Set<string>();
+  const monitorHostKey = (streamId: string | undefined) => streamId ?? "default";
   let managerClosed = false;
   const invokeNative = async (request: Record<string, unknown>): Promise<NativeStageResponse> => {
     if (managerClosed) return Promise.reject(new Error("The native desktop-stage manager is closed."));
     const operation = String(request.op);
     const globalMediaInput = operation === "systemControl" && request.control === "media";
-    let authorization: { restoreOwnerContext: boolean } | void = undefined;
+    let authorization: { restoreOwnerContext: boolean; ownerInputEpoch?: number; retainOwnerInputMonitor?: boolean } | void = undefined;
     if (foregroundOperations.has(operation) || globalMediaInput) {
       const authorize = foregroundAuthority.getStore();
       if (!authorize) throw new DesktopInputNotDispatchedError(globalMediaInput
@@ -487,6 +493,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       }
     }
     const handoff = foregroundHandoff.getStore();
+    if (handoff && authorization?.retainOwnerInputMonitor === true) handoff.retainOwnerInputMonitor = true;
     if (handoff && operation !== "restoreForegroundContext" && !globalMediaInput
       && authorization?.restoreOwnerContext === true) {
       const target = foregroundRequestTarget(request);
@@ -505,6 +512,11 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
           }
           handoff.owner = owner;
         }
+        if (authorization.ownerInputEpoch !== undefined && authorization.ownerInputEpoch !== handoff.owner.physicalInputEpoch) {
+          throw new DesktopInputNotDispatchedError(
+            "Owner input changed after foreground approval; no target input was sent. Approve a new foreground turn if it is still needed.",
+            "foreground-approval");
+        }
         handoff.restoreOwnerContext = true;
       }
     }
@@ -517,52 +529,67 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
           "foreground-approval");
       }
     }
-    if (deps.invokeNative) return deps.invokeNative(request);
     const streamId = streamContext.getStore();
-    if (!streamId) return persistentHost!.invoke(request);
-    let host = streamHosts.get(streamId);
-    if (!host) { host = hostFactory(streamId); streamHosts.set(streamId, host); }
-    return host.invoke(request);
+    const result = deps.invokeNative ? await deps.invokeNative(request) : !streamId
+      ? await persistentHost!.invoke(request)
+      : await (streamHosts.get(streamId) ?? (() => {
+        const host = hostFactory(streamId); streamHosts.set(streamId, host); return host;
+      })()).invoke(request);
+    const monitorKey = monitorHostKey(streamId);
+    if (operation === "captureForegroundContext" && result.ok) activeForegroundMonitorHosts.add(monitorKey);
+    if (operation === "releaseForegroundContextMonitor" && result.ok) {
+      activeForegroundMonitorHosts.delete(monitorKey);
+      foregroundMonitorLeases.delete(monitorKey);
+    }
+    return result;
   };
   function withInputStream<T>(streamId: string, operation: () => Promise<T>): Promise<T> {
     if (!/^stream-[a-f0-9]{24}$/.test(streamId)) throw new Error("Invalid native input-stream identity.");
     if (managerClosed) throw new Error("The native desktop-stage manager is closed.");
     return streamContext.run(streamId, operation);
   }
-  function withForegroundAuthorization<T>(authorize: (request: Record<string, unknown>) => Promise<{ restoreOwnerContext: boolean } | void>, operation: () => Promise<T>): Promise<T> {
+  function withForegroundAuthorization<T>(authorize: (request: Record<string, unknown>) => Promise<{
+    restoreOwnerContext: boolean; ownerInputEpoch?: number; retainOwnerInputMonitor?: boolean;
+  } | void>, operation: () => Promise<T>): Promise<T> {
     const handoff: {
       restoreOwnerContext: boolean;
+      retainOwnerInputMonitor: boolean;
       owner?: NonNullable<NativeStageResponse["foregroundContext"]>;
       targets: Map<string, { pid: number; windowId: string }>;
-    } = { restoreOwnerContext: false, targets: new Map<string, { pid: number; windowId: string }>() };
+    } = { restoreOwnerContext: false, retainOwnerInputMonitor: false, targets: new Map<string, { pid: number; windowId: string }>() };
     const restore = async () => {
-      if (!handoff.owner) return;
       try {
-        if (!handoff.restoreOwnerContext || !handoff.targets.size) return;
-        const current = await currentForegroundWindow();
-        const authorizedCurrentProcess = [...handoff.targets.values()].some((target) => target.pid === current.pid);
-        if (!authorizedCurrentProcess) {
-          deps.onForegroundRestoration?.({ status: "skipped", reason: "foreground-changed" });
-          return;
+        if (handoff.owner && handoff.restoreOwnerContext && handoff.targets.size) {
+          const current = await currentForegroundWindow();
+          const authorizedCurrentProcess = [...handoff.targets.values()].some((target) => target.pid === current.pid);
+          if (!authorizedCurrentProcess) {
+            deps.onForegroundRestoration?.({ status: "skipped", reason: "foreground-changed" });
+          } else {
+            const owner = handoff.owner;
+            if (sameForegroundIdentity(owner, current)) {
+              deps.onForegroundRestoration?.({ status: "restored", reason: "already-owner-window" });
+            } else {
+              const result = await invokeNative({ op: "restoreForegroundContext", pid: current.pid, windowId: current.windowId,
+                ownerPid: owner.pid, ownerWindowId: owner.windowId, ownerProcessGeneration: owner.processGeneration,
+                physicalInputEpoch: owner.physicalInputEpoch });
+              if (result.restoration?.restored) deps.onForegroundRestoration?.({ status: "restored", reason: result.restoration.reason });
+              else deps.onForegroundRestoration?.({ status: "skipped", reason: result.restoration?.reason ?? result.error ?? "restore-unavailable" });
+            }
+          }
         }
-        const owner = handoff.owner;
-        if (sameForegroundIdentity(owner, current)) {
-          deps.onForegroundRestoration?.({ status: "restored", reason: "already-owner-window" });
-          return;
-        }
-        const result = await invokeNative({ op: "restoreForegroundContext", pid: current.pid, windowId: current.windowId,
-          ownerPid: owner.pid, ownerWindowId: owner.windowId, ownerProcessGeneration: owner.processGeneration,
-          physicalInputEpoch: owner.physicalInputEpoch });
-        if (result.restoration?.restored) deps.onForegroundRestoration?.({ status: "restored", reason: result.restoration.reason });
-        else deps.onForegroundRestoration?.({ status: "skipped", reason: result.restoration?.reason ?? result.error ?? "restore-unavailable" });
       } catch (error) {
         deps.onForegroundRestoration?.({ status: "failed", reason: error instanceof Error ? error.message : String(error) });
       } finally {
-        try {
-          const released = await invokeNative({ op: "releaseForegroundContextMonitor" });
-          if (!released.ok) deps.onForegroundRestoration?.({ status: "failed", reason: released.error ?? "owner-input-monitor-release-failed" });
-        } catch (error) {
-          deps.onForegroundRestoration?.({ status: "failed", reason: error instanceof Error ? error.message : String(error) });
+        const streamId = streamContext.getStore();
+        const monitorKey = monitorHostKey(streamId);
+        const hasTaskLeases = (foregroundMonitorLeases.get(monitorKey)?.size ?? 0) > 0;
+        if (!handoff.retainOwnerInputMonitor && !hasTaskLeases && activeForegroundMonitorHosts.has(monitorKey)) {
+          try {
+            const released = await invokeNative({ op: "releaseForegroundContextMonitor" });
+            if (!released.ok) deps.onForegroundRestoration?.({ status: "failed", reason: released.error ?? "owner-input-monitor-release-failed" });
+          } catch (error) {
+            deps.onForegroundRestoration?.({ status: "failed", reason: error instanceof Error ? error.message : String(error) });
+          }
         }
       }
     };
@@ -574,6 +601,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   function closeInputStream(streamId: string): void {
     streamHosts.get(streamId)?.close();
     streamHosts.delete(streamId);
+    foregroundMonitorLeases.delete(monitorHostKey(streamId));
+    activeForegroundMonitorHosts.delete(monitorHostKey(streamId));
   }
   function closeManager(): void {
     if (managerClosed) return;
@@ -581,6 +610,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     persistentHost?.close();
     for (const host of streamHosts.values()) host.close();
     streamHosts.clear();
+    foregroundMonitorLeases.clear();
+    activeForegroundMonitorHosts.clear();
     process.removeListener("exit", closeManager);
   }
   if (!deps.invokeNative) process.once("exit", closeManager);
@@ -1211,6 +1242,49 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       title: current.title, className: current.className, visible: current.visible, minimized: current.minimized };
   }
 
+  async function physicalInputEpoch(): Promise<number> {
+    assertWindows(); assertOwner();
+    const result = await invokeNative({ op: "physicalInputEpoch" });
+    if (!result.ok || !Number.isSafeInteger(result.physicalInputEpoch) || (result.physicalInputEpoch as number) < 0) {
+      throw new DesktopInputNotDispatchedError(result.error ?? "The Windows physical-input checkpoint could not be read; no foreground authority was reused.", "foreground-approval");
+    }
+    return result.physicalInputEpoch as number;
+  }
+
+  /** Starts the stream's low-level monitor only after the owner approves a foreground turn. */
+  async function captureOwnerInputEpoch(leaseKey: string): Promise<number> {
+    assertWindows(); assertOwner();
+    if (!leaseKey || leaseKey.length > 1_024) throw new Error("The owner-input monitor lease identity is invalid.");
+    const result = await invokeNative({ op: "captureForegroundContext" });
+    const owner = result.foregroundContext;
+    if (!result.ok || !owner || !Number.isSafeInteger(owner.pid) || owner.pid < 1 || !WINDOW_ID_RE.test(owner.windowId)
+      || !/^[a-f0-9]{16}$/i.test(owner.processGeneration) || !Number.isSafeInteger(owner.physicalInputEpoch)
+      || owner.physicalInputEpoch < 0 || !owner.visible || owner.minimized) {
+      throw new DesktopInputNotDispatchedError(result.error ?? "The owner input monitor could not capture a valid visible foreground context; no input was sent.", "foreground-approval");
+    }
+    const key = monitorHostKey(streamContext.getStore());
+    let leases = foregroundMonitorLeases.get(key);
+    if (!leases) { leases = new Set(); foregroundMonitorLeases.set(key, leases); }
+    leases.add(leaseKey);
+    return owner.physicalInputEpoch;
+  }
+
+  async function releaseOwnerInputMonitor(leaseKey: string, streamId?: string): Promise<void> {
+    if (!leaseKey || leaseKey.length > 1_024) throw new Error("The owner-input monitor lease identity is invalid.");
+    const release = async () => {
+      const key = monitorHostKey(streamContext.getStore());
+      const leases = foregroundMonitorLeases.get(key);
+      if (!leases?.delete(leaseKey)) return;
+      if (leases.size > 0) return;
+      foregroundMonitorLeases.delete(key);
+      if (!activeForegroundMonitorHosts.has(key)) return;
+      const result = await invokeNative({ op: "releaseForegroundContextMonitor" });
+      if (!result.ok) throw new DesktopInputNotDispatchedError(result.error ?? "Windows could not release the owner-input monitor.", "foreground-approval");
+    };
+    if (streamId) await withInputStream(streamId, release);
+    else await release();
+  }
+
   async function systemControl(request: WindowsSystemControlRequest): Promise<Record<string, unknown>> {
     assertWindows(); assertOwner();
     if (!request || !["display_brightness", "output_audio", "media", "microphone"].includes(request.control)
@@ -1458,7 +1532,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, physicalInputEpoch, captureOwnerInputEpoch, releaseOwnerInputMonitor, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
     close: closeManager,
     withInputStream, closeInputStream, attachSharedWindow, withForegroundAuthorization,
     bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
