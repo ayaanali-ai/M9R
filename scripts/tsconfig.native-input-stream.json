@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "incremental": false, "plugins": [] },
+  "include": [
+    "../src/lib/native/agent-input-stream.ts",
+    "../src/lib/native/task-desktop-stage.ts",
+    "./agent-input-stream.test.ts",
+    "./task-desktop-stage.test.ts"
+  ],
+  "exclude": []
+}

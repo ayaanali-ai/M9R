@@ -37,6 +37,7 @@ import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { discoverInstalledWindowsApp, discoverInstalledWindowExecutable } from "./windows-installed-apps";
 import { createBrowserSpaceLedger, type BrowserSpaceLedger } from "./browser-space-ledger";
+import { createAgentInputStreams, type InputStreamContext, type InputStreamIdentity } from "./agent-input-stream";
 
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
@@ -301,6 +302,7 @@ export function createTaskDesktopStageService(input: {
     },
   });
   const activeInputs = new Map<string, { controller: AbortController; taskId: string }>();
+  const inputStreams = createAgentInputStreams();
   const stoppedTaskInputs = new Set<string>();
   const listVisibleWindows = async () => {
     try {
@@ -402,6 +404,20 @@ export function createTaskDesktopStageService(input: {
       recordStageTiming(taskId, { phase: "queue_wait", startedAt: new Date(requestedMs).toISOString(), endedAt: new Date(dequeuedMs).toISOString(),
         durationMs: performance.now() - requestedTick, status: "ok", operationId });
       return withActiveTimingTask(timingStageName, taskId, operationId, () => timedStagePhase(taskId, phase, operationId, run));
+    });
+  }
+
+  function inInputStream<T>(identity: InputStreamIdentity, taskId: string, kind: string,
+    run: (context: InputStreamContext) => Promise<T>): Promise<T> {
+    return inputStreams.run(identity, { taskId, kind }, async (context) => {
+      recordStageTiming(taskId, { phase: "queue_wait", startedAt: new Date(context.queuedAt).toISOString(),
+        endedAt: new Date(context.startedAt).toISOString(), durationMs: context.startedAt - context.queuedAt,
+        status: "ok", detail: `input-stream=${context.streamId};sequence=${context.sequence};kind=${kind}` });
+      context.signal.throwIfAborted();
+      const result = await run(context);
+      return result && typeof result === "object"
+        ? { ...result, inputStream: { id: context.streamId } } as T
+        : result;
     });
   }
   // The cursor reaper is broker-wide housekeeping unrelated to any one stage's actions;
@@ -592,7 +608,7 @@ export function createTaskDesktopStageService(input: {
     const mode = stageMode(requestedMode);
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
-    const { name: queueName } = authorize(token, taskId, mode);
+    const { name: queueName, identity: streamIdentity } = authorize(token, taskId, mode);
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
       const sessionTag = createHash("sha256").update(`${normalizeHandle(identity.handle)}\0${identity.sessionId}`).digest("hex").slice(0, 8);
@@ -650,7 +666,7 @@ export function createTaskDesktopStageService(input: {
         ...(mode === "background" && assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
         controlEnabled: readPolicy().controlHandles?.includes(normalizeHandle(identity.handle)) === true };
     };
-    return enqueueTimedStage(queueName, taskId, "prepare", undefined, run, queueName);
+    return inInputStream(streamIdentity, taskId, "prepare", () => enqueueTimedStage(queueName, taskId, "prepare", undefined, run, queueName));
   }
 
   async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number) {
@@ -661,14 +677,18 @@ export function createTaskDesktopStageService(input: {
     if (operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)) throw new Error("Invalid desktop-stage operation ID.");
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
-    const { name: stageName } = authorize(token, taskId, mode);
-    const registeredStage = manager.list().find((stage) => stage.name === stageName);
-    const queueName = registeredStage?.coordinationKey ?? stageName;
+    const { name: stageName, identity: streamIdentity } = authorize(token, taskId, mode);
+    // A coordination key groups app discovery, never input streams. Two agents
+    // collaborating on one goal retain independent action lanes; the target fence
+    // below arbitrates only their actual conflicting mutations.
+    const queueName = stageName;
+    let streamSignal: AbortSignal | undefined;
     if (action.kind === "stop") {
       const startedMs = Date.now();
       stoppedTaskInputs.add(`${stageName}\0${taskId}`);
       const active = activeInputs.get(stageName);
       if (active?.taskId === taskId) active.controller.abort(new Error("Explicit desktop stop requested."));
+      inputStreams.cancelTask(streamIdentity, taskId, new Error("Explicit desktop stop requested."));
       const endedMs = Date.now();
       recordStageTiming(taskId, { phase: "stop", startedAt: new Date(startedMs).toISOString(), endedAt: new Date(endedMs).toISOString(),
         durationMs: endedMs - startedMs, status: "ok" });
@@ -916,6 +936,9 @@ export function createTaskDesktopStageService(input: {
         ? value
         : { ...(value && typeof value === "object" ? value : { result: value }), mutationRevision };
       const controller = new AbortController();
+      const streamAborted = () => controller.abort(streamSignal?.reason);
+      if (streamSignal?.aborted) streamAborted();
+      else streamSignal?.addEventListener("abort", streamAborted, { once: true });
       activeInputs.set(name, { controller, taskId });
       const cancellationPoll = setInterval(() => {
         try {
@@ -965,6 +988,7 @@ export function createTaskDesktopStageService(input: {
         }
         throw error;
       } finally {
+        streamSignal?.removeEventListener("abort", streamAborted);
         clearInterval(cancellationPoll);
         if (activeInputs.get(name)?.controller === controller) activeInputs.delete(name);
       }
@@ -990,7 +1014,10 @@ export function createTaskDesktopStageService(input: {
         throw error;
       }
     };
-    const outcome = await enqueueTimedStage(queueName, taskId, "action", operationId, guardedRun, stageName);
+    const outcome = await inInputStream(streamIdentity, taskId, "action", (context) => {
+      streamSignal = context.signal;
+      return enqueueTimedStage(queueName, taskId, "action", operationId, guardedRun, stageName);
+    });
     if (!recoveryNotice) return outcome;
     return { ...(outcome && typeof outcome === "object" ? outcome : { result: outcome }), recoveryNotice };
   }
@@ -1500,14 +1527,15 @@ export function createTaskDesktopStageService(input: {
     // already-queued caller run this launch immediately instead of behind itself.
     if (options?.skipQueue) return withActiveTimingTask(initial.name, taskId, operationId,
       () => timedStagePhase(taskId, "launch", operationId, run)) as Promise<StageLaunchResult>;
-    return enqueueTimedStage(queueName, taskId, "launch", operationId, run, initial.name) as Promise<StageLaunchResult>;
+    return inInputStream(initial.identity, taskId, "launch", () =>
+      enqueueTimedStage(queueName, taskId, "launch", operationId, run, initial.name)) as Promise<StageLaunchResult>;
   }
 
   async function closeApp(token: string, taskId: string, requestedMode?: TaskStageMode) {
     const mode = stageMode(requestedMode);
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
-    const { name: queueName } = authorize(token, taskId, mode);
+    const { name: queueName, identity: streamIdentity } = authorize(token, taskId, mode);
     const run = async () => {
       const { name } = authorize(token, taskId, mode);
       const app = ownedApps.get(name);
@@ -1522,7 +1550,7 @@ export function createTaskDesktopStageService(input: {
       browserSpaces.remove(`space-${name}`);
       return { name, taskId, closed: true };
     };
-    return enqueueTimedStage(queueName, taskId, "close", undefined, run, queueName);
+    return inInputStream(streamIdentity, taskId, "close", () => enqueueTimedStage(queueName, taskId, "close", undefined, run, queueName));
   }
 
   const cursorReaper = setInterval(() => {
@@ -1561,6 +1589,7 @@ export function createTaskDesktopStageService(input: {
   async function close() {
     clearInterval(cursorReaper);
     for (const active of activeInputs.values()) active.controller.abort(new Error("Stage service closing."));
+    await inputStreams.close();
     await Promise.all([...stageQueues.values(), reaperPending]);
     activeAgentCursors.clear();
     try {
@@ -1573,5 +1602,5 @@ export function createTaskDesktopStageService(input: {
     }
   }
 
-  return { prepare, primeCursor, primeCursorForOwner, act, launch, closeApp, close };
+  return { prepare, primeCursor, primeCursorForOwner, act, launch, closeApp, close, inputStreamSnapshot: inputStreams.snapshot };
 }

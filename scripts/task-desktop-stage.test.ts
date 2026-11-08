@@ -68,6 +68,21 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     retiredDesktopOpCount: () => retiredDesktopOpCount, creations: () => retiredDesktopOpCount, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+test("production desktop lifecycle retains one input stream across tasks and delivery modes", async () => {
+  const f = fixture(true);
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "background");
+    const first = f.service.inputStreamSnapshot()[0];
+    const followup = f.store.addTask({ from: "you", to: "codex", goal: "Follow-up desktop task", origin: "human_typed", idempotencyKey: "stream-followup", targetSession: "session-one" }).task;
+    await f.service.prepare(f.identity.token, followup.id, "owner-preview");
+    const second = f.service.inputStreamSnapshot()[0];
+    assert.equal(second?.streamId, first?.streamId);
+    assert.equal(second?.nextSequence, 3);
+    assert.equal(f.service.inputStreamSnapshot().length, 1);
+    assert.ok(f.store.getTask(followup.id)?.stageTiming?.some((event) => event.detail?.includes(`input-stream=${first?.streamId};sequence=2`)));
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("transient cursor policy reads do not close the agent overlay until three consecutive failures", async () => {
   let policyUnavailable = false;
   const f = fixture(false, undefined, () => {
