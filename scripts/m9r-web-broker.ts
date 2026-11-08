@@ -28,6 +28,8 @@ import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
 import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
+import { subscribeA2ACursorChatter } from "@/lib/native/multiplayer-cursor-chatter";
+import type { MultiplayerRoster } from "@/lib/native/multiplayer-contract";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
 import { readRuntimeBuildIdentity } from "@/lib/native/runtime-build-identity";
 
@@ -92,7 +94,7 @@ async function main(): Promise<void> {
   // state.lock directory themselves; the owner-only store ACL stays intact.
   const store = createLocalStore(root);
   const config = loadAgentsConfig(root, { cwd: projectRoot });
-  const multiplayerRoster = {
+  const multiplayerRoster: MultiplayerRoster = {
     runId: "m9r-owner",
     agents: config.agents.map((agent) => ({
       agentId: `agent-${agent.handle}`,
@@ -100,7 +102,7 @@ async function main(): Promise<void> {
       provider: agent.provider,
       handle: agent.handle,
     })),
-  } as const;
+  };
   const multiplayer = createMultiplayerRuntime({ roster: multiplayerRoster });
   multiplayer.setDelivery(createManagedA2ADelivery({
     agents: config.agents,
@@ -112,6 +114,11 @@ async function main(): Promise<void> {
   // is the only place a shared lease can arbitrate same-target contention.
   const mutationFence = createMultiplayerDispatchFence({ store });
   const taskStages = createTaskDesktopStageService({ store, mutationFence, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
+  const stopCursorChatter = subscribeA2ACursorChatter({
+    multiplayer,
+    roster: multiplayerRoster,
+    sayAgentCursor: (fromHandle, toHandle, summary, taskId) => taskStages.sayAgentCursor(fromHandle, toHandle, summary, taskId),
+  });
   const broker = await startWebBroker({ key, port, taskStages, nativeDesktopRoute: true, agentMcpStore: store, mutationFence, multiplayerRuntime: multiplayer,
     onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
     deliverOwnerTask: (taskId) => sessionOwner.current
@@ -176,6 +183,7 @@ async function main(): Promise<void> {
     // shutdown caller uses listener closure as its signal that owned resources have drained.
     stopPromise = (async () => {
       await providerSessions.shutdown();
+      stopCursorChatter();
       await taskStages.close();
       await broker.close();
     })().catch((error: unknown) => {

@@ -14,6 +14,7 @@ export interface AgentCursorOverlayPoint {
 
 export interface AgentCursorOverlayHost {
   upsert(point: AgentCursorOverlayPoint): Promise<boolean>;
+  say(input: { id: string; to: string; toColor: Rgb; text: string }): Promise<boolean>;
   hide(id: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -107,6 +108,7 @@ export function createAgentCursorOverlayHost(input: {
       if (child === process) {
         child = undefined;
         ready = undefined;
+        visible.clear();
       }
     });
     const timer = setTimeout(() => finishReady(false), READY_TIMEOUT_MS);
@@ -156,6 +158,16 @@ export function createAgentCursorOverlayHost(input: {
       const ok = await send({ cmd: "upsert", id: point.id, label: point.label, color: point.color, x: point.x, y: point.y });
       if (ok) visible.add(point.id);
       return ok;
+    },
+    async say(message) {
+      // Bubbles are presentation for an accepted A2A summary, never the
+      // transport itself. Require a currently acknowledged sender marker and
+      // bound every string before it reaches the native renderer.
+      const text = message.text.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 160);
+      const to = message.to.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 28);
+      if (!visible.has(message.id) || !text || !to
+        || message.toColor.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)) return false;
+      return send({ cmd: "say", id: message.id, to, toColor: message.toColor, text });
     },
     async hide(id) {
       await hide(id);

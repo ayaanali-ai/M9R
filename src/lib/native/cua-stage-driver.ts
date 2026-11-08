@@ -1170,6 +1170,32 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return visible;
   }
 
+  async function sayAgentCursor(
+    fromIdentity: CuaAgentCursorIdentity,
+    toIdentity: CuaAgentCursorIdentity,
+    text: string,
+  ): Promise<boolean> {
+    if (!cursorOverlayHost) return false;
+    try {
+      const from = agentCursorDetails(fromIdentity);
+      const to = agentCursorDetails(toIdentity);
+      const speaker = agentSessions.get(from.key);
+      const speakerPresentation = speaker && cursorOverlayPresentations.get(speaker.session);
+      if (!speakerPresentation) return false;
+      const recipient = agentSessions.get(to.key);
+      return await cursorOverlayHost.say({
+        id: speakerPresentation.id,
+        to: recipient?.session ?? publicCursorLabel(to.handle),
+        // When the recipient has no active cursor session, use a neutral
+        // accent instead of implying a color identity that is not on screen.
+        toColor: recipient ? cursorColorForIdentity(to.key) : [200, 200, 200],
+        text,
+      });
+    } catch {
+      return false;
+    }
+  }
+
   function recordCursorPresentation(
     presentation: { outcome: CursorPresentationOutcome; settled: Promise<CursorPresentationOutcome>; requestedAt: { perf: number; iso: string }; stageName?: string },
     detail: string,
@@ -3796,7 +3822,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     await cursorOverlayHost?.close().catch(() => undefined);
   }
 
-  return { capture, readStructure, readElementValue, readDesktopStructure, describeTarget, describeElementTarget, valueMutationRegion, observedValueMutationRegions, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
+  return { capture, readStructure, readElementValue, readDesktopStructure, describeTarget, describeElementTarget, valueMutationRegion, observedValueMutationRegions, showAgentCursor, sayAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
     clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,

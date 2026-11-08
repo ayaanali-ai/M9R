@@ -38,6 +38,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { discoverInstalledWindowsApp, discoverInstalledWindowExecutable } from "./windows-installed-apps";
 import { createBrowserSpaceLedger, type BrowserSpaceLedger } from "./browser-space-ledger";
 import { agentInputStreamId, createAgentInputStreams, type InputStreamContext, type InputStreamIdentity } from "./agent-input-stream";
+import { uniqueActiveCursorIdentity } from "./multiplayer-cursor-chatter";
 import { createOwnerWorkPolicy } from "./owner-work-mode";
 
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
@@ -561,6 +562,23 @@ export function createTaskDesktopStageService(input: {
       activeAgentCursors.delete(key);
       return { shown: false, reason: "The local cursor surface could not be shown." };
     }
+  }
+
+  /**
+   * Render only a real A2A summary from one uniquely active roster identity.
+   * Bubble presentation is best-effort and never changes message delivery.
+   */
+  async function sayAgentCursor(fromHandle: string, toHandle: string, text: string, taskId: string): Promise<boolean> {
+    const from = uniqueActiveCursorIdentity(activeAgentCursors.values(), fromHandle, taskActive, taskId);
+    if (!from) return false;
+    const to = uniqueActiveCursorIdentity(activeAgentCursors.values(), toHandle, taskActive, taskId);
+    const targetIdentity = to ?? { handle: normalizeHandle(toHandle), sessionId: from.sessionId };
+    const driverWithCursor = driver as ReturnType<typeof createCuaStageDriver> & {
+      sayAgentCursor?: (sender: CuaAgentCursorIdentity, recipient: CuaAgentCursorIdentity, summary: string) => Promise<boolean> | boolean;
+    };
+    if (typeof driverWithCursor.sayAgentCursor !== "function") return false;
+    try { return await driverWithCursor.sayAgentCursor(from, targetIdentity, text); }
+    catch { return false; }
   }
 
   const cursorPresentationPending = new Set<string>();
@@ -1681,5 +1699,5 @@ export function createTaskDesktopStageService(input: {
     }
   }
 
-  return { prepare, primeCursor, primeCursorForOwner, act, launch, closeApp, close, inputStreamSnapshot: inputStreams.snapshot };
+  return { prepare, primeCursor, primeCursorForOwner, act, launch, closeApp, sayAgentCursor, close, inputStreamSnapshot: inputStreams.snapshot };
 }

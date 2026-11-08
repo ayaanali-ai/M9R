@@ -402,9 +402,11 @@ function withRoot(run: (root: string) => Promise<void>): Promise<void> {
 }
 
 function testCursorOverlayHost(upsert: (point: { id: string; label: string; color: readonly [number, number, number]; x: number; y: number }) => Promise<boolean> = async () => true,
-  hidden: string[] = [], closed: { count: number } = { count: 0 }) {
+  hidden: string[] = [], closed: { count: number } = { count: 0 },
+  say: (message: { id: string; to: string; toColor: readonly [number, number, number]; text: string }) => Promise<boolean> = async () => true) {
   return {
     upsert,
+    say,
     hide: async (id: string) => { hidden.push(id); },
     close: async () => { closed.count += 1; },
   };
@@ -1478,6 +1480,36 @@ test("uses the M9R marker at verified screen points for the full agent session a
   assert.deepEqual(hidden, [updates[0]!.id], "revoking the session removes its persistent marker");
   await driver.shutdown();
   assert.equal(closed.count, 1, "broker shutdown closes the shared overlay process");
+}));
+
+test("A2A cursor chatter uses the registered sender marker and a real recipient label", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const messages: Array<{ id: string; to: string; toColor: readonly [number, number, number]; text: string }> = [];
+  const points: Array<{ id: string; label: string; color: readonly [number, number, number]; x: number; y: number }> = [];
+  const identity = { handle: "codex", sessionId: "a2a-cursor-speaker" };
+  const recipientIdentity = { handle: "claude", sessionId: "a2a-cursor-recipient" };
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { points.push(point); return true; }, [], { count: 0 }, async (message) => {
+      messages.push(message);
+      return true;
+    }),
+  });
+
+  assert.equal(await driver.sayAgentCursor(identity, recipientIdentity, "hello teammate"), false,
+    "the sender cannot speak before its own cursor identity is registered");
+  assert.equal((await driver.showAgentCursor("stage", identity)).visible, true);
+  assert.equal((await driver.showAgentCursor("stage", recipientIdentity)).visible, true);
+  assert.equal(await driver.sayAgentCursor(identity, recipientIdentity, "Review the title"), true);
+  assert.equal(messages.length, 1);
+  const { id, ...bubble } = messages[0]!;
+  assert.deepEqual(bubble, {
+    to: "Claude",
+    toColor: points.find((point) => point.label === "Claude")!.color,
+    text: "Review the title",
+  });
+  assert.match(id, /^agent-[a-f0-9]{64}$/);
+  await driver.shutdown();
 }));
 
 test("coalesces delayed cursor moves to the latest target while native actions continue", async () => withRoot(async (root) => {
