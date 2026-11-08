@@ -1,7 +1,6 @@
 //! M9R's own agent-cursor visual overlay: a per-pixel-alpha layered window.
-//! Cua's `moveCursor`/`startSession` calls remain the position source; when
-//! this host is available, its marker replaces Cua's visible marker. This
-//! module owns only presentation pixels for a custom shape,
+//! M9R's stage driver supplies verified screen positions to this renderer.
+//! This module owns only presentation pixels for a custom shape,
 //! persistent per-agent color/label, and fading agent-to-agent chatter
 //! bubbles -- it never dispatches input and is never on the action path.
 //!
@@ -19,7 +18,9 @@ use std::io::{stdin, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const MARKER_SIZE: f32 = 46.0;
+pub const MARKER_SIZE: f32 = 20.0;
+const CHIP_OFFSET_SCALE: f32 = MARKER_SIZE / 46.0;
+const MOVE_ANIM_MS: f32 = 140.0;
 const EYE_BLINK_MIN_MS: u64 = 2000;
 const EYE_BLINK_MAX_MS: u64 = 5000;
 const BUBBLE_FADE_IN_MS: f32 = 220.0;
@@ -42,12 +43,38 @@ pub struct Bubble {
 pub struct AgentState {
     pub x: f32,
     pub y: f32,
+    pub target_x: f32,
+    pub target_y: f32,
+    pub anim_from_x: f32,
+    pub anim_from_y: f32,
+    pub anim_start: Instant,
     pub color: Rgb,
     pub dark: Rgb,
     pub label: String,
     pub next_blink_at: Instant,
     pub blink_until: Option<Instant>,
     pub bubble: Option<Bubble>,
+}
+
+/// Eased position along the current cursor glide. Uses monotonic time so
+/// system-clock changes cannot jump a rendered cursor.
+pub fn animated_position(agent: &AgentState, now: Instant) -> (f32, f32) {
+    let elapsed_ms = now
+        .saturating_duration_since(agent.anim_start)
+        .as_secs_f32()
+        * 1000.0;
+    if elapsed_ms >= MOVE_ANIM_MS {
+        return (agent.target_x, agent.target_y);
+    }
+    let t = ease_out_cubic((elapsed_ms / MOVE_ANIM_MS).clamp(0.0, 1.0));
+    (
+        agent.anim_from_x + (agent.target_x - agent.anim_from_x) * t,
+        agent.anim_from_y + (agent.target_y - agent.anim_from_y) * t,
+    )
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
 }
 
 pub type SharedState = Arc<Mutex<HashMap<String, AgentState>>>;
@@ -74,6 +101,11 @@ fn parse_color(value: Option<&Value>) -> Option<Rgb> {
 /// commands are otherwise silently ignored -- this is a presentation-only
 /// channel and must never crash the process over a bad line).
 pub fn apply_command(state: &SharedState, line: &str) -> bool {
+    apply_command_at(state, line, Instant::now())
+}
+
+/// Deterministic clock seam for movement tests; production uses `apply_command`.
+pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(_) => return false,
@@ -95,12 +127,17 @@ pub fn apply_command(state: &SharedState, line: &str) -> bool {
                 .unwrap_or(&id)
                 .to_string();
             let dark = darken(color, 0.62);
-            let now = Instant::now();
             guard
                 .entry(id)
                 .and_modify(|a| {
-                    a.x = x;
-                    a.y = y;
+                    let (current_x, current_y) = animated_position(a, now);
+                    a.x = current_x;
+                    a.y = current_y;
+                    a.anim_from_x = current_x;
+                    a.anim_from_y = current_y;
+                    a.target_x = x;
+                    a.target_y = y;
+                    a.anim_start = now;
                     a.color = color;
                     a.dark = dark;
                     a.label = label.clone();
@@ -108,6 +145,11 @@ pub fn apply_command(state: &SharedState, line: &str) -> bool {
                 .or_insert_with(|| AgentState {
                     x,
                     y,
+                    target_x: x,
+                    target_y: y,
+                    anim_from_x: x,
+                    anim_from_y: y,
+                    anim_start: now,
                     color,
                     dark,
                     label,
@@ -774,8 +816,8 @@ pub mod win {
                 rt.SetTransform(&Matrix3x2::identity());
 
                 // --- label chip ---------------------------------------------
-                let chip_x = ox + 30.0;
-                let chip_y = oy + 44.0;
+                let chip_x = ox + 30.0 * CHIP_OFFSET_SCALE;
+                let chip_y = oy + 44.0 * CHIP_OFFSET_SCALE;
                 let label = self.text(&agent.label, &self.fmt_chip, 400.0, 40.0)?;
                 let chip_w = (label.w + 20.0).ceil();
                 let chip_h = (label.h + 9.0).round();
@@ -803,7 +845,13 @@ pub mod win {
                 if let Some(bubble) = &agent.bubble {
                     let elapsed = now.saturating_duration_since(bubble.started_at).as_millis() as f32;
                     if let Some(opacity) = bubble_opacity(elapsed) {
-                        self.draw_bubble(agent, bubble, ox + 30.0, chip_y + chip_h + 6.0 + bubble_slide_px(elapsed, opacity), opacity)?;
+                        self.draw_bubble(
+                            agent,
+                            bubble,
+                            chip_x,
+                            chip_y + chip_h + 6.0 + bubble_slide_px(elapsed, opacity),
+                            opacity,
+                        )?;
                     }
                 }
                 Ok(())
@@ -1058,6 +1106,9 @@ pub mod win {
                     // desktop origin, which may be negative on multi-monitor
                     // layouts; translate only the render snapshot.
                     for agent in snapshot.values_mut() {
+                        let (current_x, current_y) = animated_position(agent, now);
+                        agent.x = current_x;
+                        agent.y = current_y;
                         agent.x -= x as f32;
                         agent.y -= y as f32;
                     }
@@ -1154,6 +1205,8 @@ pub mod win {
             "claude".to_string(),
             AgentState {
                 x: 60.0, y: 40.0,
+                target_x: 60.0, target_y: 40.0,
+                anim_from_x: 60.0, anim_from_y: 40.0, anim_start: now,
                 color: claude, dark: darken(claude, 0.62),
                 label: "Claude Code".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: None,
@@ -1164,6 +1217,8 @@ pub mod win {
             "codex".to_string(),
             AgentState {
                 x: 360.0, y: 50.0,
+                target_x: 360.0, target_y: 50.0,
+                anim_from_x: 360.0, anim_from_y: 50.0, anim_start: now,
                 color: codex, dark: darken(codex, 0.62),
                 label: "Codex".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: None,
@@ -1179,6 +1234,8 @@ pub mod win {
             "open".to_string(),
             AgentState {
                 x: 150.0, y: 220.0,
+                target_x: 150.0, target_y: 220.0,
+                anim_from_x: 150.0, anim_from_y: 220.0, anim_start: now,
                 color: open, dark: darken(open, 0.62),
                 label: "OpenCode".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: Some(now + Duration::from_secs(5)),
@@ -1237,5 +1294,90 @@ pub mod win {
             }
         }
         writer.write_image_data(&rgba).expect("writing PNG image data");
+    }
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+
+    fn upsert(state: &SharedState, id: &str, x: f32, y: f32, now: Instant) {
+        let line = format!(r#"{{"cmd":"upsert","id":"{id}","x":{x},"y":{y}}}"#);
+        assert!(apply_command_at(state, &line, now));
+    }
+
+    #[test]
+    fn first_placement_is_immediate() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let t0 = Instant::now();
+        upsert(&state, "a", 100.0, 50.0, t0);
+        let guard = state.lock().unwrap();
+        assert_eq!(animated_position(&guard["a"], t0), (100.0, 50.0));
+    }
+
+    #[test]
+    fn movement_glides_to_the_new_position() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let t0 = Instant::now();
+        upsert(&state, "a", 0.0, 0.0, t0);
+        let t1 = t0 + Duration::from_millis(10);
+        upsert(&state, "a", 100.0, 0.0, t1);
+
+        let mid = t1 + Duration::from_millis((MOVE_ANIM_MS / 2.0) as u64);
+        let guard = state.lock().unwrap();
+        let (x, y) = animated_position(&guard["a"], mid);
+        assert!(
+            x > 0.0 && x < 100.0,
+            "expected an in-flight x position, got {x}"
+        );
+        assert_eq!(y, 0.0);
+        let (x, y) = animated_position(&guard["a"], t1 + Duration::from_millis(141));
+        assert_eq!((x, y), (100.0, 0.0));
+    }
+
+    #[test]
+    fn a_retarget_starts_at_the_current_animated_position() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let t0 = Instant::now();
+        upsert(&state, "a", 0.0, 0.0, t0);
+        let t1 = t0 + Duration::from_millis(10);
+        upsert(&state, "a", 100.0, 0.0, t1);
+        let retarget_at = t1 + Duration::from_millis(70);
+        let current_x = animated_position(&state.lock().unwrap()["a"], retarget_at).0;
+        upsert(&state, "a", 300.0, 0.0, retarget_at);
+
+        let guard = state.lock().unwrap();
+        let agent = &guard["a"];
+        assert!((agent.anim_from_x - current_x).abs() < 0.001);
+        assert_eq!(agent.target_x, 300.0);
+        assert_ne!(agent.anim_from_x, 0.0);
+        assert_ne!(agent.anim_from_x, 100.0);
+    }
+
+    #[test]
+    fn one_agent_glide_does_not_move_another_agent() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let t0 = Instant::now();
+        upsert(&state, "a", 0.0, 0.0, t0);
+        upsert(&state, "b", 12.0, 24.0, t0);
+        let t1 = t0 + Duration::from_millis(10);
+        upsert(&state, "a", 200.0, 0.0, t1);
+
+        let guard = state.lock().unwrap();
+        let (ax, _) = animated_position(&guard["a"], t1 + Duration::from_millis(70));
+        assert!(ax > 0.0 && ax < 200.0);
+        assert_eq!(
+            animated_position(&guard["b"], t1 + Duration::from_millis(70)),
+            (12.0, 24.0)
+        );
+    }
+
+    #[test]
+    fn hide_clears_cursor_and_animation_state() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let now = Instant::now();
+        upsert(&state, "a", 0.0, 0.0, now);
+        assert!(apply_command_at(&state, r#"{"cmd":"hide","id":"a"}"#, now));
+        assert!(!state.lock().unwrap().contains_key("a"));
     }
 }
