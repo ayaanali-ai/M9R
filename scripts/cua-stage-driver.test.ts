@@ -2027,6 +2027,37 @@ test("an exact UIA ref with no advertised activation pattern still uses native p
   await driver.shutdown();
 }));
 
+test("UIA refs position the M9R cursor from fresh screen bounds without a pre-action screenshot", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const cursorPoints: Array<{ x: number; y: number }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async point => { cursorPoints.push({ x: point.x, y: point.y }); return true; }),
+    loadSdk: async () => makeSdk({ testRoot: root, calls, state: { elements: [{ role: "Button", label: "Multiply",
+      className: "Button", automationId: "multiply", enabled: true, actions: ["invoke"], frame: { x: 210, y: 130, w: 40, h: 32 } }] } }) as never });
+  const identity = { handle: "codex", sessionId: "uia-screen-cursor" };
+  await driver.showAgentCursor("stage", identity);
+  const observation = await driver.readStructure("stage", identity);
+  const beforeCaptureCount = nativeFixture(root).calls.filter(call => call.op === "captureWindow").length;
+
+  await driver.clickElement("stage", observation.elements[0]!.ref, identity,
+    { expectedRole: "Button", expectedLabel: "Multiply" });
+
+  const afterCaptureCount = nativeFixture(root).calls.filter(call => call.op === "captureWindow").length;
+  assert.equal(afterCaptureCount - beforeCaptureCount, 1,
+    "semantic UIA action takes only its post-action evidence capture; geometry does not trigger a screenshot first");
+  assert.deepEqual(cursorPoints.at(-1), { x: 230, y: 146 },
+    "the persistent agent marker follows the freshly re-resolved UIA screen rectangle");
+  const native = nativeFixture(root).calls;
+  const invokeIndex = native.findIndex(call => call.op === "invokeWindowElement");
+  const captureIndices = native.flatMap((call, index) => call.op === "captureWindow" ? [index] : []);
+  assert.ok(invokeIndex >= 0 && captureIndices.at(-1)! > invokeIndex,
+    "the semantic dispatch happens before the sole post-action screenshot");
+  assert.equal(native.some(call => ["bringToForeground", "sendClick"].includes(String(call.op))), false,
+    "UIA activation and cursor presentation do not use the owner's physical pointer or foreground");
+  await driver.shutdown();
+}));
+
 test("UIA scroll-container refs expose progress and move one headless increment with post-action evidence", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

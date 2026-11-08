@@ -1758,7 +1758,12 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
     observedNativeElementByToken: (token: string, expected?: { role?: string; label?: string }) => NativeWindowStructureElement | undefined;
     observedNativeElements: () => readonly NativeWindowStructureElement[];
-    elementByToken: (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame; nativeElement?: NativeWindowStructureElement } | undefined>;
+    elementByToken: (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => Promise<{
+      element: CuaWindowElement;
+      /** Fresh UIA bounds are already in virtual-screen coordinates. */
+      screenRect: NativeWindowStructureElement["rect"];
+      nativeElement?: NativeWindowStructureElement;
+    } | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
     let inspected: Awaited<ReturnType<typeof manager.inspectStage>>;
@@ -1950,14 +1955,12 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       if (!current || (current.enabled === false && expected?.allowDisabled !== true)) return undefined;
       const fresh = elements.find(({ native }) => native === current);
       if (!fresh) return undefined;
-      const frame = await captureNativeFrame();
-      const rect = current.rect;
-      const mappedFrame = { x: (rect.x - frame.windowBounds!.x) * frame.width / frame.windowBounds!.width,
-        y: (rect.y - frame.windowBounds!.y) * frame.height / frame.windowBounds!.height,
-        w: rect.width * frame.width / frame.windowBounds!.width,
-        h: rect.height * frame.height / frame.windowBounds!.height };
-      return { element: { ...fresh.mapped, elementToken: token, frame: mappedFrame } as CuaWindowElement,
-        frame, nativeElement: current };
+      // UIA BoundingRectangle is already expressed in screen coordinates.
+      // Keep cursor presentation on that semantic geometry and do not take an
+      // extra screenshot just to convert a ref into a cursor point. A fresh
+      // frame is captured later only if a pixel fallback actually needs one.
+      return { element: { ...fresh.mapped, elementToken: token } as CuaWindowElement,
+        screenRect: current.rect, nativeElement: current };
     };
 
     const elementAt = async (x: number, y: number) => (await hitTarget(x, y))?.elementToken;
@@ -3418,18 +3421,28 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     }, cursorIdentity);
   }
 
-  function elementCursorPoint(element: CuaWindowElement, frame: CuaStageWindowFrame): { x: number; y: number } | undefined {
-    const rect = element.frame;
-    // `elementByToken` re-resolves native UIA refs and maps their absolute
-    // screen rectangle into this exact window screenshot's local pixel space.
-    // Subtracting the window origin here a second time made refs on any window
-    // whose top/left was nonzero resolve outside the screenshot and fail before
-    // dispatch. Keep this conversion local to the ref path; coordinate actions
-    // still convert local screenshot pixels to screen space at the sender.
-    if (!rect || frame.width <= 0 || frame.height <= 0) return undefined;
-    const x = Math.floor(rect.x + rect.w / 2);
-    const y = Math.floor(rect.y + rect.h / 2);
+  function elementScreenPoint(rect: NativeWindowStructureElement["rect"]): { x: number; y: number } | undefined {
+    if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) return undefined;
+    const x = Math.floor(rect.x + rect.width / 2);
+    const y = Math.floor(rect.y + rect.height / 2);
+    return Number.isSafeInteger(x) && Number.isSafeInteger(y) ? { x, y } : undefined;
+  }
+
+  function screenToCapturePoint(point: { x: number; y: number }, frame: CuaStageWindowFrame): { x: number; y: number } | undefined {
+    const bounds = frame.windowBounds;
+    if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height, frame.width, frame.height].every(Number.isFinite)
+      || bounds.width <= 0 || bounds.height <= 0 || frame.width <= 0 || frame.height <= 0) return undefined;
+    const x = Math.floor((point.x - bounds.x) * frame.width / bounds.width);
+    const y = Math.floor((point.y - bounds.y) * frame.height / bounds.height);
     return validPoint(x, y, frame) ? { x, y } : undefined;
+  }
+
+  async function moveElementCursorToScreen(session: string, point: { x: number; y: number }): Promise<void> {
+    const cursor = [...agentSessions.values()].find((candidate) => candidate.session === session);
+    if (!cursor) return;
+    // Cursor presence is a visual aid. If its compositor is temporarily
+    // unavailable, keep the actual semantic action independent of rendering.
+    await presentM9rCursor(cursor, cursor.key, point, false, "target=ui-automation-bounds", timingContext.getStore()?.stageName);
   }
 
   async function clickElement(name: string, ref: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
@@ -3446,11 +3459,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // all while remaining clickable. Try the semantic route when the native
       // identity is strong enough, then use the exact point through the normal
       // owner-preview input lease when UIA reports no activation pattern.
-      const point = elementCursorPoint(selected.element, selected.frame);
+      const screenPoint = elementScreenPoint(selected.screenRect);
       const selectedElementToken = selected.element.elementToken;
       if (!selectedElementToken) throw new DesktopInputNotDispatchedError("The accessibility element is missing its driver token; no click was sent.");
-      if (!point) throw new DesktopInputNotDispatchedError("The accessibility element has no usable screen point; no click was sent.", "target-identity");
-      if (cursorIdentity && point) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
+      if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
       if (selected.nativeElement && typeof manager.invokeWindowElement === "function"
         && selected.nativeElement.role.trim()
@@ -3478,20 +3490,21 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           };
         }
       }
+      if (!screenPoint) throw new DesktopInputNotDispatchedError("The accessibility element has no usable screen point and no semantic activation route; no click was sent.", "target-identity");
+      const frame = await captureFrame();
+      const point = screenToCapturePoint(screenPoint, frame);
+      if (!point) throw new DesktopInputNotDispatchedError("The accessibility element is outside the current window capture; no coordinate click was sent.", "target-identity");
       const outcome = await driverInputAction("click", {
         pid, window_id: Number(windowId), x: point.x, y: point.y, button: "left", count: 1, session,
       }, "Cua Driver could not click the selected accessibility element.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         allowForegroundEscalation: options.allowForegroundEscalation,
-        nativeForeground: nativeStageInput(pid, windowId, async () => {
-            const screen = await localToScreenPoint(pid, windowId, point.x, point.y, selected.frame.width, selected.frame.height, selected.frame.windowBounds);
-            await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {});
-          }),
+        nativeForeground: nativeStageInput(pid, windowId, () => manager.sendClick(pid, windowId.toString(), screenPoint.x, screenPoint.y, {})),
       });
-      if (cursorIdentity && point && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
+      if (cursorIdentity && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
         && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(selected.element.role ?? "")) {
         rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId,
-          field: { ...cursorScreenPoint(point.x, point.y, selected.frame), label: selected.element.label, role: selected.element.role } });
+          field: { x: screenPoint.x, y: screenPoint.y, label: selected.element.label, role: selected.element.role } });
       }
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
@@ -3506,6 +3519,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         throw new DesktopInputNotDispatchedError("The scroll container ref is stale, disabled, or no longer matches the observed control; no scroll was sent.", "target-identity");
       }
       const nativeElement = selected.nativeElement;
+      const screenPoint = elementScreenPoint(selected.screenRect);
+      if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
       if (nativeElement.actions?.scroll && typeof manager.invokeWindowElement === "function") {
         const semantic = await invokeWindowElementTimed(pid, windowId.toString(), {
           path: nativeElement.path, action: "scroll", expectedRole: nativeElement.role,
@@ -3534,10 +3549,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // implement ScrollPattern. Keep it to one notch so each task-stage call
       // is a bounded movement followed by a fresh capture; the model can then
       // stop at the requested item instead of firing an endpoint-sized jump.
-      const point = elementCursorPoint(selected.element, selected.frame);
-      if (!point) throw new DesktopInputNotDispatchedError("The observed scroll container has no usable point for the one-notch wheel fallback; no scroll was sent.", "target-identity");
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
+      if (!screenPoint) throw new DesktopInputNotDispatchedError("The observed scroll container has no usable point for the one-notch wheel fallback; no scroll was sent.", "target-identity");
       const before = await captureFrame();
+      const point = screenToCapturePoint(screenPoint, before);
+      if (!point) throw new DesktopInputNotDispatchedError("The observed scroll container is outside the current window capture; no wheel input was sent.", "target-identity");
       const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
       const horizontal = direction === "left" || direction === "right";
       const signedAmount = direction === "up" || direction === "right" ? 1 : -1;
@@ -3562,9 +3577,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         || (!selected.nativeElement && !selected.element.actions?.includes("set_value"))) {
         throw new DesktopInputNotDispatchedError("The accessibility element is stale, disabled, could not be confirmed as the same control, or does not support text replacement; no text was sent.");
       }
-      const point = elementCursorPoint(selected.element, selected.frame);
-      if (!point) throw new DesktopInputNotDispatchedError("The selected accessibility field has no usable point; no text was sent.");
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, selected.frame);
+      const screenPoint = elementScreenPoint(selected.screenRect);
+      if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
       if (selected.nativeElement && typeof manager.invokeWindowElement === "function") {
         const semantic = await invokeWindowElementTimed(pid, windowId.toString(), {
           path: selected.nativeElement.path,
@@ -3585,8 +3599,11 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }
       if (options.semanticOnly) throw new DesktopInputNotDispatchedError(
         "The independently claimed control no longer supports direct UI Automation value replacement; no caret or foreground fallback was sent.", "background-unavailable");
+      if (!screenPoint) throw new DesktopInputNotDispatchedError("The selected accessibility field has no usable screen point; no text was sent.", "target-identity");
       const before = await captureFrame();
-      const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
+      const localPoint = screenToCapturePoint(screenPoint, before);
+      if (!localPoint) throw new DesktopInputNotDispatchedError("The selected accessibility field is outside the current window capture; no text was sent.", "target-identity");
+      const screen = await localToScreenPoint(pid, windowId, localPoint.x, localPoint.y, before.width, before.height, before.windowBounds);
       const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text,
         { session, signal: options.signal, deliveryMode: options.deliveryMode,
           preferForeground: options.confirmFocusForeground, allowForegroundEscalation: options.allowForegroundEscalation });
