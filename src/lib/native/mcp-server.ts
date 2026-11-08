@@ -929,9 +929,21 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const result = await deps.web.sendA2A(authToken, input);
       if (!result.ok) throw new Error(result.error);
       const recipients = result.recipientAgentIds.map((agentId) => `@${agentId}`).join(", ");
-      return { content: [{ type: "text", text: result.duplicate
-        ? `M9R deduplicated the structured teammate message for ${recipients || `@${to}`}.`
-        : `M9R accepted the structured teammate message for ${recipients || `@${to}`}; it remains in the task room and will not cancel unrelated work.` }] };
+      const delivery = result.delivery;
+      const deliveryText = delivery?.state === "queued"
+        ? ` Durably queued as ${delivery.taskIds.join(", ") || "a teammate task"}; provider receipt is tracked separately.`
+        : delivery?.state === "pending"
+          ? " Delivery is still pending; M9R has not confirmed that a provider task was queued."
+          : delivery?.state === "partial"
+            ? ` Only part of the recipient delivery was durably queued (${delivery.taskIds.join(", ") || "no task IDs"}); ${delivery.error ?? "the remaining recipients failed"}.`
+            : delivery?.state === "failed"
+              ? ` No durable recipient task was queued: ${delivery.error ?? "the owner broker reported a delivery failure"}.`
+              : " The structured message was accepted, but durable provider-task delivery was not confirmed.";
+      const deliveryFailed = delivery?.state === "failed" || delivery?.state === "partial";
+      return {
+        content: [{ type: "text", text: `${result.duplicate ? "M9R deduplicated" : "M9R accepted"} the structured teammate message for ${recipients || `@${to}`}.${deliveryText}` }],
+        ...(deliveryFailed ? { isError: true } : {}),
+      };
     },
   );
 
@@ -1117,16 +1129,32 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
       if (existing.to !== identity.handle && existing.to !== roomHandle(identity, identity.handle)) throw new Error(`Task ${taskId} was not sent to you (@${identity.handle}), refusing to report a result for it.`);
+      let answer: { answerTaskId?: string; answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict" } | undefined;
       if (deps.web?.recordAgentTaskResult) {
         const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary, report);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
+        answer = recorded;
       } else {
         const recorded = deps.store.recordTaskResult(authToken, taskId, summary, report);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
+        answer = recorded;
       }
+      const answerText = answer?.answerDelivery === "explicit-reply-queued" && answer.answerTaskId
+        ? ` The teammate already sent a structured reply, durably queued as ${answer.answerTaskId}; M9R did not create a duplicate result message.`
+        : answer?.answerTaskId
+        ? ` Durably queued reply ${answer.answerTaskId} to @${existing.from} for its pinned M9R session; this confirms queueing, not provider receipt.`
+        : answer?.answerDelivery === "depth-limit"
+          ? " The result is recorded, but the teammate reply-depth limit was reached; an owner must start the next exchange."
+          : answer?.answerDelivery === "missing-sender-session"
+            ? " The result is recorded, but the original sender session was unavailable, so no exact-session reply was queued."
+            : answer?.answerDelivery === "capacity"
+              ? " The result is recorded, but the M9R task store is at capacity, so no reply task was queued."
+              : answer?.answerDelivery === "conflict"
+                ? " The result is recorded, but the existing reply record did not match this sender and recipient session; M9R did not route another reply."
+                : "";
       return { content: [{ type: "text", text: report.status === "incomplete"
-        ? "Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed."
-        : "Recorded result. Result recorded and delivered to the sender's M9R conversation." }] };
+        ? `Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed.${answerText}`
+        : `Recorded result.${answerText}` }] };
     },
   );
 

@@ -157,6 +157,90 @@ test("an A2A provider error is durably failed with build evidence, not left as a
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("managed provider bridge returns A2A results to the pinned sender session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-a2a-roundtrip-"));
+  const store = createLocalStore(root);
+  const tokens = new Map<string, string>();
+  const sessions = new Map<string, string>();
+  const prompts = new Map<string, string[]>();
+  const owner = createManagedProviderOwner({
+    agents: [
+      { handle: "claude", provider: "claude-code", folder: root },
+      { handle: "codex", provider: "codex", folder: root },
+    ],
+    storeRoot: root,
+    repoRoot: root,
+    brokerPort: 0,
+    store,
+    env: {},
+    createConnection: (profile, context) => {
+      tokens.set(profile.handle, context.token);
+      sessions.set(profile.handle, context.sessionId);
+      prompts.set(profile.handle, []);
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* (task) {
+          prompts.get(profile.handle)!.push(task.prompt);
+          yield { kind: "accepted" };
+          yield { kind: "result", text: "Provider turn ended after its teammate message.", isError: false };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    },
+  });
+  const waitFor = async (predicate: () => boolean, description: string) => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(predicate(), true, `timed out waiting for ${description}`);
+  };
+  try {
+    assert.deepEqual((await owner.start()).failures, []);
+    const request = store.addTask({
+      from: "claude", to: "codex", goal: "Check the value and return it.", origin: "agent_initiated",
+      fromSession: sessions.get("claude"), targetSession: sessions.get("codex"),
+      standingRuleApplies: true, idempotencyKey: "managed-a2a-roundtrip",
+    }).task;
+    store.setDelivery(request.id, { state: "deferred" });
+    await waitFor(() => !!store.getTask(request.id)?.deliveredAt, "the incoming teammate request to reach Codex");
+    assert.match(prompts.get("codex")?.join("\n") ?? "", new RegExp(request.id));
+
+    const recorded = store.recordTaskResult(tokens.get("codex")!, request.id, "The value is 42.", {
+      status: "completed", remainingWork: [],
+    });
+    assert.equal(recorded.ok, true);
+    assert.equal(recorded.answerDelivery, "queued");
+    assert.ok(recorded.answerTaskId);
+    await waitFor(() => !!store.getTask(recorded.answerTaskId!)?.deliveredAt, "the result reply to reach Claude");
+    const returnedPrompt = prompts.get("claude")?.join("\n") ?? "";
+    assert.match(returnedPrompt, new RegExp(request.id));
+    assert.match(returnedPrompt, /The value is 42/);
+    assert.equal(store.getTask(request.id)?.answerPushedAt !== undefined, true,
+      "answer presentation is recorded only after the exact pinned sender receives it");
+    assert.equal(store.getTask(recorded.answerTaskId!)?.deliveredSession, sessions.get("claude"));
+
+    const wrongSession = store.addTask({
+      from: "codex", to: "claude", goal: "Do not deliver to another session.", origin: "agent_initiated",
+      fromSession: sessions.get("codex"), targetSession: "inactive-claude-session",
+      standingRuleApplies: true, idempotencyKey: "managed-a2a-wrong-session",
+    }).task;
+    store.setDelivery(wrongSession.id, { state: "deferred" });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(store.getTask(wrongSession.id)?.deliveredAt, undefined,
+      "a targeted teammate task waits instead of spilling into a different provider session");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("OpenCode keeps the user's credential data home while isolating M9R tool policy", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-opencode-home-"));
   const ownerData = join(root, "owner-opencode-data");

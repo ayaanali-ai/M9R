@@ -10,6 +10,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
+import { createManagedA2ADelivery } from "@/lib/native/managed-a2a-delivery";
 import { createTaskDesktopStageService } from "@/lib/native/task-desktop-stage";
 import { readOwnerWorkMode, setOwnerWorkMode } from "@/lib/native/owner-work-mode";
 import { writeWebActivity } from "@/lib/native/feed-writer";
@@ -101,24 +102,11 @@ async function main(): Promise<void> {
     })),
   } as const;
   const multiplayer = createMultiplayerRuntime({ roster: multiplayerRoster });
-  multiplayer.setDelivery(async (message) => {
-    const recipient = config.agents.find((agent) => `agent-${agent.handle}` === (message.recipient.kind === "agent" ? message.recipient.agentId : ""));
-    if (!recipient) return { ok: false, error: "The structured teammate recipient is not configured." };
-    const sender = config.agents.find((agent) => `agent-${agent.handle}` === message.agentId);
-    const detail = message.details ? `\nStructured details: ${JSON.stringify(message.details)}` : "";
-    const goal = `[M9R team room ${message.taskId ?? "run"}] @${sender?.handle ?? message.agentId}: ${message.summary}${detail}`.slice(0, 4_000);
-    const result = store.addTask({
-      to: recipient.handle,
-      from: sender?.handle ?? message.agentId,
-      goal,
-      origin: "agent_initiated",
-      idempotencyKey: `a2a:${message.messageId}`,
-      replyDepth: message.replyDepth,
-      ...(sender && sessionOwner.current?.sessionIdOf(sender.handle) ? { fromSession: sessionOwner.current.sessionIdOf(sender.handle) } : {}),
-    });
-    if (result.created) store.setDelivery(result.task.id, { state: "deferred" });
-    return { ok: true, taskId: result.task.id };
-  });
+  multiplayer.setDelivery(createManagedA2ADelivery({
+    agents: config.agents,
+    store,
+    sessionIdOf: (handle) => sessionOwner.current?.sessionIdOf(handle),
+  }));
   // One broker-owned mutation fence is shared by the browser route and the
   // desktop stage service. Both dispatch real input from this process, so this
   // is the only place a shared lease can arbitrate same-target contention.

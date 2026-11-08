@@ -231,11 +231,15 @@ type AgentMcpStoreResult = {
     created?: boolean;
     taskIds?: string[];
     alreadyRecorded?: boolean;
+    /** Durable provider-to-provider result reply, if one was eligible and queued. */
+    answerTaskId?: string;
+    answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict";
     /** Structured A2A response fields are returned intact to the provider MCP client. */
     messageId?: string;
     duplicate?: boolean;
     message?: unknown;
     recipientAgentIds?: string[];
+    delivery?: { state: "queued" | "pending" | "partial" | "failed"; taskIds: string[]; error?: string };
   };
 };
 
@@ -297,6 +301,11 @@ export function applyAgentMcpStoreMutation(
           duplicate: result.duplicate,
           message: result.message,
           recipientAgentIds: [...result.recipientAgentIds],
+          ...(result.delivery ? { delivery: {
+            state: result.delivery.state,
+            taskIds: [...result.delivery.taskIds],
+            ...(result.delivery.error ? { error: result.delivery.error } : {}),
+          } } : {}),
         },
       };
     }
@@ -362,7 +371,12 @@ export function applyAgentMcpStoreMutation(
           : /identity is not active/.test(recorded.error ?? "") ? 403 : 400;
         return { status, body: { ok: false, error: recorded.error } };
       }
-      return { status: 200, body: { ok: true, alreadyRecorded: recorded.alreadyRecorded } };
+      return { status: 200, body: {
+        ok: true,
+        alreadyRecorded: recorded.alreadyRecorded,
+        ...(recorded.answerTaskId ? { answerTaskId: recorded.answerTaskId } : {}),
+        ...(recorded.answerDelivery ? { answerDelivery: recorded.answerDelivery } : {}),
+      } };
     }
     return { status: 400, body: { ok: false, error: "Unknown M9R agent-store action." } };
   } catch {

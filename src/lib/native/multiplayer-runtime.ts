@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   createMultiplayerA2ARouter,
   type MultiplayerA2ARouter,
@@ -24,6 +24,9 @@ import {
   type MultiplayerRoster,
 } from "./multiplayer-contract";
 import type { VerifiedIdentity } from "./identity-core";
+import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
+
+const DEFAULT_A2A_RETRY_WINDOW_MS = 30_000;
 
 /**
  * The owner-broker coordination boundary.  The contracts in the multiplayer
@@ -32,7 +35,13 @@ import type { VerifiedIdentity } from "./identity-core";
  * It never owns provider credentials or desktop input.
  */
 export interface MultiplayerDelivery {
-  (message: A2AMessage): Promise<{ ok: boolean; taskId?: string; error?: string }> | { ok: boolean; taskId?: string; error?: string };
+  (message: A2AMessage): Promise<{ ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string }> | { ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string };
+}
+
+export interface MultiplayerDeliveryReceipt {
+  readonly state: "queued" | "pending" | "partial" | "failed";
+  readonly taskIds: readonly string[];
+  readonly error?: string;
 }
 
 export interface MultiplayerA2ASendInput {
@@ -59,7 +68,7 @@ export interface MultiplayerRuntimeSnapshot {
 }
 
 export type MultiplayerSendResult =
-  | { readonly ok: true; readonly duplicate: boolean; readonly message: A2AMessage; readonly recipientAgentIds: readonly string[] }
+  | { readonly ok: true; readonly duplicate: boolean; readonly message: A2AMessage; readonly recipientAgentIds: readonly string[]; readonly delivery?: MultiplayerDeliveryReceipt }
   | { readonly ok: false; readonly error: string };
 
 export interface MultiplayerRuntime {
@@ -104,7 +113,24 @@ export function createMultiplayerRuntime(input: {
   const coordinator = createMultiplayerRunCoordinator(roster, { now });
   const contexts = new Map<string, TaskContextStore>();
   const subscribers = new Set<(message: A2AMessage) => void>();
+  const deliveryReceipts = new Map<string, MultiplayerDeliveryReceipt>();
   let delivery = input.delivery;
+
+  const rememberDelivery = (messageId: string, result: { ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string }): MultiplayerDeliveryReceipt => {
+    const taskIds = [...new Set([...(result.taskIds ?? []), ...(result.taskId ? [result.taskId] : [])])].slice(0, 16);
+    const receipt: MultiplayerDeliveryReceipt = result.ok && taskIds.length > 0
+      ? { state: "queued", taskIds }
+      : !result.ok && taskIds.length > 0
+        ? { state: "partial", taskIds, ...(result.error ? { error: result.error.slice(0, 300) } : {}) }
+        : { state: "failed", taskIds: [], error: (result.error || "The delivery adapter did not confirm a durable task ID.").slice(0, 300) };
+    deliveryReceipts.set(messageId, receipt);
+    while (deliveryReceipts.size > 4096) {
+      const oldest = deliveryReceipts.keys().next().value;
+      if (!oldest) break;
+      deliveryReceipts.delete(oldest);
+    }
+    return receipt;
+  };
 
   const contextFor = (taskId: string, conversationId: string): TaskContextStore => {
     const existing = contexts.get(taskId);
@@ -120,7 +146,39 @@ export function createMultiplayerRuntime(input: {
     return created;
   };
 
+  const attemptDelivery = (message: A2AMessage): void => {
+    if (!delivery) return;
+    try {
+      const result = delivery(message);
+      if (result && typeof result === "object" && "then" in result && typeof result.then === "function") {
+        deliveryReceipts.set(message.messageId, { state: "pending", taskIds: [] });
+        void Promise.resolve(result).then((settled) => {
+          const receipt = rememberDelivery(message.messageId, settled);
+          if (receipt.state === "failed" || receipt.state === "partial") {
+            process.stderr.write(`[multiplayer-runtime] ${receipt.state} delivery of message ${message.messageId}: ${receipt.error ?? "no durable task"}\n`);
+          }
+        }).catch((error) => {
+          const receipt = rememberDelivery(message.messageId, { ok: false, error: error instanceof Error ? error.message : String(error) });
+          process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${receipt.error}\n`);
+        });
+      } else {
+        const receipt = rememberDelivery(message.messageId, result as { ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string });
+        if (receipt.state === "failed" || receipt.state === "partial") {
+          process.stderr.write(`[multiplayer-runtime] ${receipt.state} delivery of message ${message.messageId}: ${receipt.error ?? "no durable task"}\n`);
+        }
+      }
+    } catch (error) {
+      const receipt = rememberDelivery(message.messageId, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${receipt.error}\n`);
+    }
+  };
+
   router.subscribe((event) => {
+    if (event.kind === "message-duplicate") {
+      const prior = deliveryReceipts.get(event.message.messageId);
+      if (prior?.state === "failed" || prior?.state === "partial") attemptDelivery(event.message);
+      return;
+    }
     if (event.kind !== "message-accepted") return;
     const message = event.message;
     if (message.taskId) {
@@ -138,17 +196,9 @@ export function createMultiplayerRuntime(input: {
     for (const listener of subscribers) {
       try { listener(message); } catch { /* observers never own delivery */ }
     }
-    if (delivery) {
-      // Delivery is deliberately detached from contract acceptance. A provider
-      // may be busy, but the structured sidecar remains accepted and durable in
-      // the runtime until the task path can present it. A delivery rejection
-      // used to vanish entirely here -- the sender saw acceptance with no
-      // trace that the teammate never actually saw the handoff. Surface it
-      // as a diagnostic; the detached/accepted contract itself is unchanged.
-      void Promise.resolve(delivery(message)).catch((error) => {
-        process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${error instanceof Error ? error.message : String(error)}\n`);
-      });
-    }
+    // Acceptance and provider delivery are separate. A duplicate retry may
+    // resume a failed/partial durable handoff, but never a pending or queued one.
+    attemptDelivery(message);
   });
 
   const resolveSender = (handle: string, provider: string): MultiplayerAgent | undefined => {
@@ -167,9 +217,23 @@ export function createMultiplayerRuntime(input: {
       ?? roster.agents.find((agent) => agent.agentId === inputValue.to);
     if (!recipient) return { ok: false, error: `@${safeHandle(inputValue.to)} is not part of the active M9R roster.` };
     if (recipient.agentId === sender.agentId) return { ok: false, error: "An agent cannot send a teammate message to itself." };
-    const taskId = inputValue.taskId?.trim() || undefined;
-    const conversationId = inputValue.conversationId?.trim() || (taskId ? safeId("conversation", taskId) : safeId("conversation", `${sender.agentId}:${recipient.agentId}`));
-    const idempotencyKey = inputValue.idempotencyKey?.trim() || safeId("a2a", `${sender.agentId}:${recipient.agentId}:${taskId ?? "room"}:${inputValue.summary}`);
+    const replyParent = inputValue.replyToMessageId
+      ? router.history().find((message) => message.messageId === inputValue.replyToMessageId)
+      : undefined;
+    if (inputValue.replyToMessageId && !replyParent) return { ok: false, error: "A2A reply references an unknown message." };
+    if (replyParent) {
+      const parentRecipients = replyParent.recipient.kind === "agent" ? [replyParent.recipient.agentId] : replyParent.recipient.agentIds;
+      if (!parentRecipients.includes(sender.agentId) || replyParent.agentId !== recipient.agentId) {
+        return { ok: false, error: "A2A reply sender or recipient does not match the referenced teammate exchange." };
+      }
+    }
+    const taskId = inputValue.taskId?.trim() || replyParent?.taskId;
+    const conversationId = inputValue.conversationId?.trim() || replyParent?.conversationId
+      || (taskId ? safeId("conversation", taskId) : safeId("conversation", `${sender.agentId}:${recipient.agentId}`));
+    const callerIdempotencyKey = inputValue.idempotencyKey?.trim();
+    const createdAt = now();
+    const idempotencyKey = callerIdempotencyKey
+      || safeId("a2a", `${sender.agentId}:${recipient.agentId}:${taskId ?? "room"}:${inputValue.summary}:${Math.floor(createdAt / DEFAULT_A2A_RETRY_WINDOW_MS)}`);
     const raw = {
       schemaVersion: 1 as const,
       runId: roster.runId,
@@ -177,15 +241,15 @@ export function createMultiplayerRuntime(input: {
       agentId: sender.agentId,
       ...(taskId ? { taskId } : {}),
       conversationId,
-      // A caller-supplied idempotency key is the retry identity. Reusing the
-      // derived message ID lets the router treat a lost response as a true
-      // duplicate instead of mistaking it for conflicting content.
-      messageId: inputValue.idempotencyKey ? safeId("message", `${sender.agentId}:${idempotencyKey}`) : randomUUID(),
+      // The retry key (caller-provided, or a short content/time-bucket fallback)
+      // reproduces the message ID. The fallback expires into a new identity so
+      // repeated wording remains usable for a later deliberate handoff.
+      messageId: safeId("message", `${sender.agentId}:${idempotencyKey}`),
       recipient: { kind: "agent" as const, agentId: recipient.agentId },
       kind: inputValue.kind ?? "delegate" as const,
       priority: inputValue.priority ?? "normal" as const,
       idempotencyKey,
-      createdAt: now(),
+      createdAt,
       summary: inputValue.summary,
       ...(normalizeDetails(inputValue.details) ? { details: normalizeDetails(inputValue.details) } : {}),
       ...(inputValue.replyToMessageId ? { replyToMessageId: inputValue.replyToMessageId } : {}),
@@ -193,10 +257,13 @@ export function createMultiplayerRuntime(input: {
       ...(inputValue.progressFingerprint && inputValue.progressKind ? { progressFingerprint: inputValue.progressFingerprint, progressKind: inputValue.progressKind } : {}),
       replyDepth: inputValue.replyDepth ?? 0,
     };
-    const result = router.send(parseA2AMessage(raw));
+    const replyDepth = Math.max(inputValue.replyDepth ?? 0, replyParent ? replyParent.replyDepth + 1 : 0);
+    if (replyDepth > MAX_AGENT_REPLY_DEPTH) return { ok: false, error: `A2A exchange reached M9R's bounded reply depth (${MAX_AGENT_REPLY_DEPTH}).` };
+    const result = router.send(parseA2AMessage({ ...raw, replyDepth }));
     if (!result.ok) return result;
     if (taskId) contextFor(taskId, conversationId);
-    return result;
+    const receipt = deliveryReceipts.get(result.message.messageId);
+    return { ...result, ...(receipt ? { delivery: receipt } : {}) };
   };
 
   return {

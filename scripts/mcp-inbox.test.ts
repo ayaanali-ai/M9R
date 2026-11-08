@@ -193,6 +193,117 @@ test("one task is claimed by one provider session and another session cannot tak
   t.done();
 });
 
+test("an agent result queues one reply for the exact requesting session and never loops", async () => {
+  const t = setup();
+  try {
+    const sent = t.store.addTask({
+      from: "claude", to: "codex", goal: "Check the requested value.", origin: "agent_initiated",
+      fromSession: "c1", standingRuleApplies: true, idempotencyKey: "a2a-result-roundtrip",
+    }).task;
+    t.store.markDelivered([sent.id], "x1");
+
+    const first = await t.call("m9r_result", {
+      token: t.codex, taskId: sent.id, summary: "The displayed value is 42.",
+      completion: { status: "completed", remainingWork: [] },
+    });
+    const reply = t.store.tasksFor("claude").find((task) => task.replyToTaskId === sent.id);
+    assert.ok(reply, "recording a teammate result must create a durable reply task");
+    assert.match(first, new RegExp(`queued reply ${reply.id}`));
+    assert.equal(reply.from, "codex");
+    assert.equal(reply.to, "claude");
+    assert.equal(reply.fromSession, "x1");
+    assert.equal(reply.targetSession, "c1", "reply must target the exact session that sent the request");
+    assert.equal(reply.replyDepth, sent.replyDepth + 1);
+    assert.equal(reply.approval, "approved");
+    assert.match(reply.goal, /The displayed value is 42/);
+    assert.equal(t.store.getTask(sent.id)?.answerPushedAt, undefined, "queueing is not proof the sender received the answer");
+
+    const repeated = await t.call("m9r_result", {
+      token: t.codex, taskId: sent.id, summary: "The displayed value is 42.",
+      completion: { status: "completed", remainingWork: [] },
+    });
+    assert.match(repeated, new RegExp(`queued reply ${reply.id}`));
+    assert.equal(t.store.tasksFor("claude").filter((task) => task.replyToTaskId === sent.id).length, 1,
+      "an idempotent result retry must not create a duplicate reply");
+
+    t.store.markDelivered([reply.id], "c2");
+    t.store.markDelivered([reply.id]);
+    assert.equal(t.store.getTask(reply.id)?.deliveredAt, undefined, "a pinned reply cannot be consumed without its exact receiving session");
+    t.store.markDelivered([reply.id], "c1");
+    assert.ok(t.store.getTask(sent.id)?.answerPushedAt, "the original request records answer presentation only after target-session delivery");
+    assert.equal(t.store.getTask(reply.id)?.deliveredSession, "c1");
+
+    t.store.markDelivered([reply.id], "c2");
+    assert.equal(t.store.getTask(reply.id)?.deliveredSession, "c1", "another session cannot take the pinned reply");
+    await t.call("m9r_result", {
+      token: t.claude, taskId: reply.id, summary: "Received the teammate result.",
+      completion: { status: "completed", remainingWork: [] },
+    });
+    assert.equal(t.store.tasksFor("codex").filter((task) => task.replyToTaskId === reply.id).length, 0,
+      "a result task cannot recursively create another result task");
+  } finally { t.done(); }
+});
+
+test("a structured A2A reply suppresses the duplicate automatic task-result reply", async () => {
+  const t = setup();
+  try {
+    const request = t.store.addTask({
+      from: "claude", to: "codex", goal: "Check the requested value.", origin: "agent_initiated",
+      fromSession: "c1", standingRuleApplies: true, idempotencyKey: "a2a-explicit-answer-request",
+    }).task;
+    t.store.markDelivered([request.id], "x1");
+    const explicitReply = t.store.addTask({
+      from: "codex", to: "claude", goal: "Structured teammate reply: the value is 42.", origin: "agent_initiated",
+      fromSession: "x1", targetSession: "c1", standingRuleApplies: true, parentTaskId: request.id,
+      replyToTaskId: request.id, replyDepth: request.replyDepth + 1, idempotencyKey: "a2a-explicit-answer-reply",
+    }).task;
+    t.store.setDelivery(explicitReply.id, { state: "deferred" });
+
+    const result = await t.call("m9r_result", {
+      token: t.codex, taskId: request.id, summary: "The value is 42.",
+      completion: { status: "completed", remainingWork: [] },
+    });
+    assert.match(result, new RegExp(`already sent a structured reply.*${explicitReply.id}`));
+    assert.equal(t.store.tasksFor("claude").filter((task) => task.replyToTaskId === request.id).length, 1,
+      "the explicit message is the single return path; completion must not enqueue a duplicate");
+    assert.equal(t.store.getTask(request.id)?.answerPushedAt, undefined,
+      "the explicit reply is not counted as presented until the exact sender session receives it");
+  } finally { t.done(); }
+});
+
+test("incomplete teammate results are returned, while depth limits and missing sender sessions fail closed", () => {
+  const t = setup();
+  try {
+    const incomplete = t.store.addTask({ from: "claude", to: "codex", goal: "Inspect the form.", origin: "agent_initiated",
+      fromSession: "c1", replyDepth: 2, standingRuleApplies: true, idempotencyKey: "a2a-incomplete" }).task;
+    t.store.markDelivered([incomplete.id], "x1");
+    const partial = t.store.recordTaskResult(t.codex, incomplete.id, "Two fields were checked.", {
+      status: "incomplete", remainingWork: ["Confirm the third field."],
+    });
+    assert.equal(partial.ok, true);
+    const partialReply = t.store.tasksFor("claude").find((task) => task.replyToTaskId === incomplete.id);
+    assert.ok(partialReply);
+    assert.match(partialReply.goal, /incomplete/);
+    assert.match(partialReply.goal, /Confirm the third field/);
+    assert.equal(t.store.getTask(incomplete.id)?.receipt?.state, "paused");
+    assert.equal(t.store.getTask(incomplete.id)?.resultSummary, undefined);
+
+    const capped = t.store.addTask({ from: "claude", to: "codex", goal: "One last request.", origin: "agent_initiated",
+      fromSession: "c1", replyDepth: 8, standingRuleApplies: true, idempotencyKey: "a2a-depth-limit" }).task;
+    t.store.markDelivered([capped.id], "x1");
+    const cappedResult = t.store.recordTaskResult(t.codex, capped.id, "Finished.", { status: "completed", remainingWork: [] });
+    assert.equal(cappedResult.answerDelivery, "depth-limit");
+    assert.equal(t.store.tasksFor("claude").some((task) => task.replyToTaskId === capped.id), false);
+
+    const unpinned = t.store.addTask({ from: "claude", to: "codex", goal: "No known sender session.", origin: "agent_initiated",
+      standingRuleApplies: true, idempotencyKey: "a2a-no-session" }).task;
+    t.store.markDelivered([unpinned.id], "x1");
+    const unpinnedResult = t.store.recordTaskResult(t.codex, unpinned.id, "Finished.", { status: "completed", remainingWork: [] });
+    assert.equal(unpinnedResult.answerDelivery, "missing-sender-session");
+    assert.equal(t.store.tasksFor("claude").some((task) => task.replyToTaskId === unpinned.id), false);
+  } finally { t.done(); }
+});
+
 test("a new browser room inbox ignores pre-start work but still shows tasks created during this broker lifetime", async () => {
   const roomStartedAt = Date.parse("2026-09-30T12:00:00.000Z");
   let now = new Date(roomStartedAt - 1_000);
@@ -217,7 +328,7 @@ test("a new browser room inbox ignores pre-start work but still shows tasks crea
 
 test("a bad token is refused", async () => {
   const t = setup();
-  await assert.rejects(t.call("m9r_inbox", { token: "nope", waitSeconds: 0 }), /token is malformed/);
+  await assert.rejects(t.call("m9r_inbox", { token: "nope", waitSeconds: 0 }), /could not verify this agent connection/);
   t.done();
 });
 

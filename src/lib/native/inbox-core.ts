@@ -249,6 +249,8 @@ export interface Task {
   targetSession?: string;
   /** The sender's own session (a Codex thread id, say), so the answer can be pushed back to exactly that session. */
   fromSession?: string;
+  /** System-generated result reply for this task; prevents result messages from recursively creating replies. */
+  replyToTaskId?: string;
   /** Internal authorization lineage; never included in provider-facing task text. */
   parentTaskId?: string;
   /** Compact A2A state used for dedupe/acknowledgement; full prose remains in `goal`. */
@@ -310,6 +312,8 @@ export interface NewTaskInput {
   fromSession?: string;
   /** Internal authorization lineage; trusted broker code derives this from an active owner-approved task. */
   parentTaskId?: string;
+  /** Set only for an M9R-generated result reply; the referenced task is the request being answered. */
+  replyToTaskId?: string;
 }
 
 /** Approximate token count; good enough to enforce a budget without a tokenizer dependency. */
@@ -391,6 +395,7 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     ...(input.targetSession ? { targetSession: input.targetSession } : {}),
     ...(input.fromSession ? { fromSession: input.fromSession } : {}),
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
+    ...(input.replyToTaskId ? { replyToTaskId: input.replyToTaskId } : {}),
   };
 }
 

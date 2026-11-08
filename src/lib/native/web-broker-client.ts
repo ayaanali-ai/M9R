@@ -4,7 +4,7 @@ import { requestOwnerPipe } from "./owner-pipe";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import type { TaskCompletionReport } from "./task-completion-contract";
 import type { TaskStageMode } from "./task-desktop-stage";
-import type { MultiplayerA2ASendInput, MultiplayerSendResult } from "./multiplayer-runtime";
+import type { MultiplayerA2ASendInput, MultiplayerDeliveryReceipt, MultiplayerSendResult } from "./multiplayer-runtime";
 import { parseA2AMessage, type A2AMessage } from "./multiplayer-contract";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
@@ -33,7 +33,13 @@ export interface WebBrokerClient {
   sendA2A?(token: string, input: MultiplayerA2ASendInput): Promise<MultiplayerSendResult>;
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
-  recordAgentTaskResult?(token: string, taskId: string, summary: string, completion?: TaskCompletionReport): Promise<{ ok: boolean; error?: string }>;
+  recordAgentTaskResult?(token: string, taskId: string, summary: string, completion?: TaskCompletionReport): Promise<{
+    ok: boolean;
+    error?: string;
+    alreadyRecorded?: boolean;
+    answerTaskId?: string;
+    answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict";
+  }>;
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number): Promise<StageClientResult>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number, options?: { bindForeground?: boolean }): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
@@ -62,6 +68,7 @@ type StructuredA2AStoreResponse = {
   duplicate?: boolean;
   message?: unknown;
   recipientAgentIds?: unknown;
+  delivery?: unknown;
 };
 
 function stageTransportFailure(error: unknown): string {
@@ -184,11 +191,29 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
       } catch {
         return { ok: false, error: "The owner broker returned an invalid structured teammate message." };
       }
+      let delivery: MultiplayerDeliveryReceipt | undefined;
+      if (result.delivery !== undefined) {
+        if (!result.delivery || typeof result.delivery !== "object" || Array.isArray(result.delivery)) {
+          return { ok: false, error: "The owner broker returned invalid teammate delivery evidence." };
+        }
+        const value = result.delivery as Record<string, unknown>;
+        if (!["queued", "pending", "partial", "failed"].includes(String(value.state))
+          || !Array.isArray(value.taskIds) || value.taskIds.some((id) => typeof id !== "string")
+          || (value.error !== undefined && typeof value.error !== "string")) {
+          return { ok: false, error: "The owner broker returned invalid teammate delivery evidence." };
+        }
+        delivery = {
+          state: value.state as MultiplayerDeliveryReceipt["state"],
+          taskIds: value.taskIds as string[],
+          ...(typeof value.error === "string" ? { error: value.error } : {}),
+        };
+      }
       return {
         ok: true,
         duplicate: result.duplicate === true,
         message,
         recipientAgentIds: result.recipientAgentIds as string[],
+        ...(delivery ? { delivery } : {}),
       };
     },
     async claimAgentInbox(token, taskIds) {
@@ -198,7 +223,13 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "cursor", token, seq } });
     },
     async recordAgentTaskResult(token, taskId, summary, completion) {
-      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary, ...(completion ? { completion } : {}) } });
+      return agentStoreRequest<{
+        ok: boolean;
+        error?: string;
+        alreadyRecorded?: boolean;
+        answerTaskId?: string;
+        answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict";
+      }>({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary, ...(completion ? { completion } : {}) } });
     },
     async taskStageApp(token, taskId, appId, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
