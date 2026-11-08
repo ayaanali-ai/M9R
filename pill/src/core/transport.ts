@@ -20,6 +20,7 @@ export interface FileDropHandlers {
 }
 
 export interface PillTransport {
+  setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
   capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean; dismissTask?: boolean };
   /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */

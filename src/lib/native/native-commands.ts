@@ -33,7 +33,7 @@ import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, 
 import { requestOwnerPipe } from "./owner-pipe";
 import { ownerPipePath } from "./web-broker-paths";
 import { canQueue, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
-import { isHumanContext, isProtectedAction } from "./approval-core";
+import { isAgentContext, isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTaskLog, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
@@ -1098,6 +1098,12 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   if (command === "pill-send") return runPillSend(io, rest.join(" "));
   if (command === "pill-decide") return runPillDecision(io, rest[0] ?? "", rest[1] ?? "");
   if (command === "pill-note") return runPillNote(io, rest.join(" "));
+  if (command === "pill-work-mode") {
+    if (isAgentContext(io.env)) { io.err("Only the owner can change the work mode."); return 1; }
+    const mode = positionals[0];
+    if (mode !== "working" && mode !== "agents-free") { io.err("Choose working or agents-free."); return 1; }
+    return runDesktopPillOwnerRequest(io, "/web/ui/work-mode", { mode }, "work mode");
+  }
   if (command === "pill-model") return runPillModel(io, positionals[0] ?? "", positionals[1], positionals[2]);
   const root = nativePaths(io).m9r;
   if (command === "feed") {

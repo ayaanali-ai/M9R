@@ -3483,6 +3483,7 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "pill-decide":
     case "pill-note":
     case "pill-model":
+    case "pill-work-mode":
     case "note":
     case "latency":
     case "cloud":

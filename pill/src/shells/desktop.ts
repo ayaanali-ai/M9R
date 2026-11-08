@@ -106,6 +106,7 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
     async selectModel(handle, model, effort) {
       await invoke("select_model", { handle, model, effort });
     },
+    async setOwnerWorkMode(mode) { await invoke("set_owner_work_mode", { mode }); },
     async saveMemory(text) {
       await invoke("save_memory", { text });
     },

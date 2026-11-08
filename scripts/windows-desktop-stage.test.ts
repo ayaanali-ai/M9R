@@ -2,10 +2,20 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { createWindowsDesktopStageManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
+import { createWindowsDesktopStageManager as createManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
 import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "../src/lib/native/desktop-input-errors";
 
 const roomId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
+// These tests exercise already owner-authorized foreground delivery/error
+// classification. Unscoped refusal is tested in owner-work-mode.test.ts.
+function createWindowsDesktopStageManager(...args: Parameters<typeof createManager>): ReturnType<typeof createManager> {
+  const manager = createManager(...args);
+  const physical = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "bringToForeground", "setWindowFrame", "setWindowState", "restoreOwnerCursorPosition"]);
+  return new Proxy(manager, { get(target, key) {
+    const method = Reflect.get(target, key);
+    return physical.has(String(key)) ? (...values: unknown[]) => manager.withForegroundAuthorization(async () => {}, () => method(...values)) : method;
+  } });
+}
 
 test("visible window inventory keeps ordinary windows whose optional shell identities are null", async () => withRoot(async (root) => {
   const window = { pid: 456, windowId: "0x123", title: "Notepad", width: 900, height: 700,

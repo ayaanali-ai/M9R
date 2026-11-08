@@ -113,6 +113,7 @@ export class Island {
       saveMemory: this.transport.capabilities?.saveMemory && this.transport.saveMemory ? (text) => this.transport.saveMemory!(text) : undefined,
       dismissTask: this.transport.capabilities?.dismissTask && this.transport.dismissTask ? (taskId) => this.transport.dismissTask!(taskId) : undefined,
       selectModel: this.transport.selectModel ? (handle, model, effort) => this.transport.selectModel!(handle, model, effort) : undefined,
+      setOwnerWorkMode: this.transport.setOwnerWorkMode ? (mode) => this.transport.setOwnerWorkMode!(mode) : undefined,
       linking: this.transport.capabilities?.linkSessions && this.transport.listSessions && this.transport.linkSession
         ? { list: (handle) => this.transport.listSessions!(handle), link: (offer, session) => this.transport.linkSession!(offer, session) }
         : undefined,

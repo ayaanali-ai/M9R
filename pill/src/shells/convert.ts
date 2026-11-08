@@ -27,7 +27,7 @@ interface UiApproval { id: string; agent?: string; provider?: string; text: stri
 interface UiModelEffort { id?: unknown; label?: unknown }
 interface UiModelOption { id?: unknown; label?: unknown; efforts?: unknown; description?: unknown }
 interface UiModelAgent { handle?: unknown; provider?: unknown; availability?: unknown; models?: unknown; currentModel?: unknown; currentEffort?: unknown; selectedModel?: unknown; selectedEffort?: unknown; status?: unknown }
-export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; models?: unknown; desktopPill?: boolean }
+export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; models?: unknown; desktopPill?: boolean; ownerWorkMode?: unknown }
 
 const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed", "seen", "unknown", "not_connected"]);
 
@@ -100,7 +100,7 @@ export function fromUiState(message: UiState): PillSnapshot {
     .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: threadText(t.text) }));
   const collaboration = sanitizePillCollaboration(message.collaboration) ?? collaborationFromAgents(agents);
   const models = modelState(message.models);
-  return { agents, collaboration, approvals, thread: replies, ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
+  return { agents, collaboration, approvals, thread: replies, ...(message.ownerWorkMode === "working" || message.ownerWorkMode === "agents-free" ? { ownerWorkMode: message.ownerWorkMode } : {}), ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
 }
 
 // ── Desktop shell: the engine's feed.json merged with web-activity.json ────────────────────────────

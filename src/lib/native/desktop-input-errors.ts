@@ -4,6 +4,7 @@ export type DesktopInputGateCode =
   | "position-unconfirmed"
   | "overlay-not-visible"
   | "foreground-lease"
+  | "foreground-approval"
   | "background-unavailable"
   | "native-dispatch-unavailable"
   | "driver-refused"

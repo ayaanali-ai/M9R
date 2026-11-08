@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { createTaskDesktopStageService } from "@/lib/native/task-desktop-stage";
+import { readOwnerWorkMode, setOwnerWorkMode } from "@/lib/native/owner-work-mode";
 import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
 import { loadAgentsConfig, projectRoomId } from "@/lib/native/web-live-sessions";
@@ -60,6 +61,8 @@ async function main(): Promise<void> {
   // A note saved from the pill lands in the same project-room memory agents read at session start.
   const sessionOwner: { current?: ReturnType<typeof createManagedProviderOwner> } = {};
   const ui = createWebUiBridge({
+    ownerWorkMode: () => { try { return readOwnerWorkMode(root); } catch { return "working"; } },
+    setOwnerWorkMode: (mode) => setOwnerWorkMode(root, mode),
     colorFor: (handle) => colorStore.colorFor(handle),
     modelState: () => sessionOwner.current?.modelState(),
     selectModel: (handle, selection) => sessionOwner.current

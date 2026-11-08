@@ -10,6 +10,7 @@ import { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService } from "../src/lib/native/task-desktop-stage";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
+import { setOwnerWorkMode } from "../src/lib/native/owner-work-mode";
 
 // Phase 0, T3 (build order item 3, per Muse's exact spec): a real app
 // (Notepad) gets real unsaved text typed into it in the background, while a
@@ -162,6 +163,7 @@ function withRoot<T>(run: (root: string) => Promise<T>): Promise<T> {
 }
 
 function realService(root: string, store: ReturnType<typeof createLocalStore>, filePath: string) {
+  setOwnerWorkMode(root, "agents-free"); // owner explicitly permits this foreground dialog acceptance harness
   const manager = createWindowsDesktopStageManager({ nativeHostPath: NATIVE_HOST, root, terminal: true, env: {} });
   const driver = createCuaStageDriver({ manager });
   const service = createTaskDesktopStageService({
@@ -288,7 +290,7 @@ test("Phase 0 T3: background typing never disturbs a real foreground typer, and 
       // delivery needs to tolerate.
       typer.stop();
       typer = undefined;
-      await manager.bringToForeground(anchor!.pid, anchor!.windowId);
+      await manager.withForegroundAuthorization(async () => {}, () => manager.bringToForeground(anchor!.pid, anchor!.windowId));
 
       // Verify the lease actually took, not just that the call didn't throw:
       // GetForegroundWindow must really report this window before WM_CLOSE
@@ -300,7 +302,7 @@ test("Phase 0 T3: background typing never disturbs a real foreground typer, and 
         leaseConfirmed = current.pid === anchor!.pid && current.windowId.toLowerCase() === anchor!.windowId.toLowerCase();
         if (!leaseConfirmed) {
           console.log(`[T3] foreground lease not yet confirmed (attempt ${attempt}): current foreground is ${JSON.stringify(current)}`);
-          if (attempt % 5 === 4) await manager.bringToForeground(anchor!.pid, anchor!.windowId);
+          if (attempt % 5 === 4) await manager.withForegroundAuthorization(async () => {}, () => manager.bringToForeground(anchor!.pid, anchor!.windowId));
           await delay(100);
         }
       }
@@ -323,7 +325,7 @@ test("Phase 0 T3: background typing never disturbs a real foreground typer, and 
       // wired to closing ONE TAB, a distinct, more specific action in the
       // app's own tab-management code. Ctrl+W (real SendInput, same lease)
       // closes only the current tab -- exactly this document.
-      await manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["ctrl", "w"]);
+      await manager.withForegroundAuthorization(async () => {}, () => manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["ctrl", "w"]));
 
       // Notepad's "Do you want to save changes?" prompt is a WinUI
       // ContentDialog rendered inside this same main window (not a separate
@@ -340,7 +342,7 @@ test("Phase 0 T3: background typing never disturbs a real foreground typer, and 
       // for logging (never gating the keystroke), then the real Enter with
       // no further UIA calls in between.
       await delay(800);
-      await manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["enter"]);
+      await manager.withForegroundAuthorization(async () => {}, () => manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["enter"]));
       await delay(1000);
 
       // Real on-disk proof, never trust the resolved promise alone.
@@ -368,6 +370,7 @@ function readTestWindowModified(windowId: string): string {
 }
 
 function realTestWindowService(root: string, store: ReturnType<typeof createLocalStore>) {
+  setOwnerWorkMode(root, "agents-free");
   const manager = createWindowsDesktopStageManager({ nativeHostPath: NATIVE_HOST, root, terminal: true, env: {} });
   const driver = createCuaStageDriver({ manager });
   const service = createTaskDesktopStageService({

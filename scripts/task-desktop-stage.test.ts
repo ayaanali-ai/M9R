@@ -14,6 +14,7 @@ import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT, discoverInstalledW
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
 import { createMultiplayerDispatchFence } from "../src/lib/native/multiplayer-dispatch-fence";
+import { setOwnerWorkMode } from "../src/lib/native/owner-work-mode";
 
 type TestVisibleWindow = { pid: number; windowId: string; title: string; width: number; height: number;
   appName?: string; processName?: string | null; className?: string; zOrder?: number; processPath?: string | null; appUserModelId?: string | null };
@@ -21,6 +22,7 @@ type TestVisibleWindow = { pid: number; windowId: string; title: string; width: 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
   readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>, fenced = false) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
+  setOwnerWorkMode(root, "agents-free"); // legacy-path regression fixture; safe-default coverage is separate
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
   const { task } = store.addTask({ from: "you", to: "codex", goal: "Use a stage", origin: "human_typed", idempotencyKey: "stage-one", targetSession: "session-one" });

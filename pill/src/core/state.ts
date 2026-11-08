@@ -45,6 +45,7 @@ export interface PillMedia {
 }
 
 export interface PillSnapshot {
+  ownerWorkMode?: "working" | "agents-free";
   agents: Array<{ handle: string; provider: Provider; state: AgentRunState; activity: string[]; task?: string }>;
   /** Optional structured collaboration layer; older hosts may omit it. */
   collaboration?: PillCollaboration;
@@ -196,6 +197,7 @@ class AppState {
   brokerConnection: "unknown" | "connecting" | "connected" | "disconnected" = "unknown";
   collaboration: PillCollaboration | null = null;
   models: PillModelState | null = null;
+  ownerWorkMode: "working" | "agents-free" = "working";
   decisionError: { approvalId: string; message: string } | null = null;
 
   lastActivity = performance.now();
@@ -253,6 +255,7 @@ class AppState {
     // A tick that doesn't carry "models" at all is a gap in that message, not a real "no agents" report --
     // keep whatever we last knew rather than flashing the picker empty. An explicit `{ agents: [] }` still clears it.
     if (snapshot.models !== undefined) this.models = snapshot.models;
+    if (snapshot.ownerWorkMode !== undefined) this.ownerWorkMode = snapshot.ownerWorkMode;
     // Same rule: a tick that leaves these out is a gap, not "no limits" or "nothing playing".
     if (snapshot.usage !== undefined) this.usage = snapshot.usage;
     if (snapshot.media !== undefined) this.media = snapshot.media;

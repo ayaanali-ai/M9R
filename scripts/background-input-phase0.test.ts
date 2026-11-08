@@ -9,6 +9,7 @@ import { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { createTaskDesktopStageService } from "../src/lib/native/task-desktop-stage";
 import { createWindowsDesktopStageManager } from "../src/lib/native/windows-desktop-stage";
+import { setOwnerWorkMode } from "../src/lib/native/owner-work-mode";
 
 // Phase 0 concurrency proof (build order item 3). Everything here is real: a
 // real native-input-host process, real OS windows (via its test-only
@@ -63,6 +64,7 @@ function withRoot<T>(run: (root: string) => Promise<T>): Promise<T> {
 }
 
 function realService(root: string, store: ReturnType<typeof createLocalStore>) {
+  setOwnerWorkMode(root, "agents-free"); // permit disposable fixture startup; measured writes remain background-only
   const manager = createWindowsDesktopStageManager({ nativeHostPath: NATIVE_HOST, root, terminal: true, env: {} });
   const driver = createCuaStageDriver({ manager });
   const service = createTaskDesktopStageService({

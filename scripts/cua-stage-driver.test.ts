@@ -107,12 +107,14 @@ test("foreground input dispatches immediately regardless of concurrent owner poi
 }));
 
 function createCuaStageDriver(deps: CuaStageDriverDependencies & { skipNativeFixturePreload?: boolean } = {}) {
+  const manager = deps.manager ?? createWindowsDesktopStageManager(deps.stage);
   let connected: Awaited<ReturnType<NonNullable<CuaStageDriverDependencies["connectRuntime"]>>>;
   const injectedLoadSdk = deps.loadSdk;
   const preloadedSdk = deps.skipNativeFixturePreload ? undefined : injectedLoadSdk?.();
   if (preloadedSdk) void preloadedSdk.catch(() => undefined);
-  return createCuaStageDriverCore({
+  const driver = createCuaStageDriverCore({
     ...deps,
+    manager,
     ...(preloadedSdk ? { loadSdk: async () => await preloadedSdk } : {}),
     connectRuntime: async (sdk) => {
       const driver = sdk.CuaDriver.create(undefined);
@@ -120,6 +122,12 @@ function createCuaStageDriver(deps: CuaStageDriverDependencies & { skipNativeFix
       return connected;
     },
   });
+  // Existing dispatch regressions exercise the explicitly authorized legacy
+  // foreground route. The owner-work-mode suite tests the default/refusal gate.
+  return new Proxy(driver, { get(target, key) {
+    const value = Reflect.get(target, key);
+    return typeof value === "function" ? (...args: unknown[]) => manager.withForegroundAuthorization(async () => {}, () => value(...args)) : value;
+  } });
 }
 
 test("native window capture owns its dimensions instead of inheriting retired Cua frame flags", async () => withRoot(async (root) => {

@@ -454,13 +454,20 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime());
   }
   const streamContext = new AsyncLocalStorage<string>();
+  const foregroundAuthority = new AsyncLocalStorage<(request: Record<string, unknown>) => Promise<void>>();
+  const foregroundOperations = new Set(["bringToForeground", "setWindowState", "setWindowFrame", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "restoreCursorPosition"]);
   const hostFactory = deps.nativeHostFactory ?? (() => createPersistentWindowsStageHost(
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe")));
   const persistentHost = deps.invokeNative ? undefined : hostFactory();
   const streamHosts = new Map<string, ReturnType<typeof hostFactory>>();
   let managerClosed = false;
-  const invokeNative = (request: Record<string, unknown>): Promise<NativeStageResponse> => {
+  const invokeNative = async (request: Record<string, unknown>): Promise<NativeStageResponse> => {
     if (managerClosed) return Promise.reject(new Error("The native desktop-stage manager is closed."));
+    if (foregroundOperations.has(String(request.op))) {
+      const authorize = foregroundAuthority.getStore();
+      if (!authorize) throw new DesktopInputNotDispatchedError("Foreground dispatch requires an owner-authorized task turn; no input was sent.", "foreground-approval");
+      await authorize(request);
+    }
     if (deps.invokeNative) return deps.invokeNative(request);
     const streamId = streamContext.getStore();
     if (!streamId) return persistentHost!.invoke(request);
@@ -472,6 +479,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!/^stream-[a-f0-9]{24}$/.test(streamId)) throw new Error("Invalid native input-stream identity.");
     if (managerClosed) throw new Error("The native desktop-stage manager is closed.");
     return streamContext.run(streamId, operation);
+  }
+  function withForegroundAuthorization<T>(authorize: (request: Record<string, unknown>) => Promise<void>, operation: () => Promise<T>): Promise<T> {
+    return foregroundAuthority.run(authorize, operation);
   }
   function closeInputStream(streamId: string): void {
     streamHosts.get(streamId)?.close();
@@ -1362,7 +1372,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
     close: closeManager,
-    withInputStream, closeInputStream, attachSharedWindow,
+    withInputStream, closeInputStream, attachSharedWindow, withForegroundAuthorization,
     bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
 }
 

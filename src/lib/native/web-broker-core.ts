@@ -135,6 +135,7 @@ export type RoomMode = "watch" | "ask" | "hands-off";
 export const ROOM_MODES: readonly RoomMode[] = ["watch", "ask", "hands-off"];
 
 export interface StageApprovalRequest {
+  signal?: AbortSignal;
   agent: string;
   provider: string;
   sessionId: string;
@@ -1282,6 +1283,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
    * and resolves true only on an explicit owner approve. Deny and timeout both resolve false.
    */
   function requestStageApproval(request: StageApprovalRequest): Promise<boolean> {
+    if (request.signal?.aborted) return Promise.resolve(false);
     if (stopState.state === "stopped") return Promise.resolve(false);
     const id = newId();
     const createdAt = now();
@@ -1330,6 +1332,16 @@ export function createWebBroker(deps: WebBrokerDeps) {
         resolveDecision(decision === "approve");
       },
     });
+    const cancel = () => {
+      if (!approvals.delete(id)) return;
+      clearTimeout(timer);
+      audit("action.denied", `${risk}: canceled`);
+      resolveDecision(false);
+      emit({ kind: "approvals-changed" });
+    };
+    request.signal?.addEventListener("abort", cancel, { once: true });
+    void decided.then(() => request.signal?.removeEventListener("abort", cancel));
+    if (request.signal?.aborted) cancel();
     advanceFeed();
     emit({ kind: "approval", id, agent: request.agent, provider: request.provider, step: request.step });
     void decided.then(() => emit({ kind: "approvals-changed" }));

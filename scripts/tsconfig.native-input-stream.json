@@ -5,6 +5,7 @@
     "../src/lib/native/agent-input-stream.ts",
     "../src/lib/native/task-desktop-stage.ts",
     "./agent-input-stream.test.ts",
+    "./owner-work-mode.test.ts",
     "./task-desktop-stage.test.ts",
     "./native-control-region.test.ts",
     "./native-input-channels.test.ts",

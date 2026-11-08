@@ -15,6 +15,7 @@ import { buildWidgets } from "./widgets";
 import { speak, voiceName } from "../core/voice";
 
 export interface ViewActions {
+  setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
   setView(v: IslandViewName): void;
   collapse(): void;
   setFocus(id: string): void;
@@ -91,6 +92,14 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 // ── Header ───────────────────────────────────────────────────────
 
 export function buildHeader(actions: ViewActions): ViewHost {
+  let changingMode = false;
+  const workMode = h("button", { title: "Choose whether agents may use foreground input", onclick: async () => {
+    if (!actions.setOwnerWorkMode || changingMode) return;
+    changingMode = true; workMode.disabled = true;
+    try { await actions.setOwnerWorkMode(State.ownerWorkMode === "working" ? "agents-free" : "working"); }
+    catch { workMode.title = "Work mode could not be changed. Try again when M9R is connected."; }
+    finally { changingMode = false; workMode.disabled = false; }
+  } });
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
   const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
@@ -106,12 +115,16 @@ export function buildHeader(actions: ViewActions): ViewHost {
     "div",
     { id: "header" },
     h("div", { class: "tabs" }, tabHome, tabChat),
-    h("div", { class: "header-actions" }, brokerStatus, gearBtn, soundBtn),
+    h("div", { class: "header-actions" }, brokerStatus, workMode, gearBtn, soundBtn),
   );
 
   return {
     el,
     sync() {
+      workMode.hidden = !actions.setOwnerWorkMode;
+      workMode.textContent = State.ownerWorkMode === "working" ? "I'm Working" : "Agents Free";
+      workMode.setAttribute("aria-pressed", String(State.ownerWorkMode === "agents-free"));
+      workMode.title = State.ownerWorkMode === "working" ? "Background work continues. Foreground turns need your approval." : "Agents may use foreground input. Click to protect your current work.";
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       tabChat.classList.toggle("on", v === "prompt");

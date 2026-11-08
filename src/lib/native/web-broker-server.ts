@@ -447,7 +447,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     "/web/mode", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
     "/web/actions/approve", "/web/actions/deny", "/web/aware/members/invite", "/web/aware/members/remove",
     "/web/aware/disclosures/decision", "/web/protocol",
-    "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note", "/web/ui/model",
+    "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note", "/web/ui/model", "/web/ui/work-mode",
   ]);
   const ownerPipeReadPaths = new Set(["/web/aware/members", "/web/aware/disclosures", "/web/diagnostics/latency"]);
   const ownerReply = (ok: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ ok, ...extra });
@@ -522,6 +522,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       } else if (request.path === "/web/ui/approve" || request.path === "/web/ui/deny") {
         if (keys.length !== 1 || typeof body.id !== "string" || !body.id || body.id.length > 128) return ownerReply(false, { error: "desktop pill approval ID is invalid" });
         message = { type: request.path.endsWith("/approve") ? "ui-approve" : "ui-deny", id: body.id };
+      } else if (request.path === "/web/ui/work-mode") {
+        if (keys.length !== 1 || (body.mode !== "working" && body.mode !== "agents-free")) return ownerReply(false, { error: "invalid owner work mode" });
+        message = { type: "ui-work-mode", mode: body.mode };
       } else if (request.path === "/web/ui/model") {
         if (keys.some((key) => !["handle", "model", "effort"].includes(key))
           || typeof body.handle !== "string" || !/^@?[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(body.handle)

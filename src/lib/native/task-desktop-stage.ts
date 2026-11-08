@@ -38,6 +38,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { discoverInstalledWindowsApp, discoverInstalledWindowExecutable } from "./windows-installed-apps";
 import { createBrowserSpaceLedger, type BrowserSpaceLedger } from "./browser-space-ledger";
 import { agentInputStreamId, createAgentInputStreams, type InputStreamContext, type InputStreamIdentity } from "./agent-input-stream";
+import { createOwnerWorkPolicy } from "./owner-work-mode";
 
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
@@ -232,6 +233,7 @@ export function createTaskDesktopStageService(input: {
   mutationFence?: MultiplayerDispatchFence;
 }) {
   const root = input.store.root;
+  const ownerWorkPolicy = createOwnerWorkPolicy(root, () => input.approvals?.());
   const browserSpaces: BrowserSpaceLedger = createBrowserSpaceLedger(root);
   function bindBrowserSpace(stageName: string, executable: string, pid: number, windowId: string): void {
     const browser = stageBrowserKind(executable);
@@ -407,7 +409,7 @@ export function createTaskDesktopStageService(input: {
     });
   }
 
-  function inInputStream<T>(identity: InputStreamIdentity, taskId: string, kind: string,
+  function inInputStream<T>(identity: InputStreamIdentity & { provider?: string }, taskId: string, kind: string,
     run: (context: InputStreamContext) => Promise<T>): Promise<T> {
     return inputStreams.run(identity, { taskId, kind }, async (context) => {
       recordStageTiming(taskId, { phase: "queue_wait", startedAt: new Date(context.queuedAt).toISOString(),
@@ -417,9 +419,17 @@ export function createTaskDesktopStageService(input: {
       // The native protocol remains sequential within a process. A stream gets
       // its own persistent helper, so a blocked UIA call cannot queue other agents
       // behind that helper's one active request.
+      const operation = () => ownerWorkPolicy.run({ agent: identity.handle, provider: identity.provider ?? identity.handle,
+        sessionId: identity.sessionId, taskId, signal: context.signal, assertActive: () => {
+          const credential = input.store.identityCredentialForSession(identity.provider ?? identity.handle, identity.sessionId);
+          if (!credential || normalizeHandle(credential.identity.handle) !== normalizeHandle(identity.handle)) throw new DesktopInputNotDispatchedError("This agent turn is no longer active; no foreground input was sent.", "foreground-approval");
+          authorize(credential.token, taskId, "owner-preview");
+          if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new DesktopInputNotDispatchedError("Computer control was revoked; no foreground input was sent.", "foreground-approval");
+        } }, () =>
+        manager.withForegroundAuthorization(ownerWorkPolicy.authorize, () => run(context)));
       const result = typeof manager.withInputStream === "function"
-        ? await manager.withInputStream(context.streamId, () => run(context))
-        : await run(context);
+        ? await manager.withInputStream(context.streamId, operation)
+        : await operation();
       return result && typeof result === "object"
         ? { ...result, inputStream: { id: context.streamId } } as T
         : result;
@@ -1125,11 +1135,12 @@ export function createTaskDesktopStageService(input: {
           : { ...result, operationReceipt: { operationId, status: "uncertain", driverReturned: true }, actionExecuted: true,
             nextStep: "The launch completed, but its durable receipt could not be finalized; inspect the stage before issuing another launch." };
       };
-      const presentAndFocusOwnerWindow = async (pid: number, windowId: string, coordinationKey?: string) => {
+      const presentAndFocusOwnerWindow = async (pid: number, windowId: string, coordinationKey?: string, launched = false) => {
         authorize(token, taskId, mode);
         if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Desktop computer control was revoked.");
         await manager.presentOwnerWindow(name, pid, windowId, coordinationKey);
         await manager.attachWindow(name, String(pid), windowId, appId, coordinationKey);
+        if (launched) ownerWorkPolicy.carryLaunchGrant(appId, pid, windowId);
         const focused = await driver.focusWindow(name, identity);
         return focused.capture;
       };
@@ -1141,6 +1152,7 @@ export function createTaskDesktopStageService(input: {
         if (claim.state === "uncertain") return { operationReceipt: { operationId, status: "uncertain", updatedAt: claim.updatedAt }, actionExecuted: false,
           nextStep: "Inspect the stage before issuing another launch; the previous launch outcome is not replayable." };
       }
+      let launchAttempted = false;
       try {
       let target: StageLaunchTarget;
       if (input.resolveStageAppForTest) {
@@ -1306,6 +1318,8 @@ export function createTaskDesktopStageService(input: {
         const launchSpec = kind
           ? ownedBrowserLaunch(root, name, approved)
           : approved;
+        await ownerWorkPolicy.authorize({ op: "launch", windowId: `app:${appId}` });
+        launchAttempted = true;
         const child = launchStageApp(launchSpec, { windowsHide: false, cwd: stageAppLaunchCwd(task.cwd) });
         let launchError: Error | undefined;
         child.on("error", (error) => { launchError = error; });
@@ -1364,7 +1378,7 @@ export function createTaskDesktopStageService(input: {
               // An explicit owner-preview app launch owns this focus transition:
               // activate the exact new HWND once, verify its PID/HWND natively, and
               // return that same capture. No taskbar hunt or extra observe round trip.
-              const capture = await presentAndFocusOwnerWindow(selected.pid, selected.windowId, coordinationKey);
+              const capture = await presentAndFocusOwnerWindow(selected.pid, selected.windowId, coordinationKey, true);
               return finishLaunch({ name, taskId, appId, running: true, reused: false, view: "app", foregroundConfirmed: true, capture });
             }
             // Start responsive, then back off slightly under a busy desktop so
@@ -1431,6 +1445,10 @@ export function createTaskDesktopStageService(input: {
       const beforeTargetWindows = await matchesLaunchedWindows(beforeLaunchWindows);
       const beforeTargetWindowKeys = new Set(beforeTargetWindows.map(windowIdentityKey));
       const beforeBrowserWindows = personalBrowser ? beforeLaunchWindowKeys : undefined;
+      // A new process can activate itself even with STARTUPINFO's hidden hint.
+      // Until a specific launcher proves otherwise, ask before that side effect.
+      await ownerWorkPolicy.authorize({ op: "launch", windowId: `app:${appId}` });
+      launchAttempted = true;
       const child = launchStageApp(ownedBrowserLaunch(root, name, approved), { windowsHide: true, cwd: stageAppLaunchCwd(task.cwd) });
       let spawnError: Error | undefined;
       child?.on("error", (error) => { spawnError = error; });
@@ -1543,6 +1561,10 @@ export function createTaskDesktopStageService(input: {
       }
       } catch (error) {
         if (receiptInput) {
+          if (error instanceof DesktopInputNotDispatchedError && !launchAttempted) {
+            input.store.releaseStageOperation(receiptInput);
+            throw error;
+          }
           try { input.store.settleStageOperation({ ...receiptInput, state: "uncertain" }); } catch { /* preserve the running receipt to block replay */ }
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`The desktop launch outcome is uncertain; inspect the stage before issuing another launch. ${detail}`, { cause: error });
