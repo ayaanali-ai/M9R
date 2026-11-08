@@ -61,7 +61,10 @@ async function waitForExit(pid: number) {
 
 test("real native streams overlap SetValue calls to distinct controls of one HWND; the same control remains fenced", { skip: process.platform !== "win32", timeout: 60_000 }, async () => {
   const { child, info } = await startForm();
-  const root = mkdtempSync(join(tmpdir(), "m9r-native-stream-proof-"));
+  // The Windows application-container temp directory can reject the lock
+  // directory rename used by the local store. Keep the disposable store under
+  // this test checkout; the native barrier and fixture state remain in temp.
+  const root = mkdtempSync(join(resolve(fileURLToPath(new URL("../", import.meta.url))), ".tmp-native-stream-proof-"));
   const barrier = mkdtempSync(join(tmpdir(), "m9r-native-stream-barrier-"));
   const priorBarrier = process.env.M9R_NATIVE_TEST_BARRIER_DIR;
   process.env.M9R_NATIVE_TEST_BARRIER_DIR = barrier;
@@ -91,7 +94,11 @@ test("real native streams overlap SetValue calls to distinct controls of one HWN
     const observe = (token: string, taskId: string) => service.act(token, taskId, { kind: "read_structure", view: "app" }, "background") as Promise<CuaStageStructure>;
     const [a, b] = await Promise.all([observe(one.token, taskOne.id), observe(two.token, taskTwo.id)]);
     const title = fields(a)[0]!; const caption = fields(b)[1]!;
-    const before = { foreground: await manager.currentForegroundWindow(), cursor: await manager.getOwnerCursorPosition() };
+    // The desktop may foreground an unrelated elevated/system surface whose
+    // process generation is intentionally unavailable to the fixture host.
+    // This proof only needs the owner pointer baseline and the target's own
+    // no-foreground/input counters.
+    const beforeCursor = await manager.getOwnerCursorPosition();
     const inputBefore = await waitState(info.statePath, { title: "", caption: "" });
     await Promise.all([
       service.act(one.token, taskOne.id, { kind: "replace_element", ref: title.ref, text: "Title from Codex", view: "app" }, "background", "title-write"),
@@ -111,7 +118,7 @@ test("real native streams overlap SetValue calls to distinct controls of one HWN
     assert.equal(inputAfter.input.injectedKeyboard, inputBefore.input.injectedKeyboard, "no synthetic keyboard input was emitted");
     const cursorAfter = await manager.getOwnerCursorPosition();
     const physicalOwnerMoved = inputAfter.input.physicalMouse > inputBefore.input.physicalMouse;
-    if (!physicalOwnerMoved) assert.deepEqual(cursorAfter, before.cursor);
+    if (!physicalOwnerMoved) assert.deepEqual(cursorAfter, beforeCursor);
     else process.stdout.write("Cursor coordinate comparison inconclusive: physical owner mouse input occurred; zero-injected-input check still applies.\n");
 
     // Both providers independently observe the same current title field. Their
@@ -132,6 +139,9 @@ test("real native streams overlap SetValue calls to distinct controls of one HWN
       "closing one stream's helper leaves its peer's native channel usable without requiring foreground visibility");
     process.stdout.write(`Native gated-stress overlap verified (not a latency benchmark): ${JSON.stringify(evidence.slice(0, 2).map(({ helperPid, streamId, startedUnixNanos, endedUnixNanos }) =>
       ({ helperPid, streamId, startedUnixNanos, endedUnixNanos })))}\n`);
+  } catch (error) {
+    process.stderr.write(`Native same-window stream test failed before cleanup: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    throw error;
   } finally {
     await service.close(); manager.close();
     await Promise.all([...new Set(evidence.map((event) => event.helperPid))].map(waitForExit));
