@@ -362,8 +362,10 @@ export type CuaStageInputOptions = {
   expectedRole?: string;
   expectedLabel?: string;
   signal?: AbortSignal;
-  /** Internal stage policy; background stages may never escalate to the owner's foreground. */
+  /** Internal stage policy: background work may request one owner-approved foreground fallback. */
   deliveryMode?: "background" | "owner-preview";
+  /** Only used after an exact semantic route is unavailable; native owner policy still authorizes dispatch. */
+  allowForegroundEscalation?: boolean;
   /** Internal region-fence contract: this action may not fall back to shared caret/OS input. */
   semanticOnly?: boolean;
 };
@@ -1051,7 +1053,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
 
   async function nativeReplaceTextAtScreenPoint(pid: number, windowId: string | bigint, x: number, y: number, text: string,
-    input: { session: string; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview"; preferForeground?: boolean }): Promise<CuaStageActionOutcome> {
+    input: { session: string; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview"; preferForeground?: boolean; allowForegroundEscalation?: boolean }): Promise<CuaStageActionOutcome> {
     const targetWindowId = windowId.toString();
     const outcome = await driverInputAction("type_text", {
       pid, window_id: Number(targetWindowId), x, y, text, session: input.session,
@@ -1059,6 +1061,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
       signal: input.signal,
       deliveryMode: input.deliveryMode,
       preferForeground: input.preferForeground,
+      allowForegroundEscalation: input.allowForegroundEscalation,
       nativeForeground: nativeStageInput(pid, targetWindowId, async () => {
         // Replacement is one logical action but three OS dispatches. If a later
         // SendInput fails after an earlier event was accepted, retrying the
@@ -1591,7 +1594,7 @@ function backgroundRefusalMessage(value: unknown): string {
  * into a reported failure.
  */
 async function driverInputAction(name: string, args: Record<string, unknown>, fallback: string,
-  options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview";
+  options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview"; allowForegroundEscalation?: boolean;
     nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void> } } = {}) {
   assertNotAbortedBeforeInput(options.signal);
   // Omitted mode follows the owner-visible stage contract. Background is an
@@ -1610,9 +1613,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     const targetPid = pid as number;
     const targetWindowId = windowId as number;
     const saved = foregroundPointer;
-    // The owner has explicitly opted into sharing real input: the agent dispatches
-    // regardless of concurrent owner pointer movement. Only the pointer's resting
-    // position is preserved below, for a clean restore after the action.
+    // The manager's native owner-work policy authorizes this exact foreground
+    // operation before it reaches this callback. Pointer movement is not used
+    // as a dispatch gate; its resting position is preserved for restoration.
     assertNotAbortedBeforeInput(options.signal);
     if (!options.nativeForeground) throw new DesktopInputNotDispatchedError(
       "Native desktop input is unavailable for the exact target window; no input was sent.", "native-dispatch-unavailable");
@@ -1647,10 +1650,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       ...(restoreError ? { summary: "Native input was delivered. Restoring the owner's pointer was unavailable; this presentation detail did not affect delivery." } : {}) };
   };
   const runForeground = async () => {
-    // The owner has explicitly opted into agents sharing real foreground input on
-    // their own machine: concurrent pointer movement is never a reason to wait or
-    // refuse. Only the resting position is captured here, purely so it can be
-    // restored after the action -- not to gate dispatch on it.
+    // The owner-work policy inside the native manager gates the input operation.
+    // Pointer movement is not used as a dispatch gate; its resting position is
+    // captured only for restoration after the authorized action.
     const saved = await ownerPointer.get().catch(() => undefined);
     foregroundPointer = saved;
     return timed("foreground-lease", () => foregroundLease.run(name, options.signal, deliverForeground), {
@@ -1664,9 +1666,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   };
   // Semantic UIA actions are dispatched headlessly by their call sites. A
   // background request must never fall through to SendInput, because Windows
-  // delivers it to the real foreground window and physical pointer. Only the
-  // owner-visible mode may acquire the short global input lease.
-  if (deliveryMode === "background") {
+  // delivers it to the real foreground window and physical pointer. The one
+  // explicit fallback flag may pass this planner guard, but the native manager
+  // still requires a scoped owner approval or Agents Free mode before dispatch.
+  if (deliveryMode === "background" && !options.allowForegroundEscalation) {
     throw new DesktopInputNotDispatchedError(
       `${fallback} This target has no supported headless semantic route; background mode sent no input and did not activate a window.`,
       "background-unavailable",
@@ -1686,6 +1689,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     nativeInput?: () => Promise<boolean>;
     preferForeground?: boolean;
     deliveryMode?: "background" | "owner-preview";
+    allowForegroundEscalation?: boolean;
     delayMs?: number;
     nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void> };
     signal?: AbortSignal;
@@ -1730,8 +1734,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           } catch (error) { console.error(`[deliverTextToExactWindow] listChildWindowClasses also failed: ${error instanceof Error ? error.message : error}`); }
         }
       }
-      await manager.sendTextToWindow(input.pid, target, input.text);
-      return { status: "unverifiable", summary: "Posted text to the target window's own message queue (WM_CHAR, no OS foreground required); application effect requires verification." };
+      try {
+        await manager.sendTextToWindow(input.pid, target, input.text);
+        return { status: "unverifiable", summary: "Posted text to the target window's own message queue (WM_CHAR, no OS foreground required); application effect requires verification." };
+      } catch (error) {
+        // The native helper explicitly proved zero WM_CHAR delivery. Only that
+        // typed pre-dispatch result may move to the owner-approved foreground
+        // route; an uncertain outcome must never be replayed.
+        if (!(error instanceof DesktopInputNotDispatchedError)
+          || error.code !== "native-dispatch-unavailable" || !input.allowForegroundEscalation) throw error;
+      }
     }
 
     return driverInputAction("type_text", {
@@ -1744,6 +1756,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       preferForeground: input.preferForeground,
       deliveryMode: input.deliveryMode,
       signal: input.signal,
+      allowForegroundEscalation: input.allowForegroundEscalation,
       nativeForeground: input.nativeForeground,
     });
   }
@@ -2589,7 +2602,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         await inspectOwnerDesktop(name, identity);
         forgetDesktopInputTarget(name, identity);
         return nativeReplaceTextAtScreenPoint(point.target.pid, point.target.windowId, point.screenPoint.x, point.screenPoint.y, text,
-          { session: session.session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
+          { session: session.session, signal: options.signal, deliveryMode: options.deliveryMode,
+            preferForeground: options.confirmFocusForeground, allowForegroundEscalation: options.allowForegroundEscalation });
       });
       invalidateDesktopCaptures();
       return { capture: await captureOwnerDesktop(name, identity, true, true), outcome };
@@ -2613,7 +2627,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         }
         return await deliverTextToExactWindow({ session: session.session, pid: selected.pid,
           windowId: selected.windowId, selected, text, delayMs, preferForeground: options.confirmFocusForeground,
-          deliveryMode: options.deliveryMode,
+          deliveryMode: options.deliveryMode, allowForegroundEscalation: options.allowForegroundEscalation,
           nativeForeground: nativeStageInput(selected.pid, selected.windowId, () => manager.sendText(selected.pid, selected.windowId.toString(), text)),
           signal: options.signal });
       } catch (error) {
@@ -3195,11 +3209,13 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         } else {
           const screenPoint = await localToScreenPoint(pid, popupWindowId, options.x, options.y, before.width, before.height);
           outcome = await nativeReplaceTextAtScreenPoint(pid, popupWindowId, screenPoint.x, screenPoint.y, text,
-            { session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
+            { session, signal: options.signal, deliveryMode: options.deliveryMode,
+              preferForeground: options.confirmFocusForeground, allowForegroundEscalation: options.allowForegroundEscalation });
         }
       } else {
         outcome = await deliverTextToExactWindow({ session, pid, windowId: popupWindowId, text, delayMs,
           preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode,
+          allowForegroundEscalation: options.allowForegroundEscalation,
           nativeForeground: nativeStageInput(pid, popupWindowId, () => manager.sendText(pid, popupWindowId.toString(), text)),
           signal: options.signal });
       }
@@ -3531,7 +3547,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         }
         const screen = await localToScreenPoint(pid, windowId, options.x, options.y, before.width, before.height, before.windowBounds);
         const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text,
-          { session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
+          { session, signal: options.signal, deliveryMode: options.deliveryMode,
+            preferForeground: options.confirmFocusForeground, allowForegroundEscalation: options.allowForegroundEscalation });
         return { capture: stageCapture(await captureWindow(), now), outcome };
       }
       // A remembered field from a window that is no longer this one (e.g. the
@@ -3546,7 +3563,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, before);
       }
       const outcome = await deliverTextToExactWindow({ session, pid, windowId,
-        text, selected,
+        text, selected, allowForegroundEscalation: options.allowForegroundEscalation,
         delayMs, preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode,
         nativeForeground: nativeStageInput(pid, windowId, () => manager.sendText(pid, windowId.toString(), text)),
         signal: options.signal });
@@ -3669,6 +3686,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         pid, window_id: Number(windowId), x: point.x, y: point.y, button: "left", count: 1, session,
       }, "Cua Driver could not click the selected accessibility element.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        allowForegroundEscalation: options.allowForegroundEscalation,
         nativeForeground: nativeStageInput(pid, windowId, async () => {
             const screen = await localToScreenPoint(pid, windowId, point.x, point.y, selected.frame.width, selected.frame.height, selected.frame.windowBounds);
             await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {});
@@ -3732,6 +3750,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         by: "line", amount: 1, session,
       }, "Cua Driver could not scroll the observed container by one wheel notch.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        allowForegroundEscalation: options.allowForegroundEscalation,
         nativeForeground: nativeStageInput(pid, windowId, () => manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, signedAmount, horizontal ? "horizontal" : "vertical")),
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };
@@ -3773,7 +3792,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const before = await captureFrame();
       const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
       const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text,
-        { session, signal: options.signal, deliveryMode: options.deliveryMode, preferForeground: options.confirmFocusForeground });
+        { session, signal: options.signal, deliveryMode: options.deliveryMode,
+          preferForeground: options.confirmFocusForeground, allowForegroundEscalation: options.allowForegroundEscalation });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }

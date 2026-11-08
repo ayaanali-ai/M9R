@@ -62,6 +62,37 @@ test("safe default, scoped approvals and Agents Free guard the actual native for
   } finally { manager.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("global media keys require a distinct owner grant and cannot reuse a window-input grant", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-work-media-"));
+  let accepted = true;
+  const approvals: Array<{ action?: string; risk?: string; step?: string }> = [];
+  const dispatched: Array<Record<string, unknown>> = [];
+  const policy = createOwnerWorkPolicy(root, () => ({ requestApproval: async request => { approvals.push(request); return accepted; } }));
+  const manager = createWindowsDesktopStageManager({ root, platform: "win32", terminal: true, env: {},
+    invokeNative: async request => {
+      dispatched.push(request);
+      return request.op === "systemControl"
+        ? { ok: true, result: { control: "media", action: request.action, dispatched: true, effect: "accepted" } }
+        : { ok: true };
+    } });
+  const turn = (operation: () => Promise<unknown>) => policy.run({ agent: "codex", provider: "codex", sessionId: "one", taskId: "M1",
+    signal: new AbortController().signal }, () => manager.withForegroundAuthorization(policy.authorize, operation));
+  try {
+    await turn(() => manager.systemControl({ control: "media", action: "play_pause" }));
+    assert.deepEqual(approvals.map(({ action, risk }) => ({ action, risk })), [{ action: "global_media_key", risk: "global-media-input" }]);
+    assert.equal(dispatched.filter(request => request.op === "systemControl").length, 1);
+    await turn(() => policy.authorize({ op: "restoreCursorPosition", x: 10, y: 20 }));
+    assert.equal(approvals.length, 2, "media approval does not authorize unrelated pointer restoration");
+    assert.match(approvals[1]?.step ?? "", /foreground turn/);
+
+    accepted = false;
+    await assert.rejects(turn(() => manager.systemControl({ control: "media", action: "next" })), /waiting for owner approval/);
+    assert.equal(dispatched.filter(request => request.op === "systemControl").length, 1, "a denied media approval dispatches no global key");
+    await assert.rejects(turn(() => manager.systemControl({ control: "media", action: "mute" })), /not supported/);
+    assert.equal(dispatched.filter(request => request.op === "systemControl").length, 1, "unsupported global media actions fail before native dispatch");
+  } finally { manager.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("foreground denial, timeout and cancellation remove the real broker approval and dispatch nothing", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-work-wait-"));
   const broker = createWebBroker({ send: () => true, authority: createWebAuthority({ ownerId: "owner" }) });

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseTaskStageAction, runTaskStageAction } from "../src/lib/native/task-stage-actions";
+import { parseTaskStageAction, runTaskStageAction, taskStageActionDeliveryProfile } from "../src/lib/native/task-stage-actions";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 import { createWebBrokerClient, type WebBrokerClient } from "../src/lib/native/web-broker-client";
@@ -35,6 +35,22 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
   assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
   assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
+});
+
+test("delivery profiles distinguish semantic background routes from shared and foreground input", () => {
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "capture" }), { capabilities: ["observe.accessibility"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "click_element", ref: "e1" }),
+    { capabilities: ["input.click.element"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "click", x: 10, y: 20 }),
+    { capabilities: ["input.shared-os"], backgroundSafe: false, requiresPhysicalInput: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "focus" }),
+    { capabilities: ["window.foreground"], backgroundSafe: false, requiresForegroundTurn: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "system_control", control: "media", action: "play_pause" }),
+    { capabilities: ["input.shared-os", "system.media"], backgroundSafe: false, requiresPhysicalInput: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "system_control", control: "output_audio", action: "get" }),
+    { capabilities: ["system.background-api"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "window_frame", x: 0, y: 0, width: 400, height: 300 }),
+    { capabilities: ["window.frame.no-activate"], backgroundSafe: true });
 });
 
 test("type-then-Enter is one exact app-stage batch and reports a typed pre-dispatch refusal on step two as partial", async () => {
@@ -218,16 +234,24 @@ test("text and save shortcuts stay on the selected app while modal controls stay
   assert.equal(calls[6]?.args[0], "selected-app", "popup confirmation keys are dispatched to the owned popup route");
 });
 
-test("owner-preview app actions preserve semantic delivery until foreground is explicit", async () => {
-  const options: Array<{ confirmFocusForeground?: boolean }> = [];
-  const driver = { clickElement: async (_name: string, _ref: string, _identity: unknown, value: { confirmFocusForeground?: boolean }) => { options.push(value); } } as unknown as ReturnType<typeof createCuaStageDriver>;
+test("app actions preserve semantic delivery and gate explicit foreground fallback at the owner boundary", async () => {
+  const options: Array<{ confirmFocusForeground?: boolean; deliveryMode?: string; allowForegroundEscalation?: boolean }> = [];
+  const driver = { clickElement: async (_name: string, _ref: string, _identity: unknown, value: typeof options[number]) => { options.push(value); } } as unknown as ReturnType<typeof createCuaStageDriver>;
   const identity = { handle: "codex", sessionId: "session" };
   await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app" }, identity);
   await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity);
   assert.equal(options[0].confirmFocusForeground, undefined);
   assert.equal(options[1].confirmFocusForeground, true);
-  await assert.rejects(runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity, "background"), /safe background delivery/);
-  assert.equal(options.length, 2, "background refusal must happen before dispatch");
+  assert.equal(options[0].allowForegroundEscalation, undefined, "owner-preview already uses the native authorization boundary for its foreground fallback");
+  assert.equal(options[0].deliveryMode, "owner-preview");
+  await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app" }, identity, "background");
+  assert.equal(options[2].deliveryMode, "background");
+  assert.equal(options[2].allowForegroundEscalation, undefined, "background actions never enter foreground fallback without an explicit foreground request");
+  await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity, "background");
+  assert.equal(options[3].deliveryMode, "owner-preview", "only this action receives the exclusive route");
+  assert.equal(options[3].confirmFocusForeground, true);
+  assert.equal(options[3].allowForegroundEscalation, undefined);
+  assert.equal(options.length, 4, "the native owner-work policy, not this planner, decides whether the foreground turn proceeds");
 });
 
 test("Save As targets one exact app-owned dialog and keeps destination policy explicit", async () => {

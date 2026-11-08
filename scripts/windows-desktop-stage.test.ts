@@ -10,7 +10,7 @@ const roomId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
 // classification. Unscoped refusal is tested in owner-work-mode.test.ts.
 function createWindowsDesktopStageManager(...args: Parameters<typeof createManager>): ReturnType<typeof createManager> {
   const manager = createManager(...args);
-  const physical = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "bringToForeground", "setWindowFrame", "setWindowState", "restoreOwnerCursorPosition"]);
+  const physical = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "bringToForeground", "setWindowState", "restoreOwnerCursorPosition"]);
   return new Proxy(manager, { get(target, key) {
     const method = Reflect.get(target, key);
     return physical.has(String(key)) ? (...values: unknown[]) => manager.withForegroundAuthorization(async () => {}, () => method(...values)) : method;

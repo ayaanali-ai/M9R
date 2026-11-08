@@ -455,7 +455,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   }
   const streamContext = new AsyncLocalStorage<string>();
   const foregroundAuthority = new AsyncLocalStorage<(request: Record<string, unknown>) => Promise<void>>();
-  const foregroundOperations = new Set(["bringToForeground", "setWindowState", "setWindowFrame", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "restoreCursorPosition"]);
+  const foregroundOperations = new Set(["bringToForeground", "setWindowState", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "restoreCursorPosition"]);
   const hostFactory = deps.nativeHostFactory ?? (() => createPersistentWindowsStageHost(
     deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe")));
   const persistentHost = deps.invokeNative ? undefined : hostFactory();
@@ -463,9 +463,13 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   let managerClosed = false;
   const invokeNative = async (request: Record<string, unknown>): Promise<NativeStageResponse> => {
     if (managerClosed) return Promise.reject(new Error("The native desktop-stage manager is closed."));
-    if (foregroundOperations.has(String(request.op))) {
+    const operation = String(request.op);
+    const globalMediaInput = operation === "systemControl" && request.control === "media";
+    if (foregroundOperations.has(operation) || globalMediaInput) {
       const authorize = foregroundAuthority.getStore();
-      if (!authorize) throw new DesktopInputNotDispatchedError("Foreground dispatch requires an owner-authorized task turn; no input was sent.", "foreground-approval");
+      if (!authorize) throw new DesktopInputNotDispatchedError(globalMediaInput
+        ? "Global media input requires an owner-authorized task turn; no media key was sent."
+        : "Foreground dispatch requires an owner-authorized task turn; no input was sent.", "foreground-approval");
       await authorize(request);
     }
     if (deps.invokeNative) return deps.invokeNative(request);

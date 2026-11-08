@@ -35,6 +35,57 @@ type TaskStageActionBody =
   | ({ kind: "system_control" } & WindowsSystemControlRequest);
 export type TaskStageAction = TaskStageActionBody & { view?: "desktop" | "app" | "popup" };
 
+export interface TaskStageActionDeliveryProfile {
+  capabilities: readonly string[];
+  backgroundSafe: boolean;
+  requiresPhysicalInput?: boolean;
+  requiresForegroundTurn?: boolean;
+}
+
+/**
+ * Describe the route this exact action can use. These are candidates, not
+ * guarantees: semantic methods re-resolve their target at dispatch time and
+ * fail closed when the live provider does not expose the needed pattern.
+ */
+export function taskStageActionDeliveryProfile(action: TaskStageAction): TaskStageActionDeliveryProfile {
+  switch (action.kind) {
+    case "capture": case "read_structure": case "read_value": case "window_status":
+      return { capabilities: ["observe.accessibility"], backgroundSafe: true };
+    case "cursor":
+      return { capabilities: ["presence.cursor"], backgroundSafe: true };
+    case "type":
+      return { capabilities: [action.mode === "replace" ? "input.text.replace" : "input.text.insert"], backgroundSafe: true };
+    case "replace_element":
+      return { capabilities: ["input.text.replace"], backgroundSafe: true };
+    case "click_element":
+      return { capabilities: ["input.click.element"], backgroundSafe: true };
+    case "scroll_element":
+      return { capabilities: ["input.scroll.element"], backgroundSafe: true };
+    case "invoke_menu":
+      return { capabilities: ["input.menu.invoke"], backgroundSafe: true };
+    case "save_as":
+      return { capabilities: ["file.save-as"], backgroundSafe: true };
+    case "clipboard_read":
+      return { capabilities: ["clipboard.read"], backgroundSafe: true };
+    case "clipboard_write":
+      return { capabilities: ["clipboard.write"], backgroundSafe: true };
+    case "system_control":
+      return action.control === "media"
+        ? { capabilities: ["input.shared-os", "system.media"], backgroundSafe: false, requiresPhysicalInput: true }
+        : { capabilities: ["system.background-api"], backgroundSafe: true };
+    case "window_frame": case "snap":
+      // The native implementation uses SetWindowPos with SWP_NOACTIVATE.
+      return { capabilities: ["window.frame.no-activate"], backgroundSafe: true };
+    case "window_state": case "focus":
+      return { capabilities: ["window.foreground"], backgroundSafe: false, requiresForegroundTurn: true };
+    case "click": case "double_click": case "middle_click": case "right_click": case "drag":
+    case "scroll": case "scroll_delta": case "press_key": case "hotkey": case "type_then_enter":
+      return { capabilities: ["input.shared-os"], backgroundSafe: false, requiresPhysicalInput: true };
+    case "stop":
+      return { capabilities: [], backgroundSafe: false };
+  }
+}
+
 const KEY_NAMES = new Set([
   "Ctrl", "Control", "Alt", "Shift", "Meta", "Win", "Enter", "Return", "Escape", "Esc", "Tab", "Space",
   "Backspace", "Delete", "Insert", "Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft",
@@ -180,25 +231,35 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
   identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal,
   dispatchPolicy: { semanticOnly?: boolean } = {}) {
-  // The owner has explicitly authorized agents to use real foreground input on
-  // their own machine without a per-action confirmation round trip. Use the
-  // same policy as the MCP action router: foreground escalation is always
-  // available, not gated behind an explicit confirmFocusForeground flag.
   const requestedFocus = "confirmFocusForeground" in action ? action.confirmFocusForeground : undefined;
+  const profile = taskStageActionDeliveryProfile(action);
+  const mediaKeyRequest = action.kind === "system_control" && action.control === "media";
+  // An explicit foreground request (or the inherently global media-key
+  // action) may enter the native owner-authorization path for this one action.
+  // Merely being in owner-preview/background mode never counts as an active
+  // lease or approval.
+  const requiresExclusive = profile.requiresPhysicalInput === true || profile.requiresForegroundTurn === true;
+  const requested = requestedFocus === true || mediaKeyRequest || requiresExclusive ? "exclusive"
+    : mode === "background" ? "background" : "auto";
   const delivery = selectActionDelivery({
-    target: { capabilities: ["observe.accessibility", "input.click.element", "input.shared-os"] },
-    requested: mode === "background" ? "background" : requestedFocus ? "exclusive" : "auto",
+    target: { capabilities: [...profile.capabilities] },
+    requested,
     targetVisible: mode === "owner-preview",
-    targetBackgroundSafe: true,
-    requiresPhysicalInput: requestedFocus === true,
-    ownerLeaseValid: true,
-    allowForegroundEscalation: true,
+    targetBackgroundSafe: profile.backgroundSafe,
+    requiresPhysicalInput: profile.requiresPhysicalInput,
+    requiresForegroundTurn: profile.requiresForegroundTurn,
+    allowForegroundEscalation: mode === "owner-preview" || requestedFocus === true || mediaKeyRequest
+      || requiresExclusive,
   });
   if (!delivery.ok) throw new DesktopInputNotDispatchedError(delivery.reason,
     delivery.code === "foreground-lease-required" ? "foreground-lease" : "background-unavailable");
-  const confirmFocusForeground = delivery.mode === "exclusive-input" ? true : requestedFocus;
+  const confirmFocusForeground = requestedFocus;
+  // A background task can ask for one owner-approved foreground turn without
+  // changing the task's standing mode. This action-only override is consumed
+  // by the driver's native boundary; the next action returns to background.
+  const actionDeliveryMode = delivery.mode === "exclusive-input" ? "owner-preview" : mode;
   const stageOptions = <T extends Record<string, unknown>>(options: T): T | undefined => {
-    const normalized = { ...options, deliveryMode: mode, ...(signal ? { signal } : {}) } as Record<string, unknown>;
+    const normalized = { ...options, deliveryMode: actionDeliveryMode, ...(signal ? { signal } : {}) } as Record<string, unknown>;
     for (const key of Object.keys(normalized)) if (normalized[key] === undefined) delete normalized[key];
     return Object.keys(normalized).length ? normalized as T : undefined;
   };
@@ -207,7 +268,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
   const capture = () => popupTargeted ? driver.capturePopup(name) : desktopWide ? driver.captureDesktop(name, identity) : driver.capture(name, identity);
   const cursor = (x: number, y: number) => desktopWide ? driver.moveDesktopCursor(name, x, y, identity) : driver.moveCursor(name, x, y, identity);
   const click = (x: number, y: number, options: { button?: "left" | "middle" | "right"; count?: 1 | 2; confirmFocusForeground?: boolean } = {}) => {
-    const normalized = { ...options, deliveryMode: mode, ...(signal ? { signal } : {}) };
+    const normalized = { ...options, deliveryMode: actionDeliveryMode, ...(signal ? { signal } : {}) };
     if (normalized.confirmFocusForeground === undefined) delete normalized.confirmFocusForeground;
     if (popupTargeted) return driver.clickPopup(name, x, y, normalized);
     return desktopWide

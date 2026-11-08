@@ -59,6 +59,42 @@ const COMPUTER_USE_OUTPUT_SCHEMA = z.object({}).passthrough();
 const LEGACY_TOKEN_FIELD_FALLBACK = {} as { token?: z.ZodOptional<z.ZodString> };
 const COMPUTER_USE_OBSERVE_TARGETS = ["desktop", "app-window", "browser-tab"] as const;
 
+function computerUseSystemCapability(control: "display_brightness" | "output_audio" | "microphone"): string {
+  switch (control) {
+    case "display_brightness": return "system.display-brightness";
+    case "output_audio": return "system.output-audio";
+    case "microphone": return "system.microphone";
+  }
+}
+
+function computerUseDeliveryProfile(action: ComputerUseAction): {
+  backgroundSafe: boolean;
+  requiresPhysicalInput?: boolean;
+  requiresForegroundTurn?: boolean;
+} {
+  switch (action.kind) {
+    case "observe": case "text": case "invoke_menu": case "clipboard":
+      return { backgroundSafe: true };
+    case "click":
+      return action.locator.kind === "element" && !action.targetPopup && action.button === "left" && action.count === 1
+        && !action.confirmFocusForeground
+        ? { backgroundSafe: true }
+        : { backgroundSafe: false, requiresPhysicalInput: true };
+    case "system_control":
+      return action.control === "media"
+        ? { backgroundSafe: false, requiresPhysicalInput: true }
+        : { backgroundSafe: true };
+    case "window_frame":
+      return { backgroundSafe: true };
+    case "focus": case "window_state":
+      return { backgroundSafe: false, requiresForegroundTurn: true };
+    case "text_then_enter": case "key": case "select_text": case "scroll": case "drag":
+      return { backgroundSafe: false, requiresPhysicalInput: true };
+    case "navigate": case "browser_tab":
+      return { backgroundSafe: false };
+  }
+}
+
 /**
  * Some provider MCP bridges serialize a discriminated-union object argument
  * before sending it over their tool transport. Keep the canonical schema and
@@ -1639,19 +1675,34 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       return refusal(action, action.targetId, selection.code, `${detail}${nextRoute}`, preDispatchRetry(selection.code), nextStep);
     }
     record.pinnedRouteId = selection.routeId;
-    // The owner has explicitly authorized agents to use real foreground input on
-    // their own machine without a per-action confirmation round trip: any route
-    // may escalate from background to the owner's foreground input lease when it
-    // cannot deliver otherwise, with no separate owner-visible confirmation gate.
+    // This policy chooses a route; it does not authorize physical input. The
+    // task-stage/native owner-work gate still decides whether an exclusive turn
+    // is allowed, and background fallback is limited to this action's known route.
     const requestedForeground = "confirmFocusForeground" in action && action.confirmFocusForeground === true;
+    const deliveryProfile = computerUseDeliveryProfile(action);
+    const mediaKeyRequest = action.kind === "system_control" && action.control === "media";
+    const needsExclusive = deliveryProfile.requiresPhysicalInput === true || deliveryProfile.requiresForegroundTurn === true;
+    // Use the capabilities observed on the selected route, never the action's
+    // requirements as if they proved support. Add only implementation-backed
+    // aliases where the native adapter's exact operation is known to avoid
+    // global focus (UIA menu invocation, SetWindowPos with SWP_NOACTIVATE, and
+    // non-media system APIs).
+    const routeCapabilities = record.route.capabilities.map(String);
+    const deliveryCapabilities = [...routeCapabilities];
+    if (action.kind === "invoke_menu" && routeCapabilities.includes("menu.invoke")) deliveryCapabilities.push("input.menu.invoke");
+    if (action.kind === "window_frame" && routeCapabilities.includes("window.frame")) deliveryCapabilities.push("window.frame.no-activate");
+    if (action.kind === "system_control" && action.control !== "media"
+      && routeCapabilities.includes(computerUseSystemCapability(action.control))) deliveryCapabilities.push("system.background-api");
     const delivery = selectActionDelivery({
-      target: { capabilities: record.route.capabilities },
-      requested: record.context.kind === "desktop" && record.context.mode === "background" ? "background" : requestedForeground ? "exclusive" : "auto",
+      target: { capabilities: deliveryCapabilities },
+      requested: requestedForeground || mediaKeyRequest || needsExclusive ? "exclusive"
+        : record.context.kind === "desktop" && record.context.mode === "background" ? "background" : "auto",
       targetVisible: record.context.kind === "desktop" && record.context.view === "app",
-      targetBackgroundSafe: !record.route.requiresOwnerInputLease,
-      requiresPhysicalInput: action.kind === "focus" || record.route.requiresOwnerInputLease,
-      ownerLeaseValid: true,
-      allowForegroundEscalation: true,
+      targetBackgroundSafe: deliveryProfile.backgroundSafe && !record.route.requiresOwnerInputLease,
+      requiresPhysicalInput: deliveryProfile.requiresPhysicalInput,
+      requiresForegroundTurn: deliveryProfile.requiresForegroundTurn || record.route.requiresOwnerInputLease,
+      allowForegroundEscalation: requestedForeground || mediaKeyRequest || needsExclusive
+        || (record.context.kind === "desktop" && record.context.mode === "owner-preview"),
     });
     if (!delivery.ok) {
       return refusal(action, action.targetId, `delivery-${delivery.code}`, delivery.reason,

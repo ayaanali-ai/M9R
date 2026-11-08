@@ -7,7 +7,7 @@ The original checkout and its four modified provider files are excluded. Edge/no
 1. [x] Persistent per-agent session streams through production desktop lifecycle; ordered within a stream, independent across agents, cancellation and diagnostic identity.
 2. [x] Same-window independent semantic targets; revalidated stable identities and region fencing, same-target serialization retained; real two-field harness.
 3. [x] Owner work mode and scoped foreground approval, end-to-end through pill/broker/dispatch.
-4. [ ] Per-action background capabilities; semantic-first delivery with no unapproved physical fallback.
+4. [x] Per-action background capabilities; semantic-first delivery with no unapproved physical fallback.
 5. [ ] Bounded foreground handoff with safe owner-context restoration.
 6. [ ] Existing custom cursor renderer driven by live streams and exact targets, persistent task lifetime and cleanup.
 7. [ ] Provider-to-provider task coordination, assignment/claim/help/yield/resume, delivery/wakeup, verified completion and bounded stop.
@@ -67,3 +67,11 @@ The optional real same-window test also passed under the new default Working pol
 Known baseline failures, left unchanged: `pill-shells.test.ts:197` expects a settings payload without the already-existing `glowStyle`/`glowColor`; `web-broker-server.test.ts:169` and `:219` expect terminal `resultSummary` values but get `undefined`. All three failures were reproduced with HEAD versions of changed broker/core/UI/desktop modules through a temporary read-only source loader (3 tests, same 3 failures). No fix is included in this item. The unchanged `pill-state.test.ts` cannot run with the repository's Node loader because it imports a provider SVG; Vite compilation and pill TypeScript check pass. These are not reported as passing tests.
 
 Still requires post-install owner acceptance: the visible pill toggle in the actual overlay, approval/restoration behavior while the owner works in real apps, and provider-level live tasks. This item does not claim new background capabilities or change the broader per-action router; that remains item 4. Exact safe context restoration is item 5.
+
+## Item 4: per-action delivery and foreground boundary
+
+Each task-stage and Computer Use action now has an explicit delivery profile. The planner accepts only exact, implementation-backed semantic/background capabilities and uses the capabilities actually advertised by the selected route; it no longer fabricates target support from the requested action, treats global input as background-safe, or hardcodes a valid lease. Window reframe is classified as background-safe only through the native `SetWindowPos(SWP_NOACTIVATE)` implementation. Global media keys enter the same owner authorization boundary and use their own approval scope; a media grant cannot authorize pointer restoration or other foreground input.
+
+An explicit background-only request refuses when no safe semantic route exists, even if the call carries an escalation hint or an old owner lease. If a foreground turn is needed, the caller must issue that specific action as a foreground request; the native owner-work policy then approves the one bounded turn or refuses before dispatch. A typed zero-dispatch result may be retried only through that explicit path. Uncertain delivery is never replayed. This removes silent route escalation while preserving owner-preview and Agents Free behavior.
+
+Verification: focused planner/recovery/stage-action tests passed (23); full focused integration set passed (208), covering action routing, task stage, CUA stage driver, Windows stage manager, computer-use programs/recovery, native input channels, dispatch fences, web UI bridge, and owner work mode. Root TypeScript, native-input-stream TypeScript, and `git diff --check` passed. The first restricted-sandbox run exposed the explicit-background escalation bug and failed unrelated temp-rename/loopback tests; after correcting the policy, the full 208-test integration run passed outside the restricted sandbox. No installed runtime, provider configuration, extension, or glow file was changed.
