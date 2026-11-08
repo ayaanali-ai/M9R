@@ -1,6 +1,6 @@
 import { serializeStageFailure } from "../src/lib/native/stage-errors";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,12 +13,13 @@ import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageW
 import { windowsAppSearchNames, WINDOWS_APP_DISCOVERY_SCRIPT, discoverInstalledWindowsApp } from "../src/lib/native/windows-installed-apps";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
 import type { StageApprovalRequest } from "../src/lib/native/web-broker-core";
+import { createMultiplayerDispatchFence } from "../src/lib/native/multiplayer-dispatch-fence";
 
 type TestVisibleWindow = { pid: number; windowId: string; title: string; width: number; height: number;
   appName?: string; processName?: string | null; className?: string; zOrder?: number; processPath?: string | null; appUserModelId?: string | null };
 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
-  readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>) {
+  readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>, fenced = false) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "session-one");
@@ -44,7 +45,8 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     closeAgentCursor: async (cursorIdentity: { handle: string; sessionId: string }) => { cursorEvents.push(`close:${cursorIdentity.sessionId}`); },
     shutdown: async () => undefined,
   } as unknown as ReturnType<typeof createCuaStageDriver>;
-  const service = createTaskDesktopStageService({ store, readPolicy: readPolicyOverride ?? (() => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) })), driver,
+  const service = createTaskDesktopStageService({ store, ...(fenced ? { mutationFence: createMultiplayerDispatchFence({ store }) } : {}),
+    readPolicy: readPolicyOverride ?? (() => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) })), driver,
     ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage: {
     platform: "win32", env: {}, invokeNative: async (request) => {
       nativeOps.push(String(request.op));
@@ -80,6 +82,29 @@ test("production desktop lifecycle retains one input stream across tasks and del
     assert.equal(second?.nextSequence, 3);
     assert.equal(f.service.inputStreamSnapshot().length, 1);
     assert.ok(f.store.getTask(followup.id)?.stageTiming?.some((event) => event.detail?.includes(`input-stream=${first?.streamId};sequence=2`)));
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
+test("explicit background foreground-binding only observes and shares the exact HWND under the real fence", async () => {
+  const f = fixture(true, undefined, undefined, true);
+  try {
+    const first = await f.service.prepare(f.identity.token, f.task.id, "background", { bindForeground: true });
+    const peer = f.store.issueIdentity("codex", "codex", "session-two");
+    const task = f.store.addTask({ from: "you", to: "codex", goal: "Other field", origin: "human_typed", idempotencyKey: "shared-field", targetSession: "session-two" }).task;
+    const second = await f.service.prepare(peer.token, task.id, "background", { bindForeground: true });
+    assert.equal(first.hasAnchor, true); assert.equal(second.hasAnchor, true);
+    assert.notEqual(first.name, second.name);
+    assert.deepEqual(f.presentedWindows, [], "observation never raises or presents the app");
+    assert.ok(f.nativeOps.every((op) => op === "currentForegroundWindow" || op === "inspect"));
+    const registry = JSON.parse(readFileSync(join(f.root, "windows-stages.json"), "utf8")) as { stages: Array<{ fencedBinding?: boolean }> };
+    assert.ok(registry.stages.every((stage) => stage.fencedBinding));
+    const unfenced = createTaskDesktopStageService({ store: f.store, driver: f.driver,
+      readPolicy: () => ({ handles: ["codex"], controlHandles: ["codex"] }),
+      stage: { platform: "win32", env: {}, invokeNative: async (request) => ({ ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } }) } });
+    try {
+      await assert.rejects(unfenced.act(f.identity.token, f.task.id, { kind: "type", text: "must not dispatch", view: "app" }, "background"),
+        (error) => error instanceof DesktopInputNotDispatchedError && error.message.includes("mutation fence"));
+    } finally { await unfenced.close(); }
   } finally { await f.service.close(); f.cleanup(); }
 });
 

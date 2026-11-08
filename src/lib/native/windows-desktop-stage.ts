@@ -7,6 +7,8 @@ import { renameStateFile } from "./atomic-file";
 import { isAgentContext } from "./approval-core";
 import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "./desktop-input-errors";
 import { defaultStoreRoot } from "./local-store";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 
 const STAGE_REGISTRY_VERSION = 6;
 const MAX_STAGE_REGISTRY_BYTES = 1024 * 1024;
@@ -27,6 +29,10 @@ export interface WindowsStageRecord {
   appId?: string;
   /** Stable, local-only intent group. Stages in one group may share a window. */
   coordinationKey?: string;
+  /** Explicitly shared identity mapping; mutating service callers must supply the broker fence. */
+  sharedBinding?: true;
+  /** This anchor was established by the broker that fences every target mutation. */
+  fencedBinding?: true;
   /** Random local identity for the owner's visible-screen coordination surface. */
   roomDesktopId: string;
   /** Exact visible-window binding; null for a desktop-wide owner view. */
@@ -52,6 +58,13 @@ interface NativeWindowStageInfo {
   processGeneration?: string;
 }
 
+export interface NativeDispatchEvidence {
+  readonly helperPid: number;
+  readonly startedUnixNanos: string;
+  readonly endedUnixNanos: string;
+  readonly streamId?: string;
+}
+
 interface NativeStageResponse {
   ok: boolean;
   dispatchState?: "not-dispatched" | "uncertain";
@@ -62,7 +75,8 @@ interface NativeStageResponse {
   windowStructure?: NativeWindowStructure;
   semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
     read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
-    scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null };
+    scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null;
+    nativeDispatch?: NativeDispatchEvidence };
   capture?: { dataUrl: string; width: number; height: number; originX?: number; originY?: number };
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
@@ -135,6 +149,8 @@ export interface NativeWindowStructureElement extends NativeDesktopStructureElem
   /** Control View child-index path used for immediate native re-resolution. */
   path: number[];
   automationId: string;
+  /** Live UIA identity, independent of generated snapshot refs and tree position. */
+  runtimeId?: number[] | null;
   actions?: { invoke: boolean; select: boolean; toggle: boolean; legacy: boolean; setValue: boolean; readValue?: boolean; scroll?: boolean };
   /** UIA ScrollPattern progress when this element is a scroll container. Percent can be null when the provider omits it. */
   scroll?: {
@@ -161,6 +177,12 @@ export interface WindowsStageDependencies {
   env?: Record<string, string | undefined>;
   now?: () => Date;
   invokeNative?: (request: Record<string, unknown>) => Promise<NativeStageResponse>;
+  /** The owner broker supplies the real shared mutation fence before allowing shared HWND mappings. */
+  sharedWindowFence?: Pick<MultiplayerDispatchFence, "begin">;
+  /** Test-only transport seam; production creates one persistent native process per stream. */
+  nativeHostFactory?: (streamId?: string) => { invoke(request: Record<string, unknown>): Promise<NativeStageResponse>; close(): void };
+  /** Internal API-call evidence. This callback never changes an action's outcome. */
+  onNativeDispatch?: (evidence: NativeDispatchEvidence) => void;
   /** Whether a process id still exists; injectable for tests. */
   processAlive?: (pid: number) => boolean;
   /** Whether the task that most recently used a stage is still unfinished. Used only to
@@ -241,6 +263,9 @@ function parseRegistry(raw: string): StageRegistry {
     names.add(name);
     if (record.appId !== undefined && (!isPersistedAppId(record.appId))) throw new Error("The local Windows stage registry contains an invalid app reference; it was left unchanged.");
     if (record.coordinationKey !== undefined && !isCoordinationKey(record.coordinationKey)) throw new Error("The local Windows stage registry contains an invalid coordination key; it was left unchanged.");
+    if (record.sharedBinding !== undefined && record.sharedBinding !== true) throw new Error("The local Windows stage registry contains an invalid shared binding.");
+    if (record.fencedBinding !== undefined && record.fencedBinding !== true) throw new Error("The local Windows stage registry contains an invalid fenced binding.");
+    if (record.sharedBinding && !record.fencedBinding) throw new Error("The local Windows stage registry has a shared target without mutation fencing.");
     let anchor: WindowsStageRecord["anchor"] = null;
     if (record.anchor !== undefined && record.anchor !== null) {
       if (!Number.isInteger(record.anchor.pid) || (record.anchor.pid ?? 0) < 1 || typeof record.anchor.windowId !== "string" || !WINDOW_ID_RE.test(record.anchor.windowId)) {
@@ -279,6 +304,8 @@ function parseRegistry(raw: string): StageRegistry {
       name,
       ...(record.appId !== undefined ? { appId: record.appId } : {}),
       ...(record.coordinationKey !== undefined ? { coordinationKey: record.coordinationKey } : {}),
+      ...(record.sharedBinding ? { sharedBinding: true as const } : {}),
+      ...(record.fencedBinding ? { fencedBinding: true as const } : {}),
       roomDesktopId: roomDesktopId.toLowerCase(),
       anchor,
       roomWindowId: roomWindowId?.toLowerCase() ?? null,
@@ -426,10 +453,39 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   function compactRegistryStages(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
     return withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime());
   }
-  const persistentHost = deps.invokeNative ? undefined : createPersistentWindowsStageHost(
-    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"),
-  );
-  const invokeNative = deps.invokeNative ?? ((request) => persistentHost!.invoke(request));
+  const streamContext = new AsyncLocalStorage<string>();
+  const hostFactory = deps.nativeHostFactory ?? (() => createPersistentWindowsStageHost(
+    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe")));
+  const persistentHost = deps.invokeNative ? undefined : hostFactory();
+  const streamHosts = new Map<string, ReturnType<typeof hostFactory>>();
+  let managerClosed = false;
+  const invokeNative = (request: Record<string, unknown>): Promise<NativeStageResponse> => {
+    if (managerClosed) return Promise.reject(new Error("The native desktop-stage manager is closed."));
+    if (deps.invokeNative) return deps.invokeNative(request);
+    const streamId = streamContext.getStore();
+    if (!streamId) return persistentHost!.invoke(request);
+    let host = streamHosts.get(streamId);
+    if (!host) { host = hostFactory(streamId); streamHosts.set(streamId, host); }
+    return host.invoke(request);
+  };
+  function withInputStream<T>(streamId: string, operation: () => Promise<T>): Promise<T> {
+    if (!/^stream-[a-f0-9]{24}$/.test(streamId)) throw new Error("Invalid native input-stream identity.");
+    if (managerClosed) throw new Error("The native desktop-stage manager is closed.");
+    return streamContext.run(streamId, operation);
+  }
+  function closeInputStream(streamId: string): void {
+    streamHosts.get(streamId)?.close();
+    streamHosts.delete(streamId);
+  }
+  function closeManager(): void {
+    if (managerClosed) return;
+    managerClosed = true;
+    persistentHost?.close();
+    for (const host of streamHosts.values()) host.close();
+    streamHosts.clear();
+    process.removeListener("exit", closeManager);
+  }
+  if (!deps.invokeNative) process.once("exit", closeManager);
   function verifiedWindowInfo(value: unknown) {
     const window = normalizeWindowInfo(value);
     if (!deps.invokeNative && !window.processGeneration) throw new Error("The native runtime cannot verify process generations; stage input requires the current verified candidate.");
@@ -573,6 +629,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         || typeof element.role !== "string" || element.role.length > 80
         || typeof element.className !== "string" || element.className.length > 120
         || typeof element.automationId !== "string" || element.automationId.length > 256
+        || (element.runtimeId != null && (!Array.isArray(element.runtimeId) || element.runtimeId.length < 1 || element.runtimeId.length > 128
+          || element.runtimeId.some((part) => !Number.isInteger(part) || part < -2147483648 || part > 2147483647)))
         || !Array.isArray(element.path) || element.path.length > maxDepth
         || element.path.some((part) => !Number.isSafeInteger(part) || part < 0)
         || !Number.isSafeInteger(element.depth) || element.depth < 0 || element.depth > maxDepth
@@ -594,7 +652,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
 
   async function invokeWindowElement(pid: number, windowId: string, input: {
     path: number[]; action: "activate" | "setValue" | "readValue" | "scroll"; expectedRole: string; expectedLabel: string;
-    expectedClassName: string; expectedAutomationId: string; text?: string; direction?: "up" | "down" | "left" | "right";
+    expectedClassName: string; expectedAutomationId: string; expectedRuntimeId?: number[]; text?: string; direction?: "up" | "down" | "left" | "right";
     granularity?: "small" | "large"; maxChars?: number;
   }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
     read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
@@ -602,7 +660,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     if (!Array.isArray(input.path) || input.path.length > 64 || input.path.some((part) => !Number.isSafeInteger(part) || part < 0)
-      || !input.expectedRole || (!input.expectedLabel && !input.expectedAutomationId)
+      || !input.expectedRole || (!input.expectedLabel && !input.expectedAutomationId && !input.expectedRuntimeId)
+      || (input.expectedRuntimeId !== undefined && (!Array.isArray(input.expectedRuntimeId) || input.expectedRuntimeId.length < 1 || input.expectedRuntimeId.length > 128
+        || input.expectedRuntimeId.some((part) => !Number.isInteger(part) || part < -2147483648 || part > 2147483647)))
       || (input.action === "setValue" && typeof input.text !== "string")
       || (input.action === "readValue" && input.maxChars !== undefined
         && (!Number.isSafeInteger(input.maxChars) || input.maxChars < 1 || input.maxChars > 4096))
@@ -647,7 +707,16 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
         && (!position || [position.horizontal, position.vertical].some((axis) => axis !== null && (!Number.isFinite(axis) || axis < 0 || axis > 100)))))) {
       throw new DesktopInputOutcomeUnknownError("Windows returned an invalid native semantic action result; inspect the target before retrying.");
     }
-    return semanticAction;
+    const evidence = semanticAction.nativeDispatch;
+    if (evidence && Number.isSafeInteger(evidence.helperPid) && evidence.helperPid > 0
+      && /^\d{1,24}$/.test(evidence.startedUnixNanos) && /^\d{1,24}$/.test(evidence.endedUnixNanos)
+      && BigInt(evidence.endedUnixNanos) >= BigInt(evidence.startedUnixNanos)) {
+      try { deps.onNativeDispatch?.({ ...evidence, ...(streamContext.getStore() ? { streamId: streamContext.getStore() } : {}) }); }
+      catch { /* telemetry never reclassifies a dispatched input */ }
+    }
+    // Native timing stays in the owner diagnostic channel, not provider tool context.
+    const { nativeDispatch: _nativeDispatch, ...resultWithoutNativeTiming } = semanticAction;
+    return resultWithoutNativeTiming;
   }
 
   async function captureWindow(pid: number, windowId: string): Promise<{ dataUrl: string; width: number; height: number; originX: number; originY: number }> {
@@ -681,7 +750,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return capture;
   }
 
-  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
+  async function registerWindow(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string, shared = false): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
@@ -695,16 +764,23 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       const savedCoordinationKey = coordinationKey ?? existing?.coordinationKey;
       // Same staleness tolerance as assertWindowUnclaimed(): a dead preview stage's
       // leftover anchor must not permanently lock its window away from every later task.
-      const claimed = withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime()).find((stage) => stage.name !== name
+      if (shared && (!deps.sharedWindowFence || !existing?.agentAssignment?.taskId || !taskActive(existing.agentAssignment.taskId))) {
+        throw new Error("A shared window binding requires an active authenticated task and the owner broker's mutation fence.");
+      }
+      const liveClaimants = withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime()).filter((stage) => stage.name !== name
         && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
-        && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey)
         && !(stage.agentAssignment?.taskId && !taskActive(stage.agentAssignment.taskId)));
+      if (shared && liveClaimants.some((stage) => !stage.fencedBinding)) throw new Error("An unfenced stage already owns this window; re-observe it through the owner broker before sharing it.");
+      const claimed = shared ? undefined : liveClaimants.find((stage) => !(deps.sharedWindowFence && stage.fencedBinding
+        && savedCoordinationKey && stage.coordinationKey === savedCoordinationKey));
       if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
       const savedAppId = appId ?? existing?.appId;
       const record: WindowsStageRecord = {
         name,
         ...(savedAppId !== undefined ? { appId: savedAppId } : {}),
         ...(savedCoordinationKey !== undefined ? { coordinationKey: savedCoordinationKey } : {}),
+        ...(shared ? { sharedBinding: true as const } : {}),
+        ...(deps.sharedWindowFence ? { fencedBinding: true as const } : {}),
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
         anchor: { pid: info.pid, windowId: info.windowId, ...(info.processGeneration ? { processGeneration: info.processGeneration } : {}) },
         roomWindowId: existing?.anchor?.pid === info.pid && existing.anchor.windowId === info.windowId && existing.anchor.processGeneration === info.processGeneration
@@ -724,6 +800,14 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally {
       release();
     }
+  }
+  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
+    return registerWindow(nameInput, pidInput, windowIdInput, appId, coordinationKey);
+  }
+  /** Explicit read/target sharing only. Input still goes through the service's target fence. */
+  async function attachSharedWindow(name: string, pid: string, windowId: string, appId?: string) {
+    const stage = await registerWindow(name, pid, windowId, appId, undefined, true);
+    return { stage, window: { ...stage.anchor! } };
   }
 
   async function create(nameInput: string): Promise<WindowsStageRecord> {
@@ -979,7 +1063,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const claimants = withoutStaleOwnerPreviewStages(readRegistry(root).stages, processAlive, taskActive, now().getTime());
     const claimed = claimants.find((stage) => stage.name !== name
       && stage.anchor?.pid === pid && stage.anchor.windowId === windowId
-      && !(coordinationKey && stage.coordinationKey === coordinationKey)
+      && !(deps.sharedWindowFence && stage.fencedBinding && coordinationKey && stage.coordinationKey === coordinationKey)
       // A window host like explorer.exe or chrome.exe outlives any one task, so the
       // process never exits between tasks and the staleness check above never fires.
       // The real signal for "is this still a live hold" is whether the claimant's own
@@ -1277,7 +1361,8 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   }
 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
-    close: () => persistentHost?.close(),
+    close: closeManager,
+    withInputStream, closeInputStream, attachSharedWindow,
     bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
 }
 
@@ -1323,7 +1408,7 @@ function createPersistentWindowsStageHost(executable: string) {
   const pending = new Map<string, PendingNativeStageRequest>();
   let activeRequestId: string | undefined;
   const startAcknowledgementTimeoutMs = 15_000;
-  const inputOperations = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "sendTextToWindow", "postCloseWindow"]);
+  const inputOperations = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "sendTextToWindow", "postCloseWindow", "invokeWindowElement"]);
 
 
   const notDispatchedError = (request: Pick<PendingNativeStageRequest, "operation">, message: string): Error => inputOperations.has(request.operation)
@@ -1534,7 +1619,6 @@ function createPersistentWindowsStageHost(executable: string) {
       (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the helper was closed before it started.`),
       () => error);
   };
-  process.once("exit", close);
   return { invoke, close };
 }
 

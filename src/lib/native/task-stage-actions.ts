@@ -178,7 +178,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
 }
 
 export async function runTaskStageAction(driver: ReturnType<typeof createCuaStageDriver>, name: string, action: TaskStageAction,
-  identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal) {
+  identity: CuaAgentCursorIdentity, mode: "background" | "owner-preview" = "owner-preview", signal?: AbortSignal,
+  dispatchPolicy: { semanticOnly?: boolean } = {}) {
   // The owner has explicitly authorized agents to use real foreground input on
   // their own machine without a per-action confirmation round trip. Use the
   // same policy as the MCP action router: foreground escalation is always
@@ -286,7 +287,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "read_value": return { readValue: await driver.readElementValue(name, action.ref, identity,
       { expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, maxChars: action.maxChars }) };
     case "replace_element": return driver.replaceElement(name, action.ref, action.text, identity,
-      stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground }));
+      stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground,
+        ...(dispatchPolicy.semanticOnly ? { semanticOnly: true } : {}) }));
     case "window_frame": return driver.windowFrame(name, action.x, action.y, action.width, action.height, identity,
       stageOptions({ confirmFocusForeground }));
     case "snap": return driver.snapWindow(name, action.position, identity, stageOptions({ confirmFocusForeground }));

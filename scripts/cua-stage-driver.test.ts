@@ -510,6 +510,7 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
             ref: `window-ui-element-${structureRevision}-${index + 1}`, path: [index], depth: Number(element.depth ?? 1),
             role: String(element.role ?? ""), label: String(element.label ?? ""),
             className: String(element.className ?? ""), automationId: String(element.automationId ?? ""),
+            ...(Array.isArray(element.runtimeId) ? { runtimeId: element.runtimeId as number[] } : {}),
             enabled: element.enabled !== false, focused: element.focused === true,
             rect: { x: Number(frame.x ?? 100), y: Number(frame.y ?? 50),
               width: Number(frame.width ?? frame.w ?? 10), height: Number(frame.height ?? frame.h ?? 10) },
@@ -2051,6 +2052,26 @@ test("replace-mode text uses exact UI Automation ValuePattern before physical fa
   const invoke = nativeFixture(root).calls.find(call => call.op === "invokeWindowElement") as Record<string, unknown> | undefined;
   assert.equal(invoke?.action, "setValue");
   assert.equal(invoke?.text, "new value");
+  assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false);
+  await driver.shutdown();
+}));
+
+test("an independently fenced field refuses recreated UIA identity and never uses caret fallback", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const field = { role: "Edit", label: "Title", className: "Edit", automationId: "Title", runtimeId: [42, 1], enabled: true,
+    actions: ["set_value"], frame: { x: 120, y: 58, w: 120, h: 30 } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls,
+    state: { elementsComplete: true, elements: [field] } }) as never });
+  const observed = await driver.readStructure("stage");
+  field.runtimeId = [42, 2];
+  await assert.rejects(driver.replaceElement("stage", observed.elements[0]!.ref, "wrong epoch", undefined, { semanticOnly: true }),
+    error => error instanceof DesktopInputNotDispatchedError);
+  assert.equal(nativeFixture(root).calls.some(call => call.op === "invokeWindowElement"), false);
+  const fresh = await driver.readStructure("stage");
+  setNativeFixture(root, { responses: { invokeWindowElement: { ok: true, semanticAction: { dispatched: false, reason: "provider no longer supports value replacement" } } } });
+  await assert.rejects(driver.replaceElement("stage", fresh.elements[0]!.ref, "no fallback", undefined, { semanticOnly: true }),
+    error => error instanceof DesktopInputNotDispatchedError);
   assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false);
   await driver.shutdown();
 }));

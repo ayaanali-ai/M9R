@@ -50,6 +50,67 @@ impl Drop for ComApartment {
     }
 }
 
+/// UIA's live runtime identity is shared across observers and does not depend on
+/// a snapshot's generated ref or the control's current tree position.
+fn element_runtime_id(element: &IUIAutomationElement) -> Option<Vec<i32>> {
+    use windows::Win32::System::Com::SAFEARRAY;
+    use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetDim,
+        SafeArrayGetElemsize, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData};
+    struct OwnedArray(*mut SAFEARRAY);
+    impl Drop for OwnedArray {
+        fn drop(&mut self) { unsafe { let _ = SafeArrayDestroy(self.0); } }
+    }
+    let array = unsafe { element.GetRuntimeId() }.ok()?;
+    if array.is_null() { return None; }
+    let owned = OwnedArray(array);
+    if unsafe { SafeArrayGetDim(owned.0) } != 1 || unsafe { SafeArrayGetElemsize(owned.0) } != 4 { return None; }
+    let lower = unsafe { SafeArrayGetLBound(owned.0, 1) }.ok()?;
+    let upper = unsafe { SafeArrayGetUBound(owned.0, 1) }.ok()?;
+    let length = upper.checked_sub(lower)?.checked_add(1)?;
+    if !(1..=128).contains(&length) { return None; }
+    let mut data = core::ptr::null_mut();
+    unsafe { SafeArrayAccessData(owned.0, &mut data) }.ok()?;
+    let result = if data.is_null() { None } else {
+        Some(unsafe { core::slice::from_raw_parts(data.cast::<i32>(), length as usize) }.to_vec())
+    };
+    unsafe { let _ = SafeArrayUnaccessData(owned.0); }
+    result
+}
+
+fn unix_nanos() -> String {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_nanos().to_string()
+}
+
+#[cfg(feature = "test-fixtures")]
+fn fixture_dispatch_barrier(value: &Value) -> Result<(), crate::InputDispatchError> {
+    if value.get("fixtureDispatchBarrier").and_then(Value::as_bool) != Some(true) { return Ok(()); }
+    let requested = std::env::var_os("M9R_NATIVE_TEST_BARRIER_DIR").ok_or_else(|| crate::InputDispatchError::not_dispatched("fixture barrier directory missing"))?;
+    let directory = std::fs::canonicalize(requested).map_err(|e| crate::InputDispatchError::not_dispatched(e.to_string()))?;
+    let temporary = std::fs::canonicalize(std::env::temp_dir()).map_err(|e| crate::InputDispatchError::not_dispatched(e.to_string()))?;
+    if !directory.starts_with(&temporary) || !directory.file_name().is_some_and(|name| name.to_string_lossy().starts_with("m9r-native-stream-barrier-")) {
+        return Err(crate::InputDispatchError::not_dispatched("fixture barrier must be a disposable test directory"));
+    }
+    let released = directory.join("released");
+    if released.exists() { return Ok(()); }
+    let ready = directory.join(format!("ready-{}", std::process::id()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(ready) {
+        Ok(_) => (), Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+        Err(error) => return Err(crate::InputDispatchError::not_dispatched(error.to_string())),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let count = std::fs::read_dir(&directory).map_err(|e| crate::InputDispatchError::not_dispatched(e.to_string()))?
+            .filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().starts_with("ready-")).count();
+        if count >= 2 || released.exists() {
+            let _ = std::fs::OpenOptions::new().write(true).create_new(true).open(&released);
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline { return Err(crate::InputDispatchError::not_dispatched("fixture dispatch barrier did not receive two independent native helpers")); }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 pub fn control_at_point(value: &Value, invoke: bool) -> Result<Value, crate::InputDispatchError> {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
         .ok()
@@ -449,6 +510,7 @@ fn walk_window_element(
             "role": truncate_text(&role, 80),
             "className": truncate_text(&class_name, 120),
             "automationId": truncate_text(&automation_id, 256),
+            "runtimeId": element_runtime_id(element),
             "rect": { "x": bounds.left, "y": bounds.top, "width": bounds.right - bounds.left, "height": bounds.bottom - bounds.top },
             "depth": depth, "enabled": enabled, "focused": focused,
             "actions": { "invoke": supports_invoke, "select": supports_select, "toggle": supports_toggle, "legacy": supports_legacy, "setValue": supports_value, "readValue": supports_read_value, "scroll": supports_scroll },
@@ -594,7 +656,7 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         .get("expectedAutomationId")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if expected_role.is_empty() || (expected_label.is_empty() && expected_automation_id.is_empty())
+    if expected_role.is_empty() || (expected_label.is_empty() && expected_automation_id.is_empty() && value.get("expectedRuntimeId").is_none())
     {
         return Err(crate::InputDispatchError::not_dispatched(
             "The observed native element has insufficient identity to revalidate; no semantic input was sent",
@@ -661,6 +723,14 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
             "The observed native element changed before dispatch; no semantic input was sent",
         ));
     }
+    if let Some(expected) = value.get("expectedRuntimeId") {
+        let expected = expected.as_array().filter(|items| !items.is_empty() && items.len() <= 128)
+            .and_then(|items| items.iter().map(|item| item.as_i64().and_then(|n| i32::try_from(n).ok())).collect::<Option<Vec<_>>>())
+            .ok_or_else(|| crate::InputDispatchError::not_dispatched("invalid observed UIA runtime identity; no semantic input was sent"))?;
+        if element_runtime_id(&element).as_ref() != Some(&expected) {
+            return Err(crate::InputDispatchError::not_dispatched("The observed UIA runtime identity changed; no semantic input was sent"));
+        }
+    }
 
     if action == "scroll" {
         let direction = value
@@ -723,8 +793,14 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         let text = value.get("text").and_then(Value::as_str).ok_or_else(|| {
             crate::InputDispatchError::not_dispatched("replacement text is required")
         })?;
+        // Only the optional, executable-scoped acceptance host enables this
+        // stress barrier. Ordinary release builds compile this call out.
+        #[cfg(feature = "test-fixtures")]
+        fixture_dispatch_barrier(value)?;
+        let dispatch_started = unix_nanos();
         unsafe { pattern.SetValue(&BSTR::from(text)) }
             .map_err(|error| crate::InputDispatchError::uncertain(error.to_string()))?;
+        let dispatch_ended = unix_nanos();
         // A successful SetValue call is only dispatch evidence. Re-read the
         // same live UIA value before reporting that the field accepted it; do
         // not return the field contents because it may contain user data.
@@ -732,7 +808,8 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
             .map(|current| current.to_string() == text)
             .unwrap_or(false);
         return Ok(
-            json!({"dispatched":true,"mechanism":"value-pattern","valueConfirmed":value_confirmed}),
+            json!({"dispatched":true,"mechanism":"value-pattern","valueConfirmed":value_confirmed,
+                "nativeDispatch": { "helperPid": std::process::id(), "startedUnixNanos": dispatch_started, "endedUnixNanos": dispatch_ended }}),
         );
     }
     if action == "readValue" {

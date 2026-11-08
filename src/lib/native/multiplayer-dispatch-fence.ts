@@ -117,6 +117,7 @@ export interface MultiplayerDispatchFence {
   begin(input: MutationFenceBeginInput): MutationFenceBeginResult;
   /** Current durable fence epoch for a surface. */
   surfaceRevision(surfaceId: string): number;
+  regionRevision(surfaceId: string, regionId: string): number;
   /** Reconcile a prior uncertain dispatch after a fresh, successful observation. */
   observeSurface(surfaceId: string): number;
   /** Current epoch for the broker's canonical browser tab identity. */
@@ -151,6 +152,17 @@ function validIdentifier(value: string): boolean {
 
 function regionScopeKey(surfaceId: string, regionId: string): string {
   return `region:${surfaceId}:${regionId}`;
+}
+interface MutationScope { surfaceId: string; regionId?: string }
+function mutationScopeKey(scope: MutationScope): string {
+  return scope.regionId ? regionScopeKey(scope.surfaceId, scope.regionId) : `surface:${scope.surfaceId}`;
+}
+function receiptScope(receipt: Pick<MutationReceiptRecord, "surfaceId" | "targetKey">): MutationScope {
+  const regionId = receipt.targetKey.match(/\|region=([A-Za-z0-9._:%-]{1,128})$/)?.[1];
+  return { surfaceId: receipt.surfaceId, ...(regionId ? { regionId } : {}) };
+}
+function scopesConflict(left: MutationScope, right: MutationScope): boolean {
+  return left.surfaceId === right.surfaceId && (!left.regionId || !right.regionId || left.regionId === right.regionId);
 }
 
 /**
@@ -189,15 +201,20 @@ export function desktopWindowMutationTarget(input: {
   windowId: string;
   revision?: string;
   processGeneration?: string;
+  regionId?: string;
 }): MutationFenceTarget {
-  const targetKey = `desktop-window|pid=${input.pid}|window=${input.windowId}${input.processGeneration ? `|generation=${input.processGeneration}` : ""}`;
+  const surfaceKey = `desktop-window|pid=${input.pid}|window=${input.windowId}${input.processGeneration ? `|generation=${input.processGeneration}` : ""}`;
+  const regionId = input.regionId?.trim();
+  if (regionId !== undefined && !validIdentifier(regionId)) throw new Error("Invalid desktop control-region identity.");
+  const targetKey = `${surfaceKey}${regionId ? `|region=${regionId}` : ""}`;
   return {
     kind: "desktop-window",
-    surfaceId: safeId("surface", targetKey),
+    surfaceId: safeId("surface", surfaceKey),
     targetId: safeId("target", targetKey),
     revision: input.revision?.trim().slice(0, 128) || "stage-observed",
     targetKey,
-    windowRef: safeId("window", targetKey),
+    ...(regionId ? { regionId } : {}),
+    windowRef: safeId("window", surfaceKey),
     processId: input.pid,
   };
 }
@@ -284,13 +301,15 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
     storeError = error instanceof Error ? error.message : "The multiplayer mutation receipt store could not be read.";
   }
   const initialSurfaceRevisions: Record<string, number> = {};
-  const unresolvedSurfaces = new Set<string>();
+  const unresolvedScopes = new Map<string, MutationScope>();
   for (const receipt of prior) {
-    if (receipt.status === "claimed" || receipt.status === "uncertain") unresolvedSurfaces.add(receipt.surfaceId);
+    if (receipt.status === "claimed" || receipt.status === "uncertain") {
+      const scope = receiptScope(receipt); unresolvedScopes.set(mutationScopeKey(scope), scope);
+    }
     if (!Number.isSafeInteger(receipt.surfaceRevision) || receipt.surfaceRevision < 0) continue;
     initialSurfaceRevisions[receipt.surfaceId] = Math.max(initialSurfaceRevisions[receipt.surfaceId] ?? 0, receipt.surfaceRevision);
   }
-  const inFlightSurfaceByOperation = new Map<string, string>();
+  const inFlightScopeByOperation = new Map<string, MutationScope>();
   // A lease expiring (heartbeat renew failure) marks a surface uncertain without releasing its
   // in-flight guard, deliberately: the underlying OS dispatch call that the lease was tracking
   // may still be running and could still land after the lease window closes, so a second action
@@ -302,6 +321,13 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
   // let a fresh observation through instead of refusing indefinitely.
   const staleInFlightTimeoutMs = leaseTtlMs * 5;
   const inFlightUncertainSince = new Map<string, number>();
+  const hasUnresolvedSurface = (surfaceId: string) => [...unresolvedScopes.values()].some((scope) => scope.surfaceId === surfaceId);
+  const hasInFlightSurface = (surfaceId: string) => [...inFlightScopeByOperation.values()].some((scope) => scope.surfaceId === surfaceId);
+  const clearUnresolvedSurface = (surfaceId: string) => {
+    for (const [key, scope] of unresolvedScopes) if (scope.surfaceId === surfaceId) {
+      unresolvedScopes.delete(key); inFlightUncertainSince.delete(key);
+    }
+  };
 
   const targetRegistry = options.targetRegistry ?? createTargetIdentityRegistry();
   const scheduler: MultiplayerMutationScheduler = createMultiplayerMutationScheduler(
@@ -331,14 +357,13 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
   // well as from an explicit observation, instead of requiring the caller to
   // know which action type unsticks it.
   function reconcileIfSettled(surfaceId: string): void {
-    if (!unresolvedSurfaces.has(surfaceId)) return;
-    if ([...inFlightSurfaceByOperation.values()].includes(surfaceId)) return;
-    inFlightUncertainSince.delete(surfaceId);
+    if (!hasUnresolvedSurface(surfaceId)) return;
+    if (hasInFlightSurface(surfaceId)) return;
     const next = scheduler.advanceSurfaceRevision(surfaceId);
     if (next === undefined) return; // A genuinely active scheduler transaction remains; not actually settled.
     try {
       store.reconcileMutationSurface(surfaceId, next);
-      unresolvedSurfaces.delete(surfaceId);
+      clearUnresolvedSurface(surfaceId);
     } catch (error) {
       storeError = error instanceof Error ? error.message : "The mutation receipt could not be reconciled.";
     }
@@ -404,6 +429,8 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
       }
 
       const surfaceId = input.target.surfaceId;
+      const scope: MutationScope = { surfaceId, ...(input.target.regionId ? { regionId: input.target.regionId } : {}) };
+      const scopeKey = mutationScopeKey(scope);
       // A prior operation on this surface may have finished uncertain and then
       // fully released (no longer in flight); reconcile that stale marker now
       // instead of refusing every later mutation until an unrelated capture
@@ -412,7 +439,8 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
       const surfaceRevision = currentRevision(surfaceId);
       // Keep an active dispatch serialized. A finished but uncertain operation
       // retains its own receipt and does not reserve the entire window.
-      if (unresolvedSurfaces.has(surfaceId) && [...inFlightSurfaceByOperation.values()].includes(surfaceId)) {
+      if ([...unresolvedScopes.values()].some((candidate) => scopesConflict(candidate, scope))
+        && [...inFlightScopeByOperation.values()].some((candidate) => scopesConflict(candidate, scope))) {
         return refusal("surface-unresolved", "A prior action on this surface has an unresolved outcome. Refresh the target and inspect its current state before trying another action.", "refresh-target", surfaceRevision);
       }
       const receiptKey = { runId, branchId, agentId, surfaceId, operationId: input.operationId };
@@ -425,7 +453,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
       }
       if (priorReceipt) {
         if (priorReceipt.status === "claimed" || priorReceipt.status === "uncertain") {
-          unresolvedSurfaces.add(surfaceId);
+          unresolvedScopes.set(scopeKey, scope);
           return refusal("already-claimed", "This operation already has an unresolved receipt. Do not replay it; refresh the target and inspect the result first.", "refresh-target", surfaceRevision);
         }
         return refusal("already-terminal", `This operation already has a ${priorReceipt.status} receipt and cannot be replayed.`, "inspect-receipt", surfaceRevision);
@@ -505,7 +533,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
         scheduler.release(schedulerOperationId);
         targetRegistry.forget(binding);
         const unresolved = durableClaim.record.status === "claimed" || durableClaim.record.status === "uncertain";
-        if (unresolved) unresolvedSurfaces.add(surfaceId);
+        if (unresolved) { const priorScope = receiptScope(durableClaim.record); unresolvedScopes.set(mutationScopeKey(priorScope), priorScope); }
         return refusal(unresolved
           ? durableClaim.reason === "operation-exists" ? "already-claimed" : "surface-unresolved"
           : "already-terminal",
@@ -514,11 +542,11 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
         unresolved ? "refresh-target" : "inspect-receipt", surfaceRevision);
       }
 
-      inFlightSurfaceByOperation.set(schedulerOperationId, surfaceId);
+      inFlightScopeByOperation.set(schedulerOperationId, scope);
       let terminal: MutationFenceReadback | undefined;
       let heartbeat: ReturnType<typeof setInterval> | undefined;
       const clearHeartbeat = (): void => { if (heartbeat) clearInterval(heartbeat); heartbeat = undefined; };
-      const releaseInFlight = (): void => { inFlightSurfaceByOperation.delete(schedulerOperationId); inFlightUncertainSince.delete(surfaceId); };
+      const releaseInFlight = (): void => { inFlightScopeByOperation.delete(schedulerOperationId); inFlightUncertainSince.delete(scopeKey); };
       const finish = (result: MutationFenceReadback): MutationFenceReadback => {
         terminal = result;
         clearHeartbeat();
@@ -532,9 +560,9 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
         }
         const stopped = scheduler.abort(schedulerOperationId, reason);
         targetRegistry.release(schedulerOperationId);
-        unresolvedSurfaces.add(surfaceId);
+        unresolvedScopes.set(scopeKey, scope);
         if (dispatchFinished) releaseInFlight();
-        else if (!inFlightUncertainSince.has(surfaceId)) inFlightUncertainSince.set(surfaceId, now());
+        else if (!inFlightUncertainSince.has(scopeKey)) inFlightUncertainSince.set(scopeKey, now());
         const revision = stopped.receipt?.resultingSurfaceRevision ?? stopped.receipt?.baseSurfaceRevision ?? surfaceRevision;
         const detail = reason.slice(0, 240);
         const durable = persist({
@@ -587,7 +615,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
             ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
             durable: persisted,
           }));
-          unresolvedSurfaces.delete(surfaceId);
+          unresolvedScopes.delete(scopeKey);
           releaseInFlight();
           return result;
         },
@@ -612,7 +640,7 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
             operationId: input.operationId, surfaceId, status, surfaceRevision: revision,
             targetRevision: input.target.revision, detail, durable: persisted,
           }));
-          unresolvedSurfaces.delete(surfaceId);
+          unresolvedScopes.delete(scopeKey);
           releaseInFlight();
           return result;
         },
@@ -641,25 +669,27 @@ export function createMultiplayerDispatchFence(options: MultiplayerDispatchFence
     surfaceRevision(surfaceId) {
       return currentRevision(surfaceId);
     },
+    regionRevision(surfaceId, regionId) {
+      return scheduler.snapshot().regionRevisions[regionScopeKey(surfaceId, regionId)] ?? 0;
+    },
 
     observeSurface(surfaceId) {
       const current = currentRevision(surfaceId);
-      if (!unresolvedSurfaces.has(surfaceId)) return current;
-      const stillInFlight = [...inFlightSurfaceByOperation.values()].includes(surfaceId);
-      if (stillInFlight) {
-        const uncertainSince = inFlightUncertainSince.get(surfaceId);
-        const stale = uncertainSince !== undefined && now() - uncertainSince >= staleInFlightTimeoutMs;
-        if (!stale) return current;
-        for (const [operationId, candidate] of inFlightSurfaceByOperation) {
-          if (candidate === surfaceId) inFlightSurfaceByOperation.delete(operationId);
+      if (!hasUnresolvedSurface(surfaceId)) return current;
+      for (const [operationId, candidate] of inFlightScopeByOperation) {
+        if (candidate.surfaceId !== surfaceId) continue;
+        const key = mutationScopeKey(candidate);
+        const uncertainSince = inFlightUncertainSince.get(key);
+        if (uncertainSince !== undefined && now() - uncertainSince >= staleInFlightTimeoutMs) {
+          inFlightScopeByOperation.delete(operationId); inFlightUncertainSince.delete(key);
         }
-        inFlightUncertainSince.delete(surfaceId);
       }
+      if (hasInFlightSurface(surfaceId)) return current;
       const next = scheduler.advanceSurfaceRevision(surfaceId);
       if (next === undefined) return current;
       try {
         store.reconcileMutationSurface(surfaceId, next);
-        unresolvedSurfaces.delete(surfaceId);
+        clearUnresolvedSurface(surfaceId);
         return next;
       } catch (error) {
         storeError = error instanceof Error ? error.message : "The mutation receipt could not be reconciled.";

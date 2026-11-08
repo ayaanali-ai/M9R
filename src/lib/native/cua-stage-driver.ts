@@ -15,6 +15,7 @@ import { createWindowsDesktopStageManager, type WindowsStageDependencies, type N
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
 import { classifySaveAsConflict, findDialogButton, findSaveAsButton, findSaveAsNameField, resolveSaveAsTarget } from "./stage-save-as";
+import { nativeValueControlRegion, sameNativeControlEpoch } from "./native-control-region";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
 const PUBLIC_CURSOR_LABEL_MAX_LENGTH = 28;
@@ -363,6 +364,8 @@ export type CuaStageInputOptions = {
   signal?: AbortSignal;
   /** Internal stage policy; background stages may never escalate to the owner's foreground. */
   deliveryMode?: "background" | "owner-preview";
+  /** Internal region-fence contract: this action may not fall back to shared caret/OS input. */
+  semanticOnly?: boolean;
 };
 export type CuaDesktopClickOptions = CuaStageInputOptions & { button?: "left" | "middle" | "right"; count?: 1 | 2 };
 export type CuaStageTextOptions = CuaStageInputOptions & { mode?: "insert" | "replace"; x?: number; y?: number; expectedRole?: string; expectedLabel?: string; delayMs?: number };
@@ -1166,6 +1169,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // element-token namespace. Keep the exact observation identity locally so
   // the native dispatcher can re-resolve and validate the same control.
   const nativeObservedElements = new Map<string, Map<string, NativeWindowStructureElement>>();
+  const nativeObservedComplete = new Map<string, boolean>();
   let agentRuntimePromise: Promise<CuaRuntime> | undefined;
   let agentRuntimeReady: CuaRuntime | undefined;
 
@@ -1987,6 +1991,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     elementAt: (x: number, y: number) => Promise<string | undefined>;
     elementAtPoint: (x: number, y: number, action?: "click" | "set_value") => Promise<CuaWindowElement | undefined>;
     observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
+    observedNativeElementByToken: (token: string, expected?: { role?: string; label?: string }) => NativeWindowStructureElement | undefined;
+    observedNativeElements: () => readonly NativeWindowStructureElement[];
     elementByToken: (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => Promise<{ element: CuaWindowElement; frame: CuaStageWindowFrame; nativeElement?: NativeWindowStructureElement } | undefined>;
     captureTarget: (x: number, y: number) => Promise<CuaStageTargetDescription | undefined>;
   }) => Promise<T>, cursorIdentity?: CuaAgentCursorIdentity): Promise<T> {
@@ -2041,8 +2047,13 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       });
       observedElements.set(observationKey, new Map(elements.map(({ native, mapped }) => [native.ref, mapped])));
       nativeObservedElements.set(observationKey, new Map(structure.elements.map((element) => [element.ref, element])));
+      nativeObservedComplete.set(observationKey, structure.status === "complete" && !structure.truncated);
       while (observedElements.size > 64) observedElements.delete(observedElements.keys().next().value!);
-      while (nativeObservedElements.size > 64) nativeObservedElements.delete(nativeObservedElements.keys().next().value!);
+      while (nativeObservedElements.size > 64) {
+        const oldest = nativeObservedElements.keys().next().value!;
+        nativeObservedElements.delete(oldest);
+        nativeObservedComplete.delete(oldest);
+      }
       return { structure, elements };
     };
 
@@ -2168,9 +2179,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       if ((expected?.role !== undefined && observed.role !== expected.role)
         || (expected?.label !== undefined && normalizedLabel !== expected.label)) return undefined;
       const { structure, elements } = await readNativeElements();
-      const current = structure.elements.find((candidate) => JSON.stringify(candidate.path) === JSON.stringify(observed.path)
-        && candidate.role === observed.role && candidate.label === observed.label
-        && candidate.className === observed.className && candidate.automationId === observed.automationId);
+      const candidates = structure.elements.filter((candidate) => sameNativeControlEpoch(observed, candidate));
+      const current = candidates.length === 1 ? candidates[0] : undefined;
       if (!current || (current.enabled === false && expected?.allowDisabled !== true)) return undefined;
       const fresh = elements.find(({ native }) => native === current);
       if (!fresh) return undefined;
@@ -2187,6 +2197,12 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     const elementAt = async (x: number, y: number) => (await hitTarget(x, y))?.elementToken;
     const observedElementByToken = (token: string, expected?: { role?: string; label?: string }) => {
       const observed = observedElements.get(observationKey)?.get(token);
+      if (!observed || (expected?.role !== undefined && observed.role !== expected.role)
+        || (expected?.label !== undefined && normalizeAccessibleLabel(observed.label) !== expected.label)) return undefined;
+      return observed;
+    };
+    const observedNativeElementByToken = (token: string, expected?: { role?: string; label?: string }) => {
+      const observed = nativeObservedElements.get(observationKey)?.get(token);
       if (!observed || (expected?.role !== undefined && observed.role !== expected.role)
         || (expected?.label !== undefined && normalizeAccessibleLabel(observed.label) !== expected.label)) return undefined;
       return observed;
@@ -2223,7 +2239,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
 
     return timingContext.run({ stageName: stage.name, afterDispatch: false }, () => run({ driver, sdk, session, pid, windowId,
       captureFrame: captureNativeFrame, capture, readStructure, elementAt, elementAtPoint: hitTarget,
-      observedElementByToken, elementByToken, captureTarget }));
+      observedElementByToken, observedNativeElementByToken,
+      observedNativeElements: () => nativeObservedComplete.get(observationKey)
+        ? [...(nativeObservedElements.get(observationKey)?.values() ?? [])] : [],
+      elementByToken, captureTarget }));
   }
 
   async function capture(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageCapture> {
@@ -2304,6 +2323,23 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const rect = element.frame;
       if (rect && rect.w > 0 && rect.h > 0) description.rect = { x: rect.x, y: rect.y, width: rect.w, height: rect.h };
       return description;
+    }, cursorIdentity);
+  }
+
+  /** Only a direct ValuePattern mutation can safely reserve one control rather than its whole window. */
+  async function valueMutationRegion(name: string, ref: string, expected: { role?: string; label?: string }, cursorIdentity?: CuaAgentCursorIdentity): Promise<string | undefined> {
+    return withRegisteredWindow(name, async ({ observedNativeElementByToken, observedNativeElements }) => {
+      const element = observedNativeElementByToken(ref, expected);
+      return element ? nativeValueControlRegion(element, observedNativeElements(), true) : undefined;
+    }, cursorIdentity);
+  }
+  async function observedValueMutationRegions(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<string[]> {
+    return withRegisteredWindow(name, async ({ observedNativeElements }) => {
+      // Reuse the exact observation. A second walk here would invalidate the refs
+      // being returned to the agent and incorrectly bless a different snapshot.
+      const elements = observedNativeElements();
+      return [...new Set(elements.map((element) => nativeValueControlRegion(element, elements, true))
+        .filter((region): region is string => Boolean(region)))];
     }, cursorIdentity);
   }
 
@@ -3722,6 +3758,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           expectedLabel: selected.nativeElement.label,
           expectedClassName: selected.nativeElement.className,
           expectedAutomationId: selected.nativeElement.automationId,
+          ...(selected.nativeElement.runtimeId?.length ? { expectedRuntimeId: selected.nativeElement.runtimeId } : {}),
           text,
         });
         if (semantic.dispatched) {
@@ -3731,6 +3768,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           };
         }
       }
+      if (options.semanticOnly) throw new DesktopInputNotDispatchedError(
+        "The independently claimed control no longer supports direct UI Automation value replacement; no caret or foreground fallback was sent.", "background-unavailable");
       const before = await captureFrame();
       const screen = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
       const outcome = await nativeReplaceTextAtScreenPoint(pid, windowId, screen.x, screen.y, text,
@@ -3984,7 +4023,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     } catch { /* the runtime never initialized */ }
   }
 
-  return { capture, readStructure, readElementValue, readDesktopStructure, describeTarget, describeElementTarget, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
+  return { capture, readStructure, readElementValue, readDesktopStructure, describeTarget, describeElementTarget, valueMutationRegion, observedValueMutationRegions, showAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
     clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,

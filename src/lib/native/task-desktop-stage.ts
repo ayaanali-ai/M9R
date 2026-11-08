@@ -37,7 +37,7 @@ import type { ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { discoverInstalledWindowsApp, discoverInstalledWindowExecutable } from "./windows-installed-apps";
 import { createBrowserSpaceLedger, type BrowserSpaceLedger } from "./browser-space-ledger";
-import { createAgentInputStreams, type InputStreamContext, type InputStreamIdentity } from "./agent-input-stream";
+import { agentInputStreamId, createAgentInputStreams, type InputStreamContext, type InputStreamIdentity } from "./agent-input-stream";
 
 export const TASK_STAGE_POLICY_FILE = "task-stage-policy.json";
 export type TaskStageMode = "background" | "owner-preview";
@@ -252,7 +252,7 @@ export function createTaskDesktopStageService(input: {
   };
   const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, taskActive, ...input.stage, root, terminal: true };
   const ownsManager = !input.manager;
-  const manager = input.manager ?? createWindowsDesktopStageManager(stageDeps);
+  const manager = input.manager ?? createWindowsDesktopStageManager({ ...stageDeps, sharedWindowFence: input.mutationFence });
   let nativeStageWarmPromise: Promise<void> | undefined;
   const warmNativeStageHost = (): Promise<void> => {
     if (isAgentContext(stageDeps.env ?? process.env)) return Promise.resolve();
@@ -414,7 +414,12 @@ export function createTaskDesktopStageService(input: {
         endedAt: new Date(context.startedAt).toISOString(), durationMs: context.startedAt - context.queuedAt,
         status: "ok", detail: `input-stream=${context.streamId};sequence=${context.sequence};kind=${kind}` });
       context.signal.throwIfAborted();
-      const result = await run(context);
+      // The native protocol remains sequential within a process. A stream gets
+      // its own persistent helper, so a blocked UIA call cannot queue other agents
+      // behind that helper's one active request.
+      const result = typeof manager.withInputStream === "function"
+        ? await manager.withInputStream(context.streamId, () => run(context))
+        : await run(context);
       return result && typeof result === "object"
         ? { ...result, inputStream: { id: context.streamId } } as T
         : result;
@@ -436,6 +441,7 @@ export function createTaskDesktopStageService(input: {
     lastKnownWindowTitle?: string;
   };
   const ownedApps = new Map<string, OwnedStageApp>();
+  const observedRegionRevisions = new Map<string, { surfaceId: string; surfaceRevision: number; regions: Map<string, number> }>();
   const activeAgentCursors = new Map<string, CuaAgentCursorIdentity>();
   // A single failed identity/policy lookup is far more likely to be a transient
   // token-refresh or policy-reload race than a genuinely revoked session. Only
@@ -614,13 +620,7 @@ export function createTaskDesktopStageService(input: {
       const sessionTag = createHash("sha256").update(`${normalizeHandle(identity.handle)}\0${identity.sessionId}`).digest("hex").slice(0, 8);
       const existing = manager.list().find((stage) => stage.name === name);
       let assignedStage: ReturnType<typeof manager.assignAgent> | undefined;
-      if (mode === "background") {
-        // Background is an M9R action-routing mode. The local stage maps to an
-        // HWND on the normal Windows desktop; it never creates or switches OS desktops.
-        if (!existing) await manager.ensureStage(name);
-        assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
-      } else {
-        if (options.bindForeground) {
+      if (options.bindForeground) {
           if (typeof manager.currentForegroundWindow !== "function") throw new Error("The native stage helper cannot bind the current foreground window.");
           const foreground = await manager.currentForegroundWindow();
           // Never bind M9R's own overlay or a hidden/minimized window. This
@@ -633,13 +633,16 @@ export function createTaskDesktopStageService(input: {
             throw new Error("The current foreground window is M9R's own overlay; focus the app you want the agent to inspect.");
           }
           await manager.ensureStage(name);
-          const attached = await manager.attachWindow(name, String(foreground.pid), foreground.windowId);
           assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
+          const attached = input.mutationFence
+            ? await manager.attachSharedWindow(name, String(foreground.pid), foreground.windowId)
+            : await manager.attachWindow(name, String(foreground.pid), foreground.windowId);
+          assignedStage = attached.stage;
           ownedApps.set(name, { taskId, appId: "", pid: foreground.pid, windowId: foreground.windowId, ownsProcess: false });
           if (!attached.window || attached.window.pid !== foreground.pid || attached.window.windowId !== foreground.windowId) {
             throw new Error("Windows did not confirm the current foreground window binding.");
           }
-        } else {
+      } else {
         // Owner preview binds to the owner's current screen and keeps an exact
         // HWND anchor. It never creates, moves, or closes a Windows desktop.
         recoverPersistedApp(name, taskId);
@@ -654,7 +657,6 @@ export function createTaskDesktopStageService(input: {
         // inspection outcome (do not spawn). Clearing it here destroys evidence,
         // including for a fresh broker that must recover from disk.
         assignedStage = manager.assignAgent(name, { handle: normalizeHandle(identity.handle), sessionTag, taskId });
-        }
       }
       // Publish the agent's labeled overlay before launch or the first input
       // action. The native cursor is visual-only here: it does not focus a
@@ -872,6 +874,9 @@ export function createTaskDesktopStageService(input: {
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       const mutating = action.kind !== "capture" && action.kind !== "read_structure" && action.kind !== "read_value";
+      if (mutating && inspected.stage.fencedBinding && !input.mutationFence) {
+        throw new DesktopInputNotDispatchedError("This shared app target requires the owner broker's mutation fence; no input was sent.", "dispatch-gate");
+      }
       const receiptInput = mutating && operationId ? {
         handle: identity.handle,
         sessionId: identity.sessionId,
@@ -890,20 +895,36 @@ export function createTaskDesktopStageService(input: {
       let result: unknown;
       let mutationRevision: number | undefined;
       let mutationSurfaceId: string | undefined;
+      let mutationRegionId: string | undefined;
       let fenceTransaction: MutationFenceTransaction | undefined;
       if (input.mutationFence) {
+        if (effectiveAction.kind === "replace_element" && effectiveAction.view === "app" && selected
+          && typeof driver.valueMutationRegion === "function") {
+          mutationRegionId = await driver.valueMutationRegion(name, effectiveAction.ref,
+            { role: effectiveAction.expectedRole, label: effectiveAction.expectedLabel }, identity);
+        }
         const fenceTarget = action.kind !== "system_control" && effectiveAction.view === "app" && selected
-          ? desktopWindowMutationTarget({ pid: selected.pid, windowId: selected.windowId, processGeneration: inspected.anchor?.processGeneration })
+          ? desktopWindowMutationTarget({ pid: selected.pid, windowId: selected.windowId, processGeneration: inspected.anchor?.processGeneration,
+            ...(mutationRegionId ? { regionId: mutationRegionId } : {}) })
           : desktopMutationTarget();
         mutationSurfaceId = fenceTarget.surfaceId;
         if (mutating) {
+          const observedRegions = observedRegionRevisions.get(name);
+          const expectedRegionRevision = mutationRegionId && observedRegions?.surfaceId === fenceTarget.surfaceId
+            ? observedRegions.regions.get(mutationRegionId) : undefined;
+          if (mutationRegionId && expectedRegionRevision === undefined) {
+            if (receiptInput) input.store.releaseStageOperation(receiptInput);
+            throw new DesktopInputNotDispatchedError("Read the app structure before independently changing this control; no input was sent.", "mutation-revision");
+          }
           const begun = input.mutationFence.begin({
             agent: identity.handle,
             provider: identity.provider,
             sessionId: identity.sessionId,
             operationId: operationId ?? `stage-${randomUUID()}`,
             target: fenceTarget,
-            ...(expectedMutationRevision === undefined ? {} : { expectedMutationRevision }),
+            ...((expectedMutationRevision ?? (mutationRegionId ? observedRegions?.surfaceRevision : undefined)) === undefined ? {}
+              : { expectedMutationRevision: expectedMutationRevision ?? observedRegions?.surfaceRevision }),
+            ...(expectedRegionRevision === undefined ? {} : { expectedRegionRevision }),
           });
           if (!begun.ok) {
             // A typed pre-dispatch refusal may release the stage claim: no input reached the OS.
@@ -949,7 +970,8 @@ export function createTaskDesktopStageService(input: {
       cancellationPoll.unref();
       try {
         dispatchStarted = mutating;
-        result = await runTaskStageAction(driver, name, effectiveAction, identity, mode, controller.signal);
+        result = await runTaskStageAction(driver, name, effectiveAction, identity, mode, controller.signal,
+          { semanticOnly: Boolean(mutationRegionId) });
         if (fenceTransaction) {
           const committed = fenceTransaction.commit({ status: "applied" });
           mutationRevision = committed.surfaceRevision;
@@ -959,6 +981,12 @@ export function createTaskDesktopStageService(input: {
         } else if (mutationSurfaceId && input.mutationFence
           && (effectiveAction.kind === "capture" || effectiveAction.kind === "read_structure")) {
           mutationRevision = input.mutationFence.observeSurface(mutationSurfaceId);
+        }
+        if (effectiveAction.kind === "read_structure" && effectiveAction.view === "app" && selected
+          && input.mutationFence && mutationSurfaceId && typeof driver.observedValueMutationRegions === "function") {
+          const regions = await driver.observedValueMutationRegions(name, identity);
+          observedRegionRevisions.set(name, { surfaceId: mutationSurfaceId, surfaceRevision: mutationRevision ?? 0,
+            regions: new Map(regions.map((region) => [region, input.mutationFence!.regionRevision(mutationSurfaceId!, region)])) });
         }
         // Opportunistic, free: a read_structure result already carries the window title
         // in memory (CuaStageStructure.windowTitle); stash it in case a future action in
@@ -1066,6 +1094,9 @@ export function createTaskDesktopStageService(input: {
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
     const initial = authorize(token, taskId, mode);
+    if (manager.list().find((stage) => stage.name === initial.name)?.fencedBinding && !input.mutationFence) {
+      throw new DesktopInputNotDispatchedError("This app target requires the owner broker's mutation fence; no launch or focus action was sent.", "dispatch-gate");
+    }
     const queueName = mode === "owner-preview" ? stageCoordinationKey(initial.task.goal) : initial.name;
     const run = async () => {
       const { name, identity, task } = authorize(token, taskId, mode);
@@ -1545,7 +1576,10 @@ export function createTaskDesktopStageService(input: {
       manager.clearOwnedAnchor(name, app.pid, app.windowId);
       // Personal Chrome belongs to the user. Discarding a task detaches the
       // stage anchor but never closes the user's browser process.
-      if (app.ownsProcess && app.process && app.process.exitCode === null && !app.process.killed) app.process.kill();
+      const sharedWithAnotherTask = manager.list().some((stage) => stage.name !== name
+        && stage.anchor?.pid === app.pid && stage.anchor.windowId === app.windowId
+        && stage.agentAssignment?.taskId && taskActive(stage.agentAssignment.taskId));
+      if (!sharedWithAnotherTask && app.ownsProcess && app.process && app.process.exitCode === null && !app.process.killed) app.process.kill();
       ownedApps.delete(name);
       browserSpaces.remove(`space-${name}`);
       return { name, taskId, closed: true };
@@ -1576,6 +1610,7 @@ export function createTaskDesktopStageService(input: {
         if (failures < CURSOR_REVOKE_AFTER_FAILURES) continue;
         try {
           await driver.closeAgentCursor(identity);
+          manager.closeInputStream?.(agentInputStreamId(identity));
           activeAgentCursors.delete(key);
           cursorAuthFailures.delete(key);
         } catch { /* retry revocation on the next tick; Driver idle-hide is the fail-safe */ }
@@ -1592,6 +1627,7 @@ export function createTaskDesktopStageService(input: {
     await inputStreams.close();
     await Promise.all([...stageQueues.values(), reaperPending]);
     activeAgentCursors.clear();
+    observedRegionRevisions.clear();
     try {
       await driver.shutdown();
     } finally {
