@@ -32,6 +32,8 @@ export interface WebBrokerClient {
   /** Structured provider-neutral teammate message. Kept separate from legacy task delivery. */
   sendA2A?(token: string, input: MultiplayerA2ASendInput): Promise<MultiplayerSendResult>;
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
+  /** Acknowledge only completed teammate replies addressed to the authenticated sending session. */
+  markAgentResultsShown?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
   recordAgentTaskResult?(token: string, taskId: string, summary: string, completion?: TaskCompletionReport): Promise<{
     ok: boolean;
@@ -218,6 +220,9 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     },
     async claimAgentInbox(token, taskIds) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "claim_inbox", token, taskIds } });
+    },
+    async markAgentResultsShown(token, taskIds) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "mark_results_shown", token, taskIds } });
     },
     async advanceAgentInboxCursor(token, seq) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "cursor", token, seq } });

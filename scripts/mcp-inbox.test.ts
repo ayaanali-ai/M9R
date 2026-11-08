@@ -193,6 +193,39 @@ test("one task is claimed by one provider session and another session cannot tak
   t.done();
 });
 
+test("native reply wait is scoped to the sent task, rejects another session, and shows its result once", async () => {
+  const t = setup();
+  try {
+    const requested = t.store.addTask({
+      from: "codex", to: "claude", goal: "Check the requested value.", origin: "agent_initiated",
+      fromSession: "x1", targetSession: "c1", standingRuleApplies: true, idempotencyKey: "native-exact-reply-wait",
+    }).task;
+    const unrelated = t.store.addTask({
+      from: "codex", to: "claude", goal: "Unrelated request.", origin: "agent_initiated",
+      fromSession: "x1", targetSession: "c1", standingRuleApplies: true, idempotencyKey: "native-unrelated-reply-wait",
+    }).task;
+    t.store.markDelivered([requested.id, unrelated.id], "c1");
+    assert.equal(t.store.recordTaskResult(t.claude, unrelated.id, "unrelated result", {
+      status: "completed", remainingWork: [],
+    }).ok, true);
+
+    const pending = await t.call("m9r_inbox", { token: t.codex, taskId: requested.id });
+    assert.match(pending, new RegExp(`${requested.id} to @claude: received; awaiting the teammate's reply`));
+    assert.doesNotMatch(pending, /unrelated result/, "a task-scoped wait must not return another task's answer");
+
+    const otherSession = t.store.issueIdentity("codex", "codex", "x2").token;
+    await assert.rejects(t.call("m9r_inbox", { token: otherSession, taskId: requested.id }), /not a teammate message sent by this exact session/);
+
+    assert.equal(t.store.recordTaskResult(t.claude, requested.id, "exact reply", {
+      status: "completed", remainingWork: [],
+    }).ok, true);
+    const answer = await t.call("m9r_inbox", { token: t.codex, taskId: requested.id });
+    assert.match(answer, /exact reply/);
+    assert.doesNotMatch(answer, /unrelated result/);
+    assert.ok(t.store.getTask(requested.id)?.resultShownAt, "the exact result is acknowledged only after retrieval");
+    assert.equal(await t.call("m9r_inbox", { token: t.codex, taskId: requested.id }), "Inbox is empty.");
+  } finally { t.done(); }
+});
 test("an agent result queues one reply for the exact requesting session and never loops", async () => {
   const t = setup();
   try {

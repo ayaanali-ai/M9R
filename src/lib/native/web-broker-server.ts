@@ -27,7 +27,7 @@ import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
 import type { WebUiBridge } from "./web-ui-bridge";
 import { canQueue } from "./codex-delivery-core";
-import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
+import { MAX_AGENT_REPLY_DEPTH, normalizeHandle } from "./inbox-core";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
 import type { MultiplayerA2ASendInput, MultiplayerRuntime } from "./multiplayer-runtime";
 import { computerUseLatencySummary } from "./computer-use-latency";
@@ -177,7 +177,7 @@ export interface WebBrokerServerOptions {
     primeCursor?(token: string, taskId: string): Promise<unknown>;
     primeCursorForOwner?(taskId: string): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
-  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">;
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult" | "markResultShown">;
   /** Production owner broker has a native desktop route; no extension handshake is required. */
   nativeDesktopRoute?: boolean;
   key: string;
@@ -250,7 +250,7 @@ type AgentMcpStoreResult = {
  * own user ACL. This is intentionally not a generic store/RPC endpoint.
  */
 export function applyAgentMcpStoreMutation(
-  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">,
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult" | "markResultShown">,
   input: unknown,
   multiplayerRuntime?: MultiplayerRuntime,
 ): AgentMcpStoreResult {
@@ -354,6 +354,26 @@ export function applyAgentMcpStoreMutation(
       }
       const tasks = store.claimInboxTasks(ownHandle, identity.sessionId, value.taskIds as string[]);
       return { status: 200, body: { ok: true, taskIds: tasks.map((task) => task.id) } };
+    }
+
+    if (value.action === "mark_results_shown") {
+      if (inRoom || Object.keys(value).some((key) => !["action", "token", "taskIds"].includes(key))
+        || !Array.isArray(value.taskIds) || value.taskIds.length > 10
+        || value.taskIds.some((id) => typeof id !== "string" || !/^T[0-9]{1,12}$/.test(id))) {
+        return { status: 400, body: { ok: false, error: "Invalid native M9R teammate-result acknowledgement." } };
+      }
+      const taskIds = value.taskIds as string[];
+      const valid = taskIds.every((id) => {
+        const task = store.getTask(id);
+        return task !== undefined
+          && task.origin === "agent_initiated"
+          && normalizeHandle(task.from) === ownHandle
+          && task.fromSession === identity!.sessionId
+          && Boolean(task.resultSummary || (task.completion?.status === "incomplete" && task.completion.summary));
+      });
+      if (!valid) return { status: 403, body: { ok: false, error: "A teammate result is not addressed to this provider session." } };
+      store.markResultShown(taskIds);
+      return { status: 200, body: { ok: true, taskIds } };
     }
 
     if (value.action === "result") {

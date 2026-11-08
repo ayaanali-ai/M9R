@@ -164,10 +164,10 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
     assert.match(denied.error ?? "", /not sent to you/);
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, undefined);
 
-    const recorded = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.");
+    const recorded = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.", { status: "completed", remainingWork: [] });
     assert.equal(recorded.ok, true);
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "Reviewed the diff.");
-    const duplicateResult = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.");
+    const duplicateResult = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.", { status: "completed", remainingWork: [] });
     assert.equal(duplicateResult.ok, true, "retrying the same successful result is idempotent");
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "Reviewed the diff.");
 
@@ -214,12 +214,36 @@ test("owner broker atomically claims a native inbox task for one session", async
     const wrong = await web.recordAgentTaskResult!(second.token, sent.taskId!, "wrong session");
     assert.equal(wrong.ok, false);
     assert.match(wrong.error ?? "", /belongs to another session/);
-    const right = await web.recordAgentTaskResult!(first.token, sent.taskId!, "diagnosis complete");
+    const right = await web.recordAgentTaskResult!(first.token, sent.taskId!, "diagnosis complete", { status: "completed", remainingWork: [] });
     assert.equal(right.ok, true);
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "diagnosis complete");
   } finally { await ctx.done(); }
 });
 
+test("owner broker acknowledges only teammate results for the exact sending session", async () => {
+  const ctx = await setup();
+  try {
+    const sender = ctx.store.issueIdentity("alice", "codex", "result-sender-session");
+    const otherSession = ctx.store.issueIdentity("alice", "codex", "other-sender-session");
+    const recipient = ctx.store.issueIdentity("bob", "claude", "result-recipient-session");
+    const web = createWebBrokerClient({
+      keyPath: brokerKeyPath(ctx.root), ownerPipePath: ownerPipePath(ctx.root), port: ctx.broker.port,
+      fetchImpl: async () => { throw new Error("task-state mutations must stay on the owner pipe"); },
+    });
+    const task = ctx.store.addTask({ from: "alice", to: "bob", goal: "Return the result.", origin: "agent_initiated",
+      fromSession: "result-sender-session", targetSession: "result-recipient-session", standingRuleApplies: true,
+      idempotencyKey: "result-shown-session-fence" }).task;
+    ctx.store.markDelivered([task.id], "result-recipient-session");
+    assert.equal((await web.recordAgentTaskResult!(recipient.token, task.id, "verified answer")).ok, true);
+
+    const denied = await web.markAgentResultsShown!(otherSession.token, [task.id]);
+    assert.equal(denied.ok, false);
+    assert.equal(ctx.store.getTask(task.id)?.resultShownAt, undefined);
+    const acknowledged = await web.markAgentResultsShown!(sender.token, [task.id]);
+    assert.deepEqual(acknowledged, { ok: true, taskIds: [task.id] });
+    assert.ok(ctx.store.getTask(task.id)?.resultShownAt);
+  } finally { await ctx.done(); }
+});
 test("task stage preparation requires the broker key and refuses browser origins and extra control fields", async () => {
   let calls = 0;
   let mode: string | undefined;

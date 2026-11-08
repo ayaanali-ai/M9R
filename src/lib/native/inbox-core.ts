@@ -402,15 +402,22 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
 const RESULT_ITEMS = 3;
 const RESULT_CHARS = 400;
 
-/** Answers to tasks this agent sent, shown once at its next prompt. Empty when there are none (zero tokens). */
+/** Answers to tasks this agent sent, shown once at its next prompt or inbox recovery lookup. */
 export function renderResultsInjection(tasks: readonly Task[], handle: string, options: { includeTaskIds?: boolean } = {}): { text: string; ids: string[] } {
   const normalizedHandle = normalizeHandle(handle);
-  const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle && t.resultSummary && !t.resultShownAt).slice(0, RESULT_ITEMS);
+  const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle
+    && !t.resultShownAt
+    && (t.resultSummary || (t.completion?.status === "incomplete" && t.completion.summary))).slice(0, RESULT_ITEMS);
   if (ready.length === 0) return { text: "", ids: [] };
   const includeTaskIds = options.includeTaskIds !== false;
-  const lines = ready.map((t) => includeTaskIds
-    ? `[${t.id} finished by @${t.to}] ${neutralizeBracketHeaders(clip(t.resultSummary ?? "", RESULT_CHARS).text)}`
-    : `Work finished by @${t.to}: ${neutralizeBracketHeaders(clip(t.resultSummary ?? "", RESULT_CHARS).text)}`);
+  const lines = ready.map((t) => {
+    const incomplete = t.completion?.status === "incomplete" && !t.resultSummary;
+    const summary = t.resultSummary ?? t.completion?.summary ?? "";
+    const safeSummary = neutralizeBracketHeaders(clip(summary, RESULT_CHARS).text);
+    return includeTaskIds
+      ? `[${t.id} ${incomplete ? "incomplete report" : "finished"} by @${t.to}] ${safeSummary}`
+      : `${incomplete ? "Incomplete report" : "Work finished"} by @${t.to}: ${safeSummary}`;
+  });
   return { text: `M9R results (${ready.length})\n${lines.join("\n")}`, ids: ready.map((t) => t.id) };
 }
 

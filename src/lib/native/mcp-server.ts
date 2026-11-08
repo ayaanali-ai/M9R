@@ -15,7 +15,7 @@ import { z } from "zod";
 import { taskCompletionReport, taskCompletionReportSchema } from "./task-completion-contract";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import { handleForProvider, type LocalStore } from "./local-store";
-import { inboxMaxAgeMs, MAX_AGENT_REPLY_DEPTH, normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
+import { inboxMaxAgeMs, MAX_AGENT_REPLY_DEPTH, normalizeHandle, renderInboxInjection, renderResultsInjection, type Task } from "./inbox-core";
 import { canQueue, isThreadId, normCwd } from "./codex-delivery-core";
 import type { VerifiedIdentity } from "./identity-core";
 import type { WebBrokerClient } from "./web-broker-client";
@@ -834,7 +834,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_send",
     {
-      description: "Send a task to another M9R agent by handle. It goes into their inbox and arrives at their next prompt or turn -- this does not wait for a reply.",
+      description: "Send a task to another M9R agent by handle. It goes into their inbox and arrives at their next prompt or turn; sending does not wait for a reply. The result includes the task ID. In a native/terminal session, if that reply is needed before you continue, call m9r_inbox once with that taskId and waitSeconds up to 30. M9R returns only the matching reply or an explicit pending/failed delivery status. Web-room replies are pushed automatically. Do not poll repeatedly; continue independent work or report that the teammate has not replied yet.",
       inputSchema: {
         ...AUTH_FIELD,
         to: z.string().min(1).max(80).describe("The recipient's handle, without the @, e.g. \"codex\"."),
@@ -984,14 +984,24 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_inbox",
     {
       description:
-        "Manual recovery only: inspect new teammate messages when M9R reports a delivery gap or the user explicitly asks. Normal authorized work is delivered automatically into the provider turn; do not poll this tool in a loop or as part of ordinary work. Each call shows only messages not yet seen and marks them seen. For a web-room agent, teammate answers are pushed automatically as the next message; for a native/terminal session, waitSeconds (up to 30) performs one bounded recovery wait.",
+        "Recovery and reply-wait tool: inspect new teammate messages when M9R reports a delivery gap, or wait once for a reply that the current task needs. Normal authorized work is delivered automatically into the provider turn; do not poll in a loop or use this for ordinary work. Each call shows only messages/results not yet seen and marks them seen. In a native/terminal session, pass the taskId returned by m9r_send to wait for that exact reply; without one, results are matched to messages sent by this exact session. Web-room replies are pushed automatically. A native/terminal wait can last up to 30 seconds and reports whether the requested message is still pending, was received but has no reply yet, or failed.",
       inputSchema: {
         ...AUTH_FIELD,
-        waitSeconds: z.number().int().min(0).max(30).default(0).describe("How long to wait for a new message before giving up. 0 checks once."),
+        taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Optional exact teammate task ID returned by m9r_send. Native/terminal sessions use it to wait only for that task's reply or status; web-room replies are pushed automatically."),
+        waitSeconds: z.number().int().min(0).max(30).default(0).describe("How long a native/terminal session waits for a teammate message or requested reply. 0 checks once."),
       },
     },
-    async ({ token, waitSeconds }) => {
+    async ({ token, taskId: requestedTaskId, waitSeconds }) => {
       const { identity, token: authToken } = await authenticate(token);
+      if (requestedTaskId) {
+        if (inRoom(identity)) throw new Error("Web-room teammate replies are pushed automatically; wait for the reply in the current conversation.");
+        const requested = deps.store.getTask(requestedTaskId);
+        if (!requested || requested.origin !== "agent_initiated"
+          || normalizeHandle(requested.from) !== normalizeHandle(identity.handle)
+          || requested.fromSession !== identity.sessionId) {
+          throw new Error(`Task ${requestedTaskId} is not a teammate message sent by this exact session.`);
+        }
+      }
       // A web-room agent has one durable room inbox even when its provider process/session is restarted; using a
       // cursor keyed by that session ID would replay its ENTIRE delivered history after recovery, including old
       // "stop all work" messages. The cursor belongs to the stable room handle, never to a process or provider session.
@@ -1000,7 +1010,43 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const handle = roomHandle(identity, identity.handle);
       const deadline = Date.now() + (waitSeconds ?? 0) * 1000;
       const refusedRoomTaskIds = new Set<string>();
+      const outgoingTasks = (): Task[] => inRoom(identity) ? [] : deps.store.tasksFrom(identity.handle)
+        .filter((task) => task.origin === "agent_initiated"
+          && task.fromSession === identity.sessionId
+          && (!requestedTaskId || task.id === requestedTaskId)
+          && taskIsFreshForIdentity(identity, task)
+          && !task.dismissedAt);
+      const markOutgoingResultsShown = async (taskIds: readonly string[]): Promise<void> => {
+        if (taskIds.length === 0) return;
+        if (deps.web?.markAgentResultsShown) {
+          const saved = await deps.web.markAgentResultsShown(authToken, taskIds);
+          if (!saved.ok) throw new Error(saved.error ?? "The owner broker could not record which teammate replies were shown.");
+        } else {
+          deps.store.markResultShown(taskIds);
+        }
+      };
+      const outgoingWaitStatus = (tasks: readonly Task[]): string => {
+        const pendingSends = tasks.filter((task) => !task.resultSummary
+          && !(task.completion?.status === "incomplete" && task.completion.summary));
+        if (pendingSends.length === 0) return "Inbox is empty.";
+        const lines = pendingSends.slice(0, 10).map((task) => {
+          const state = task.delivery?.state;
+          if (state === "failed" || task.receipt?.state === "failed") {
+            return `- ${task.id} to @${task.to}: failed — ${task.delivery?.error ?? task.receipt?.error ?? "provider delivery failed"}`;
+          }
+          if (state === "uncertain" || task.receipt?.state === "uncertain") {
+            return `- ${task.id} to @${task.to}: delivery is unconfirmed — ${task.delivery?.error ?? task.receipt?.error ?? "inspect status before retrying"}`;
+          }
+          if (task.approval === "pending") return `- ${task.id} to @${task.to}: waiting for owner approval`;
+          if (state === "sending") return `- ${task.id} to @${task.to}: provider dispatch is in progress`;
+          if (task.deliveredAt) return `- ${task.id} to @${task.to}: received; awaiting the teammate's reply`;
+          return `- ${task.id} to @${task.to}: queued; recipient receipt is not confirmed yet`;
+        });
+        return `No new teammate reply arrived during this wait. Current outgoing teammate status:\n${lines.join("\n")}`;
+      };
       for (;;) {
+        const outgoing = outgoingTasks();
+        const results = renderResultsInjection(outgoing, identity.handle, { includeTaskIds: true });
         const cursor = deps.store.cursorFor(handle, cursorSession);
         const queuedTasks = (inRoom(identity)
           ? deps.store.tasksFor(handle)
@@ -1020,7 +1066,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       // silently returning only the first item, and retain ids so a provider
       // can report the exact work item. Freshness/retirement/delivery fences
       // still prevent historical task records from leaking back in.
-      const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
+        const injection = requestedTaskId
+          ? { text: "", includedIds: [] as string[], newCursor: cursor, omitted: 0 }
+          : renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
           let delivered = injection;
           if (!inRoom(identity)) {
@@ -1036,7 +1084,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
             const claimedTasks = authorizedTasks.filter((task) => claimedSet.has(task.id));
             delivered = renderInboxInjection(claimedTasks, -1, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
             if (!delivered.text) {
-              if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
+              if (Date.now() >= deadline) {
+                if (results.text) {
+                  await markOutgoingResultsShown(results.ids);
+                  return { content: [{ type: "text" as const, text: results.text }] };
+                }
+                return { content: [{ type: "text" as const, text: outgoingWaitStatus(outgoing) }] };
+              }
               continue;
             }
           }
@@ -1051,9 +1105,15 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
               deps.store.setCursor(handle, cursorSession, delivered.newCursor);
             }
           }
-          return { content: [{ type: "text" as const, text: delivered.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
+          await markOutgoingResultsShown(results.ids);
+          const teammateResults = results.text ? `\n\n${results.text}` : "";
+          return { content: [{ type: "text" as const, text: delivered.text + teammateResults + (stageNotice ? `\n\n${stageNotice}` : "") }] };
         }
-        if (!inRoom(identity)) {
+        if (results.text) {
+          await markOutgoingResultsShown(results.ids);
+          return { content: [{ type: "text" as const, text: results.text }] };
+        }
+        if (!inRoom(identity) && !requestedTaskId) {
           const uncertain = queuedTasks.filter((task) => !task.resultSummary
             && (task.receipt?.state === "uncertain" || task.delivery?.state === "uncertain")
             && (!task.targetSession || task.targetSession === identity.sessionId)
@@ -1081,7 +1141,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
             return { content: [{ type: "text" as const, text: `Inbox is empty for new messages. This session already has open work that was presented earlier; do not claim there is no task. Report the current outcome with m9r_result:\n${lines.join("\n")}` }] };
           }
         }
-        if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
+        if (Date.now() >= deadline) {
+          return { content: [{ type: "text" as const, text: outgoingWaitStatus(outgoing) }] };
+        }
         // Tightened from 300ms: this loop only re-reads the local store (cheap,
         // bounded arrays), so a shorter interval lowers delivered-task latency
         // without adding meaningful load. True push delivery (no poll at all)
@@ -1153,8 +1215,10 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
                 ? " The result is recorded, but the existing reply record did not match this sender and recipient session; M9R did not route another reply."
                 : "";
       return { content: [{ type: "text", text: report.status === "incomplete"
-        ? `Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed.${answerText}`
-        : `Recorded result.${answerText}` }] };
+        ? `Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed.${inRoom(identity) ? " M9R will deliver the reply to the sender's room." : (answerText || " The sender can retrieve the blocker with m9r_inbox.")}`
+        : inRoom(identity)
+          ? `Recorded result. M9R will deliver it to the sender's room.${answerText}`
+          : `Recorded result.${answerText || " The sending session can retrieve it with m9r_inbox."}` }] };
     },
   );
 
