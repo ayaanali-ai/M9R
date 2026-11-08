@@ -401,13 +401,24 @@ function withRoot(run: (root: string) => Promise<void>): Promise<void> {
   });
 }
 
-test("untitled taskbar controls use exact accessibility invocation and the overlay-only shell cursor scope", async () => withRoot(async (root) => {
+function testCursorOverlayHost(upsert: (point: { id: string; label: string; color: readonly [number, number, number]; x: number; y: number }) => Promise<boolean> = async () => true,
+  hidden: string[] = [], closed: { count: number } = { count: 0 }) {
+  return {
+    upsert,
+    hide: async (id: string) => { hidden.push(id); },
+    close: async () => { closed.count += 1; },
+  };
+}
+
+test("untitled taskbar controls use exact UIA invocation and the M9R overlay without CUA cursor calls", async () => withRoot(async (root) => {
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await registerOwnerPreview(root, identity);
   const calls: Array<{ method: string; value?: unknown }> = [];
+  const cursorPoints: Array<{ x: number; y: number }> = [];
   const control = { label: "Start", pid: 123, windowPid: 123, windowId: "456", rect: { x: 0, y: 0, width: 50, height: 50 }, invoked: false };
   let invocations = 0;
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { cursorPoints.push({ x: point.x, y: point.y }); return true; }),
     loadSdk: async () => makeSdk({ testRoot: root, calls, screenSize: { width: 1, height: 1 },
       state: { screenshotWidth: 1, screenshotHeight: 1, windowBounds: { x: 0, y: 0, width: 1, height: 1 } } }) as never,
     windowAtPoint: async () => ({ pid: 123, windowId: BigInt(456), shell: true, screenOrigin: { x: 0, y: 0 } }),
@@ -417,13 +428,10 @@ test("untitled taskbar controls use exact accessibility invocation and the overl
   assert.equal((await driver.describeDesktopTarget("preview", 0, 0, identity))?.label, "Start");
   assert.equal((await driver.clickDesktop("preview", 0, 0, identity)).outcome.status, "unverified");
   assert.equal(invocations, 1);
-  assert.equal(calls.some((c) => c.method === "click"), false, "shell actions never use Cua's window click endpoint");
-  const cursorCall = calls.find((c) => c.method === "callTool")?.value as { name: string; args: Record<string, unknown> };
-  assert.equal(cursorCall.name, "move_cursor");
-  assert.deepEqual({ scope: cursorCall.args.scope, x: cursorCall.args.x, y: cursorCall.args.y }, { scope: "window", x: 0, y: 0 });
-  assert.equal(typeof cursorCall.args.session, "string");
-  assert.equal(calls.some((c) => c.method === "desktopTarget"), false, "a desktop target would move the owner's physical pointer");
-  assert.equal(calls.some((c) => c.method === "moveCursor"), false, "the shell uses the overlay-only route because Cua omits shell HWNDs");
+  assert.deepEqual(cursorPoints.at(-1), { x: 0, y: 0 }, "the shell point is rendered by M9R's overlay in screen coordinates");
+  assert.equal(calls.length, 0, "cursor presentation and shell interaction do not initialize or call CUA");
+  assert.equal(nativeFixture(root).calls.some((c) => ["sendClick", "restoreCursorPosition"].includes(String(c.op))), false,
+    "the successful UIA path never moves or restores the owner's physical pointer");
   await assert.rejects(driver.typeTextDesktop("preview", "hello", identity), /desktop-wide view has no input window/);
 }));
 
@@ -865,11 +873,13 @@ test("native action timings separate observation, targeting, dispatch, and the r
   await driver.shutdown();
 }));
 
-test("moves and verifies Cua's ghost cursor through the typed exact-window API", async () => withRoot(async (root) => {
+test("moves the M9R cursor to the exact screen point without starting a CUA cursor session", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
+  const points: Array<{ id: string; label: string; x: number; y: number }> = [];
   const driver = createCuaStageDriver({
     stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { points.push(point); return true; }),
     loadSdk: async () => makeSdk({ testRoot: root, calls }) as never,
     now: () => new Date("2026-10-05T12:00:00.000Z"),
   });
@@ -878,24 +888,13 @@ test("moves and verifies Cua's ghost cursor through the typed exact-window API",
   await driver.showAgentCursor("stage", identity);
   const result = await driver.moveCursor("stage", 42, 24, identity);
   assert.deepEqual(result.cursor, { x: 42, y: 24, screenX: 142, screenY: 74, enabled: true, visible: true });
-  const move = calls.filter((call) => call.method === "moveCursor").at(-1)?.value as {
-    x: number; y: number; target: { input?: { pid?: number; windowId?: bigint } }; session: string;
-  };
-  assert.deepEqual({ x: move.x, y: move.y }, { x: 21, y: 12 }, "native capture pixels are converted into Cua's exact window screenshot space");
-  assert.deepEqual(move.target.input, { pid: 4321, windowId: BigInt(windowId) });
-  assert.equal(typeof move.session, "string");
-  const coordinateReads = calls.filter((call) => call.method === "getWindowState").map((call) => call.value as Record<string, unknown>);
-  assert.ok(coordinateReads.some((input) => input.includeAccessibilityTree === false && input.includeScreenshot === true
-    && input.maxImageDimension === 0), "the coordinate conversion uses Cua's own current screenshot metadata");
-  assert.equal(calls.some((call) => ["click", "typeText", "pressKey", "hotkey", "scroll", "drag"].includes(call.method)), false,
-    "app input does not use the overlay adapter");
-  assert.deepEqual(calls.map((call) => call.method).filter((method) => ["startSession", "endSession"].includes(method)), ["startSession"],
-    "the overlay session supports cursor presentation only and is not involved in app input");
+  assert.deepEqual(points.at(-1) && { x: points.at(-1)!.x, y: points.at(-1)!.y }, { x: 142, y: 74 },
+    "the current HWND bounds map native capture pixels directly to the screen");
+  assert.equal(calls.length, 0, "cursor presentation has no CUA runtime or cursor dependency");
 }));
 
-test("native click waits for the matching overlay position when cursor presentation is healthy", async () => withRoot(async (root) => {
+test("native click waits briefly for the matching M9R overlay position when presentation is healthy", async () => withRoot(async (root) => {
   await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
   let releaseMove!: () => void;
   let announceMove!: () => void;
   const moveStarted = new Promise<void>((resolve) => { announceMove = resolve; });
@@ -908,14 +907,14 @@ test("native click waits for the matching overlay position when cursor presentat
     return invokeNative(request);
   };
   const driver = createCuaStageDriver({ stage,
-    loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorBarrier: async (input) => {
-      const point = input as { x?: number; y?: number };
-      if (point.x === 21 && point.y === 12) {
+    cursorOverlayHost: testCursorOverlayHost(async (point) => {
+      if (point.x === 142 && point.y === 74) {
         announceMove();
         await moveGate;
         moveCompleted = true;
       }
-    } }) as never,
+      return true;
+    }),
   });
   const identity = { handle: "codex", sessionId: "cursor-follows-click" };
   await driver.showAgentCursor("stage", identity);
@@ -929,11 +928,10 @@ test("native click waits for the matching overlay position when cursor presentat
   await driver.shutdown();
 }));
 
-test("a stalled overlay move is bounded and cannot block native input", async () => withRoot(async (root) => {
+test("a stalled M9R overlay move is bounded and cannot block native input", async () => withRoot(async (root) => {
   await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
-    loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorBarrier: async () => new Promise<void>(() => {}) }) as never,
+    cursorOverlayHost: testCursorOverlayHost(async () => new Promise<boolean>(() => {})),
   });
   const identity = { handle: "codex", sessionId: "cursor-overlay-stall" };
   await driver.showAgentCursor("stage", identity);
@@ -946,15 +944,17 @@ test("a stalled overlay move is bounded and cannot block native input", async ()
 
 test("cursor moves for one agent identity are serialized to preserve action order", async () => withRoot(async (root) => {
   await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
+  const points: Array<{ x: number; y: number }> = [];
   let releaseFirst!: () => void;
   let announceFirst!: () => void;
   const firstStarted = new Promise<void>((resolve) => { announceFirst = resolve; });
   const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
-    loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorBarrier: async (input) => {
-      if ((input as { x?: number }).x === 5) { announceFirst(); await firstGate; }
-    } }) as never,
+    cursorOverlayHost: testCursorOverlayHost(async (point) => {
+      points.push({ x: point.x, y: point.y });
+      if (point.x === 110 && point.y === 70) { announceFirst(); await firstGate; }
+      return true;
+    }),
   });
   const identity = { handle: "codex", sessionId: "cursor-ordered" };
   await driver.showAgentCursor("stage", identity);
@@ -962,30 +962,35 @@ test("cursor moves for one agent identity are serialized to preserve action orde
   await firstStarted;
   const second = driver.moveCursor("stage", 80, 30, identity);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(calls.filter((call) => call.method === "moveCursor").map((call) => (call.value as { x: number }).x), [20, 5],
+  assert.deepEqual(points.slice(-2), [{ x: 140, y: 70 }, { x: 110, y: 70 }],
     "the next overlay move waits behind the currently moving cursor");
   releaseFirst();
   await Promise.all([first, second]);
-  assert.deepEqual(calls.filter((call) => call.method === "moveCursor").map((call) => (call.value as { x: number }).x), [20, 5, 40]);
+  assert.deepEqual(points.slice(-2), [{ x: 110, y: 70 }, { x: 180, y: 80 }]);
   await driver.shutdown();
 }));
 
-test("a background refusal of the ghost-cursor overlay is a clean typed refusal, never an uncertain plain error", async () => withRoot(async (root) => {
+test("an M9R overlay refusal is typed for cursor proof but does not block ordinary native input", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const moveCursorError = new Error("Background delivery is not available for target window class 'Chrome_WidgetWin_1' on this event kind (mouse_move).");
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorError }) as never });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), cursorOverlayHost: testCursorOverlayHost(async () => false),
+    loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
   const identity = { handle: "codex", sessionId: "cursor-refusal" };
   await driver.showAgentCursor("stage", identity);
   await assert.rejects(driver.moveCursor("stage", 42, 24, identity), (error: unknown) =>
-    error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+    error instanceof DesktopInputNotDispatchedError && error.code === "overlay-not-visible");
+  assert.equal((await driver.click("stage", 42, 24, identity)).outcome.status, "unverified");
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1);
   await driver.shutdown();
 }));
 
-test("owner preview captures the whole current desktop and binds visible cursor clicks to that capture", async () => withRoot(async (root) => {
+test("owner preview captures the whole desktop and positions the M9R cursor in screen coordinates", async () => withRoot(async (root) => {
   await registerOwnerPreview(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls,
+  const points: Array<{ x: number; y: number }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), cursorOverlayHost: testCursorOverlayHost(async (point) => {
+    points.push({ x: point.x, y: point.y }); return true;
+  }), loadSdk: async () => makeSdk({ testRoot: root, calls,
     windows: [{ pid: 4321, windowId: BigInt(windowId), appName: "Explorer", title: "Program Manager",
       bounds: { x: 0, y: 0, width: 1920, height: 1080 }, isOnScreen: true, zIndex: BigInt(1) }],
     state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
@@ -1008,22 +1013,15 @@ test("owner preview captures the whole current desktop and binds visible cursor 
   await driver.typeTextDesktop("preview", "hello", identity);
   await driver.hotkeyDesktop("preview", ["Ctrl", "L"], identity);
 
-  assert.equal(calls.some((call) => call.method === "getDesktopState"), false, "desktop perception is native");
-  assert.equal(calls.some((call) => call.method === "desktopTarget"), false, "the agent cursor never uses the desktop target that warps the real pointer");
+  assert.equal(calls.length, 0, "desktop observation and cursor presentation never start CUA");
   const nativeClick = nativeFixture(root).calls.find((call) => call.op === "sendClick");
   assert.ok(nativeClick, "desktop app input uses the native exact-HWND sender");
   assert.equal(nativeClick?.pid, 4321);
   assert.equal(nativeClick?.windowId, windowId);
-  const cursorMove = calls.filter((call) => call.method === "moveCursor").at(-1)?.value as {
-    x: number; y: number; target: { input?: { pid?: number; windowId?: bigint } }; session: string;
-  };
-  assert.deepEqual({ x: cursorMove.x, y: cursorMove.y }, { x: 0, y: 0 }, "the cursor follows the hit window in its own screenshot space");
-  assert.deepEqual(cursorMove.target.input, { pid: 4321, windowId: BigInt(windowId) });
-  assert.equal(typeof cursorMove.session, "string");
+  assert.deepEqual(points.at(-1), { x: 0, y: 0 }, "the desktop point is rendered at its resolved screen coordinate");
   assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendText").length, 1);
   assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendKeyCombo").length, 1);
-  assert.equal(calls.some((call) => ["click", "typeText", "hotkey", "capturedPosition"].includes(call.method)), false,
-    "the overlay adapter does not dispatch input or capture the desktop");
+  assert.equal(calls.length, 0, "no CUA driver call dispatches input or captures the desktop");
   await driver.shutdown();
 }));
 
@@ -1093,7 +1091,7 @@ test("owner-preview excludes the daemon's unlabeled overlay before snapshot and 
   const sdk = makeSdk({ testRoot: root, calls, windows, state: { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,
     screenshotWidth: 200, screenshotHeight: 100, windowBounds: { x: 0, y: 0, width: 1920, height: 1080 },
     images: [{ mimeType: "image/png", dataBase64: imageData }] } });
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => sdk as never,
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), cursorOverlayHost: testCursorOverlayHost(), loadSdk: async () => sdk as never,
     connectRuntime: async () => ({ driver: sdk.CuaDriver.create() as never, processId: 999, close: async () => {} }) });
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await driver.showAgentCursor("preview", identity);
@@ -1389,10 +1387,15 @@ test("refuses to move the ghost cursor when the stage frame has no screen bounds
   await driver.shutdown();
 }));
 
-test("shows a distinct agent label on each native cursor and configures adaptive motion", async () => withRoot(async (root) => {
+test("shows a stable M9R label and color for each independent agent cursor", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+  const points: Array<{ id: string; label: string; color: readonly [number, number, number]; x: number; y: number }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { points.push(point); return true; }),
+    skipNativeFixturePreload: true,
+    loadSdk: async () => { calls.push({ method: "loadSdk" }); throw new Error("CUA must not be loaded for cursor presentation"); },
+  });
   const identities = [
     { handle: "codex", sessionId: "codex-session-a" },
     { handle: "claude-code", sessionId: "claude-session-b" },
@@ -1403,56 +1406,42 @@ test("shows a distinct agent label on each native cursor and configures adaptive
     await driver.moveCursor("stage", 42, 24, identity);
   }
 
-  const sessionStarts = calls.filter((call) => call.method === "startSession").map((call) => call.value as { session: string; cursorMotion?: Record<string, unknown> });
-  const sessions = sessionStarts.map(({ session }) => session);
-  assert.equal(new Set(sessions).size, 2, "each verified agent session gets a separate Cua overlay identity");
-  assert.deepEqual(sessions, ["Codex", "Claude"], "the visible Cua label contains only the provider name; internal session identity stays private");
-  assert.ok(sessions.every((session) => session.length <= 28), "the provider label fits Cua's visible badge limit");
-  assert.deepEqual(sessionStarts.map(({ cursorMotion }) => cursorMotion), sessions.map(() => ({
-    style: 4,
-    timing: 0,
-    glideDurationMs: 140,
-    effects: { trail: true, glow: true },
-    dwellAfterClickMs: 80,
-    idleHideMs: 0,
-  })));
-  assert.equal(calls.filter((call) => call.method === "setAgentCursorMotion").length, 0,
-    "the persistent cursor policy is applied atomically during session start");
-  assert.equal(calls.filter((call) => call.method === "moveCursor").length, 4,
-    "each agent cursor is primed in its target window and follows its requested point");
-  assert.equal(calls.some((call) => call.method === "callTool"), false, "the exact-window cursor API is used for app windows");
-  assert.equal(calls.some((call) => ["click", "typeText", "pressKey", "hotkey", "scroll", "drag"].includes(call.method)), false);
+  assert.deepEqual(points.map(({ label }) => label), ["Codex", "Codex", "Claude", "Claude"]);
+  assert.notEqual(points[0]!.id, points[2]!.id, "each logical agent owns a separate overlay marker");
+  assert.notDeepEqual(points[0]!.color, points[2]!.color, "per-agent marker colors remain distinct");
+  assert.deepEqual(calls, [], "cursor rendering is independent from the CUA package and session runtime");
   for (const identity of identities) await driver.closeAgentCursor(identity);
 }));
 
-test("reapplies the never-hide cursor setting after an idle session refresh", async () => withRoot(async (root) => {
+test("keeps an M9R cursor visible across repeated task preparation without an idle session expiry", async () => withRoot(async (root) => {
   await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
   let at = new Date("2026-11-05T12:00:00.000Z");
+  const points: Array<{ id: string; x: number; y: number }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root), now: () => at,
-    loadSdk: async () => makeSdk({ testRoot: root, calls }) as never,
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { points.push({ id: point.id, x: point.x, y: point.y }); return true; }),
   });
   const identity = { handle: "codex", sessionId: "cursor-never-hide-refresh" };
   await driver.showAgentCursor("stage", identity);
   at = new Date(at.getTime() + 60_001);
   await driver.showAgentCursor("stage", identity);
-  const settings = calls.filter((call) => call.method === "startSession")
-    .map((call) => (call.value as { cursorMotion?: { idleHideMs?: number } }).cursorMotion);
-  assert.equal(settings.length, 2, "a refreshed CUA session must reassert cursor visibility policy");
-  assert.ok(settings.every((setting) => setting?.idleHideMs === 0), "idleHideMs=0 means the overlay remains visible during long task pauses");
+  assert.equal(points.length, 2);
+  assert.equal(points[0]!.id, points[1]!.id, "the same agent keeps the same marker identity across idle time");
   await driver.shutdown();
 }));
 
-test("primes an idle agent cursor inside the current foreground window without moving the owner pointer", async () => withRoot(async (root) => {
+test("primes an idle M9R cursor inside the current foreground window without moving the owner pointer", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+  const points: Array<{ x: number; y: number }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { points.push({ x: point.x, y: point.y }); return true; }),
+    skipNativeFixturePreload: true,
+    loadSdk: async () => { calls.push({ method: "loadSdk" }); throw new Error("CUA must not be loaded for cursor presentation"); },
+  });
   await driver.showAgentCursor("stage", { handle: "codex", sessionId: "cursor-starts-on-window" });
 
-  const initialMove = calls.find((call) => call.method === "moveCursor")?.value as { x?: number; y?: number; target?: { input?: unknown }; session?: string };
-  assert.deepEqual({ x: initialMove?.x, y: initialMove?.y, target: initialMove?.target?.input, session: initialMove?.session },
-    { x: 20, y: 10, target: { pid: 4321, windowId: BigInt(windowId) }, session: "Codex" },
-    "the idle marker starts inside the verified foreground window in Cua screenshot coordinates");
+  assert.deepEqual(points, [{ x: 140, y: 70 }], "the marker starts inside the verified foreground window in screen coordinates");
+  assert.equal(calls.length, 0, "the idle marker does not create a CUA cursor session");
   assert.equal(nativeFixture(root).calls.some((call) => ["sendClick", "sendDrag", "restoreCursorPosition"].includes(String(call.op))), false,
     "priming an overlay never moves or restores the owner's physical pointer");
   await driver.shutdown();
@@ -1463,14 +1452,10 @@ test("uses the M9R marker at verified screen points for the full agent session a
   const calls: Array<{ method: string; value?: unknown }> = [];
   const updates: Array<{ id: string; label: string; color: readonly [number, number, number]; x: number; y: number }> = [];
   const hidden: string[] = [];
-  let closed = 0;
+  const closed = { count: 0 };
   const driver = createCuaStageDriver({
     stage: stageDependencies(root),
-    cursorOverlayHost: {
-      upsert: async (point) => { updates.push(point); return true; },
-      hide: async (id) => { hidden.push(id); },
-      close: async () => { closed += 1; },
-    },
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { updates.push(point); return true; }, hidden, closed),
     loadSdk: async () => makeSdk({ testRoot: root, calls }) as never,
   });
   const identity = { handle: "codex", sessionId: "m9r-overlay-live-stream" };
@@ -1479,8 +1464,7 @@ test("uses the M9R marker at verified screen points for the full agent session a
   assert.equal(updates.length, 1);
   assert.deepEqual({ x: updates[0]!.x, y: updates[0]!.y }, { x: 140, y: 70 },
     "the first marker position is mapped from the verified owner window into screen coordinates");
-  assert.ok(calls.some((call) => call.method === "setAgentCursorEnabled"
-    && (call.value as { enabled?: boolean }).enabled === false), "CUA's duplicate visual marker is hidden after M9R confirms its frame");
+  assert.equal(calls.length, 0, "M9R's marker renders without initializing CUA or hiding a duplicate cursor");
 
   const moved = await driver.moveCursor("stage", 42, 24, identity);
   assert.equal(moved.cursor.visible, true);
@@ -1493,31 +1477,28 @@ test("uses the M9R marker at verified screen points for the full agent session a
   await driver.closeAgentCursor(identity);
   assert.deepEqual(hidden, [updates[0]!.id], "revoking the session removes its persistent marker");
   await driver.shutdown();
-  assert.equal(closed, 1, "broker shutdown closes the shared overlay process");
+  assert.equal(closed.count, 1, "broker shutdown closes the shared overlay process");
 }));
 
 test("coalesces delayed cursor moves to the latest target while native actions continue", async () => withRoot(async (root) => {
   await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
+  const points: Array<{ x: number; y: number }> = [];
   let releaseFirstMove!: () => void;
   let announceFirstMove!: () => void;
   let announceLatestMove!: () => void;
   const firstMoveStarted = new Promise<void>((resolve) => { announceFirstMove = resolve; });
   const latestMoveStarted = new Promise<void>((resolve) => { announceLatestMove = resolve; });
   const firstMoveGate = new Promise<void>((resolve) => { releaseFirstMove = resolve; });
-  let moveCount = 0;
   const timings: Array<{ phase: string; status: string; detail?: string }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root), onTiming: (event) => timings.push(event),
-    loadSdk: async () => makeSdk({ testRoot: root, calls, moveCursorBarrier: async (input) => {
-      const x = (input as { x?: number }).x;
-      if (x === 10 || x === 30) {
-        moveCount += 1;
-        if (moveCount === 1) {
-          announceFirstMove();
-          await firstMoveGate;
-        } else if (moveCount === 2) announceLatestMove();
-      }
-    } }) as never,
+    cursorOverlayHost: testCursorOverlayHost(async (point) => {
+      points.push({ x: point.x, y: point.y });
+      if (point.x === 120 && point.y === 70) {
+        announceFirstMove();
+        await firstMoveGate;
+      } else if (point.x === 160 && point.y === 110) announceLatestMove();
+      return true;
+    }),
   });
   const identity = { handle: "codex", sessionId: "cursor-latest-target" };
   await driver.showAgentCursor("stage", identity);
@@ -1531,13 +1512,9 @@ test("coalesces delayed cursor moves to the latest target while native actions c
   releaseFirstMove();
   await latestMoveStarted;
   await firstClick;
-  const moves = calls.filter((call) => call.method === "moveCursor").slice(-2).map((call) => {
-    const value = call.value as { x: number; y: number };
-    return { x: value.x, y: value.y };
-  });
-  assert.deepEqual(moves, [{ x: 10, y: 10 }, { x: 30, y: 30 }], "only the latest queued presentation target follows the in-flight move");
-  assert.ok(timings.some((event) => event.phase === "cursor-position" && event.status === "error"
-    && event.detail?.includes("presentation=timed-out")), "a cursor move that misses the action budget is recorded as unaligned");
+  assert.deepEqual(points.slice(-2), [{ x: 120, y: 70 }, { x: 160, y: 110 }], "only the latest queued presentation target follows the in-flight move");
+  assert.ok(timings.some((event) => event.phase === "cursor-position" && event.detail?.includes("arrival=after-dispatch")),
+    "late renderer evidence is recorded without turning the native action into a failure");
   await driver.shutdown();
 }));
 
@@ -1563,39 +1540,44 @@ test("owner desktop capture does not use legacy capture-scope session escalation
   await driver.shutdown();
 }));
 
-test("warm native actions do not depend on a compositor probe or start a CUA app-input session", async () => withRoot(async (root) => {
+test("warm native actions and task observations never initialize CUA", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   let at = Date.now();
   let loads = 0;
   const driver = createCuaStageDriver({ stage: stageDependencies(root), now: () => new Date(at),
+    skipNativeFixturePreload: true,
     loadSdk: async () => { loads++; return makeSdk({ testRoot: root, calls, cursorVisible: false }) as never; } });
   const identity = { handle: "codex", sessionId: "warm-runtime" };
   await driver.click("stage", 42, 24, identity);
   await driver.click("stage", 42, 24, identity);
-  assert.equal(loads, 1);
-  assert.equal(calls.filter((c) => c.method === "startSession").length, 0);
-  assert.equal(calls.filter((c) => c.method === "setAgentCursorMotion").length, 0);
-  assert.equal(calls.filter((c) => c.method === "getSession" || c.method === "getAgentCursorState").length, 0);
-  assert.equal(calls.filter((c) => c.method === "click").length, 0, "native input does not use the overlay adapter");
+  assert.equal(loads, 0, "the CUA SDK loader remains unused after repeated native actions");
+  assert.equal(calls.length, 0, "native input and observation use no CUA cursor runtime");
   assert.equal(nativeFixture(root).calls.filter((c) => c.op === "sendClick").length, 2,
     "native clicks continue when no overlay session is present");
   at += 60_001;
   await driver.capture("stage", identity);
-  assert.equal(calls.filter((c) => c.method === "startSession").length, 0, "native observation does not require an overlay session");
+  assert.equal(calls.length, 0, "native observation does not require an overlay session");
   await driver.shutdown();
 }));
 
-test("parallel identities from the same provider get distinct native sessions without exposing identity digests", async () => withRoot(async (root) => {
+test("parallel identities from the same provider get distinct M9R cursor labels without exposing identity digests", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+  const points: Array<{ id: string; label: string }> = [];
+  const hidden: string[] = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { points.push({ id: point.id, label: point.label }); return true; }, hidden),
+    skipNativeFixturePreload: true,
+    loadSdk: async () => { calls.push({ method: "loadSdk" }); throw new Error("CUA must not be loaded for cursor presentation"); },
+  });
   const identities = [{ handle: "codex", sessionId: "one" }, { handle: "codex", sessionId: "two" }];
   await Promise.all(identities.map((identity) => driver.showAgentCursor("stage", identity)));
-  const labels = calls.filter((call) => call.method === "startSession").map((call) => (call.value as { session: string }).session);
-  assert.deepEqual(labels, ["Codex", "Codex 2"]);
+  assert.deepEqual(points.map(({ label }) => label), ["Codex", "Codex 2"]);
+  assert.notEqual(points[0]!.id, points[1]!.id, "the marker identity is private and independent per agent session");
   await driver.closeAgentCursor(identities[1]!);
-  assert.equal((calls.filter((call) => call.method === "endSession").at(-1)?.value as { session: string }).session, "Codex 2");
+  assert.equal(hidden[0], points[1]!.id, "closing one session hides only its marker");
+  assert.equal(calls.length, 0);
   await driver.shutdown();
 }));
 
@@ -1621,77 +1603,75 @@ test("does not report an agent cursor move as successful when the OS overlay is 
   await driver.shutdown();
 }));
 
-test("accepts a cursor overlay that becomes visible during the bounded compositor poll", async () => withRoot(async (root) => {
+test("cursor visibility follows the M9R renderer acknowledgement", async () => withRoot(async (root) => {
+  await registerStage(root);
+  let acknowledgements = 0;
+  const driver = createCuaStageDriver({
+    stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async () => { acknowledgements += 1; return acknowledgements === 2; }),
+  });
+  const identity = { handle: "codex", sessionId: "overlay-delayed" };
+  assert.equal((await driver.showAgentCursor("stage", identity)).visible, false, "the first negative host ack is reported honestly");
+  assert.equal((await driver.showAgentCursor("stage", identity)).visible, true, "a later positive host ack makes the marker visible");
+  assert.equal(acknowledgements, 2);
+  await driver.shutdown();
+}));
+
+test("an absent M9R overlay fails explicit cursor proof without suppressing normal app actions", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({
     stage: stageDependencies(root),
-    cursorVisiblePoll: { attempts: 6, intervalMs: 1 },
-    loadSdk: async () => makeSdk({ testRoot: root, calls, cursorVisibleSequence: [false, false, true] }) as never,
+    cursorOverlayHost: testCursorOverlayHost(async () => false),
+    skipNativeFixturePreload: true,
+    loadSdk: async () => { calls.push({ method: "loadSdk" }); throw new Error("CUA must not be used for cursor proof"); },
   });
-  const result = await driver.showAgentCursor("stage", { handle: "codex", sessionId: "overlay-delayed" });
-  assert.equal(result.visible, true);
-  assert.equal(calls.filter((call) => call.method === "getSession").length, 3);
+  const identity = { handle: "codex", sessionId: "overlay-timeout" };
+  assert.equal((await driver.showAgentCursor("stage", identity)).visible, false);
+  await assert.rejects(driver.moveCursor("stage", 42, 24, identity), (error: unknown) =>
+    error instanceof DesktopInputNotDispatchedError && error.code === "overlay-not-visible");
+  assert.equal((await driver.click("stage", 42, 24, identity)).outcome.status, "unverified");
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1);
+  assert.equal(calls.length, 0);
   await driver.shutdown();
 }));
 
-test("fails closed after the bounded cursor visibility poll is exhausted", async () => withRoot(async (root) => {
+test("records overlay render failure as privacy-safe cursor timing without misreporting input", async () => withRoot(async (root) => {
   await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
-  const driver = createCuaStageDriver({
-    stage: stageDependencies(root),
-    cursorVisiblePoll: { attempts: 3, intervalMs: 1 },
-    loadSdk: async () => makeSdk({ testRoot: root, calls, cursorVisible: false }) as never,
-  });
-  const result = await driver.showAgentCursor("stage", { handle: "codex", sessionId: "overlay-timeout" });
-  assert.equal(result.visible, false, "an exhausted visibility poll is not a successful visual confirmation");
-  assert.equal(calls.filter((call) => call.method === "getSession").length, 3);
-  await driver.shutdown();
-}));
-
-test("records compositor visibility as a separate privacy-safe timing phase", async () => withRoot(async (root) => {
-  await registerStage(root);
-  const calls: Array<{ method: string; value?: unknown }> = [];
   const timings: Array<{ phase: string; status: string; durationMs: number; stageName?: string; detail?: string }> = [];
   const driver = createCuaStageDriver({
     stage: stageDependencies(root),
     onTiming: (event) => timings.push(event),
-    loadSdk: async () => makeSdk({ testRoot: root, calls, cursorVisible: false }) as never,
+    cursorOverlayHost: testCursorOverlayHost(async () => false),
   });
   const result = await driver.showAgentCursor!("stage", { handle: "codex", sessionId: "overlay-diagnostic" });
   assert.equal(result.visible, false);
-  const visibility = timings.find((event) => event.phase === "cursor-visible");
-  assert.deepEqual(visibility && { phase: visibility.phase, status: visibility.status, stageName: visibility.stageName }, {
-    phase: "cursor-visible", status: "error", stageName: "stage",
+  const position = timings.find((event) => event.phase === "cursor-position");
+  assert.deepEqual(position && { phase: position.phase, status: position.status, stageName: position.stageName }, {
+    phase: "cursor-position", status: "error", stageName: "stage",
   });
-  assert.equal(typeof visibility?.durationMs, "number");
-  assert.match(visibility?.detail ?? "", /^attempts=6;maxAttempts=6;intervalMs=150$/);
+  assert.equal(typeof position?.durationMs, "number");
+  assert.match(position?.detail ?? "", /renderer=m9r;.*presentation=failed/);
   await driver.shutdown();
 }));
 
-test("a missing overlay never replaces the shared input runtime", async () => withRoot(async (root) => {
+test("missing cursor presentation never initializes or replaces the native input path", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  let loads = 0;
   const driver = createCuaStageDriver({
     stage: stageDependencies(root),
-    cursorVisiblePoll: { attempts: 2, intervalMs: 1 },
+    cursorOverlayHost: testCursorOverlayHost(async () => false),
+    skipNativeFixturePreload: true,
     loadSdk: async () => {
-      loads += 1;
-      return makeSdk({ testRoot: root, calls, cursorVisible: loads > 1 }) as never;
+      calls.push({ method: "loadSdk" });
+      throw new Error("CUA must not be loaded when the overlay is missing");
     },
   });
   const result = await driver.showAgentCursor!("stage", { handle: "codex", sessionId: "overlay-recovered" });
   assert.equal(result.visible, false);
-  assert.equal(loads, 1, "presentation cannot dispose another action's connection");
+  assert.equal(calls.length, 0, "a missing marker does not start or replace a CUA session");
   await driver.shutdown();
 }));
-
-test("bounds cursor visibility poll configuration", () => {
-  assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 0, intervalMs: 1 } }), /cursor visibility poll/);
-  assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 21, intervalMs: 1 } }), /cursor visibility poll/);
-  assert.throws(() => createCuaStageDriver({ cursorVisiblePoll: { attempts: 3, intervalMs: 5_000 } }), /cursor visibility poll/);
-});
 
 test("native capture ignores stale Cua snapshot metadata and stays bound to the registered HWND", async () => withRoot(async (root) => {
   await registerStage(root);
@@ -1882,7 +1862,11 @@ test("types bounded text through native input to the exact focused window withou
 test("scroll and drag use native screen coordinates and validate bounds before dispatch", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+  const cursorPoints: Array<{ x: number; y: number }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), skipNativeFixturePreload: true,
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { cursorPoints.push({ x: point.x, y: point.y }); return true; }),
+    loadSdk: async () => { calls.push({ method: "loadSdk" }); throw new Error("CUA cursor is not used by native drag"); },
+  });
   await driver.scroll("stage", 42, 24, "down");
   const native = nativeFixture(root).calls;
   const scroll = native.find((call) => call.op === "sendScroll");
@@ -1899,8 +1883,9 @@ test("scroll and drag use native screen coordinates and validate bounds before d
     { fromX: 110, fromY: 70, toX: 200, toY: 130 });
   assert.equal(drag?.pid, 4321);
   assert.equal(drag?.windowId, windowId);
-  assert.deepEqual(calls.filter((call) => call.method === "moveCursor").map((call) => (call.value as { x: number; y: number }).x), [20, 5, 50],
-    "the presentation cursor follows the registered-window drag from its grab point to its drop point");
+  assert.deepEqual(cursorPoints.slice(-2), [{ x: 110, y: 70 }, { x: 200, y: 130 }],
+    "the M9R presentation cursor follows the registered-window drag from its grab point to its drop point");
+  assert.equal(calls.length, 0, "native scrolling and dragging do not initialize the CUA cursor runtime");
   const callsBeforeInvalid = native.filter((call) => call.op === "sendDrag").length;
   await assert.rejects(() => driver.drag("stage", 10, 20, 200, 80, identity), /Both drag points must fall inside/);
   assert.equal(native.filter((call) => call.op === "sendDrag").length, callsBeforeInvalid);

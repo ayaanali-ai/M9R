@@ -6,12 +6,18 @@ import test from "node:test";
 const driverSource = readFileSync(resolve("src/lib/native/cua-stage-driver.ts"), "utf8");
 const stageSource = readFileSync(resolve("src/lib/native/windows-desktop-stage.ts"), "utf8");
 
-test("production desktop dispatch uses M9R native input and keeps Cua cursor presentation-only", () => {
+test("production desktop dispatch uses M9R native input and its own cursor presentation path", () => {
   assert.doesNotMatch(driverSource, /M9R_ENABLE_CUA_COMPAT/);
   for (const method of ["click", "pressKey", "hotkey", "typeText", "scroll", "drag"]) {
     assert.doesNotMatch(driverSource, new RegExp(`(?:runtime\\.driver|_driver)\\.${method}\\s*\\(`), `${method} must not call the vendored driver directly`);
   }
-  assert.match(driverSource, /runtime\.driver\.callTool\("move_cursor"/);
+  assert.match(driverSource, /async function updateM9rCursorOverlay/);
+  assert.match(driverSource, /async function presentM9rCursor/);
+  assert.match(driverSource, /createAgentCursorOverlayHost/);
+  assert.doesNotMatch(driverSource, /(?:runtime\.driver|_driver)\.(?:moveCursor|setAgentCursorEnabled)\s*\(/,
+    "cursor movement and visibility are not delegated to CUA");
+  assert.doesNotMatch(driverSource, /runtime\.driver\.callTool\("move_cursor"/,
+    "the CUA move_cursor tool is not part of the live presentation path");
   const nativeDispatches = ["sendClick", "sendKeyCombo", "sendText", "sendScroll", "sendDrag"];
   for (const method of nativeDispatches) assert.match(stageSource, new RegExp(`async function ${method}\\b`));
   assert.match(driverSource, /nativeForeground:\s*nativeStageInput/);

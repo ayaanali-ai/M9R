@@ -859,17 +859,21 @@ export function createTaskDesktopStageService(input: {
       if (mode === "owner-preview" && effectiveAction.view === "desktop" && inspected.anchor) {
         await manager.clearOwnedAnchor(name, inspected.anchor.pid, inspected.anchor.windowId);
         inspected = await manager.inspectStage(name);
-      } else if (mode === "owner-preview" && effectiveAction.view === "app" && !inspected.anchor && selected) {
+      } else if (mode === "owner-preview" && (effectiveAction.view === "app" || effectiveAction.view === "popup") && !inspected.anchor && selected) {
+        // Owned dialogs are discovered from their selected parent app. A
+        // desktop observation detaches the stage anchor, so restore that app
+        // binding before resolving a popup rather than sending popup-local
+        // coordinates through the desktop-wide route.
         await manager.attachWindow(name, String(selected.pid), selected.windowId, selected.appId || undefined);
         inspected = await manager.inspectStage(name);
       }
-      if (effectiveAction.view === "app" && (!selected || !inspected.anchor)) {
-        throw new Error("This task has no selected application window. Open the requested app before using the app view.");
+      if ((effectiveAction.view === "app" || effectiveAction.view === "popup") && (!selected || !inspected.anchor)) {
+        throw new Error(`This task has no selected application window. Open the requested app before using the ${effectiveAction.view} view.`);
       }
       if (recoveryNotice && action.kind !== "capture" && action.kind !== "read_structure") {
         // Rebinding invalidates the old observation. Ask the caller to re-plan
         // against the refreshed state before delivering any target input.
-        const capture = effectiveAction.view === "app"
+        const capture = effectiveAction.view === "app" || effectiveAction.view === "popup"
           ? await driver.capture(name, identity) : await driver.captureDesktop(name, identity);
         throw new StageCaptureRefreshError(capture,
           recoveryNotice + " Inspect the refreshed capture and choose the next action; no input was sent.");
@@ -878,7 +882,8 @@ export function createTaskDesktopStageService(input: {
       authorize(token, taskId, mode);
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
       if (action.kind === "click" || action.kind === "double_click" || action.kind === "right_click" || action.kind === "middle_click") {
-        await moneyGate(name, identity, { x: action.x, y: action.y }, effectiveAction.view === "app" ? "background" : mode);
+        await moneyGate(name, identity, { x: action.x, y: action.y }, effectiveAction.view === "app" ? "background" : mode,
+          effectiveAction.view === "popup");
       } else if (action.kind === "click_element") {
         await moneyGate(name, identity, { ref: action.ref, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }, effectiveAction.view === "app" ? "background" : mode);
       }
@@ -1069,11 +1074,14 @@ export function createTaskDesktopStageService(input: {
    * carries no money signal, so it is not held; holding every one stalled ordinary media and app work.
    */
   async function moneyGate(name: string, identity: { handle: string; sessionId: string; provider: string },
-    clickTarget: { x: number; y: number } | { ref: string; expectedRole?: string; expectedLabel?: string }, mode: TaskStageMode): Promise<void> {
+    clickTarget: { x: number; y: number } | { ref: string; expectedRole?: string; expectedLabel?: string }, mode: TaskStageMode,
+    popupTargeted = false): Promise<void> {
     const described = "ref" in clickTarget
       // click_element has no coordinates at all -- it was skipping this gate
       // entirely before, a real security gap, not just a reliability one.
       ? await driver.describeElementTarget(name, clickTarget.ref, { role: clickTarget.expectedRole, label: clickTarget.expectedLabel }, identity)
+      : popupTargeted
+        ? await driver.describePopupTarget(name, clickTarget.x, clickTarget.y)
       : mode === "owner-preview"
         ? await driver.describeDesktopTarget(name, clickTarget.x, clickTarget.y, identity)
         : await driver.describeTarget(name, clickTarget.x, clickTarget.y, identity);

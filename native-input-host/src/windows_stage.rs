@@ -13,6 +13,10 @@ fn popup_candidate_is_owned(
     root != 0 && window != root && owner == root && pid == candidate_pid && visible
 }
 
+fn is_m9r_cursor_overlay_class(class_name: &str) -> bool {
+    class_name.eq_ignore_ascii_case("M9RCursorOverlay")
+}
+
 /// The real pointer position and explicit restore primitive used by the broker
 /// when a task elects to return the user's pointer after native input.
 #[cfg(windows)]
@@ -1376,6 +1380,11 @@ mod platform {
                 unsafe { GetClassNameW(window, class_name.as_mut_ptr(), class_name.len() as i32) }
                     .max(0) as usize;
             let class_name = String::from_utf16_lossy(&class_name[..class_len]);
+            // The full-screen M9R cursor renderer is presentation only. It
+            // must not be offered as an app window or become a stage target.
+            if super::is_m9r_cursor_overlay_class(&class_name) {
+                return 1;
+            }
             let app_user_model_id = if search.com_initialized
                 && matches!(
                     class_name.as_str(),
@@ -1467,6 +1476,11 @@ mod platform {
                 unsafe { GetClassNameW(window, class_name.as_mut_ptr(), class_name.len() as i32) }
                     .max(0) as usize;
             let class_name = String::from_utf16_lossy(&class_name[..class_len]);
+            // The full-screen M9R cursor renderer is presentation only. It
+            // must not be offered as an app window or become a stage target.
+            if super::is_m9r_cursor_overlay_class(&class_name) {
+                return 1;
+            }
             let app_user_model_id = if search.com_initialized
                 && matches!(
                     class_name.as_str(),
@@ -1888,6 +1902,12 @@ mod tests {
         assert!(!super::popup_candidate_is_owned(1, 2, 3, 100, 100, true));
         assert!(!super::popup_candidate_is_owned(1, 2, 1, 100, 200, true));
         assert!(!super::popup_candidate_is_owned(1, 2, 1, 100, 100, false));
+    }
+    #[test]
+    fn m9r_cursor_overlay_class_is_recognized_case_insensitively() {
+        assert!(super::is_m9r_cursor_overlay_class("M9RCursorOverlay"));
+        assert!(super::is_m9r_cursor_overlay_class("m9rcursoroverlay"));
+        assert!(!super::is_m9r_cursor_overlay_class("Notepad"));
     }
     use super::handle_desktop_stage_request;
     use serde_json::json;

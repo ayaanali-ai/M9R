@@ -246,7 +246,7 @@ pub mod win {
         GetSystemMetrics, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage,
         UpdateLayeredWindow, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN, ULW_ALPHA, WM_DESTROY, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
     };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows_numerics::{Matrix3x2, Vector2};
@@ -1003,7 +1003,10 @@ pub mod win {
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 class_name,
                 PCWSTR::null(),
-                WS_POPUP,
+                // UpdateLayeredWindow paints the backing bitmap but does not
+                // make a hidden HWND visible. Keep the own-process marker
+                // click-through and non-activating while making it render.
+                WS_POPUP | WS_VISIBLE,
                 x, y, w, h,
                 None, None, None, None,
             )
