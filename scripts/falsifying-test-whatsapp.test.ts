@@ -42,6 +42,23 @@ const NATIVE_HOST = fileURLToPath(new URL("../native-input-host/target/debug/m9r
 const WHATSAPP_AUMID = "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App";
 const CHAT_NAME = "Dad";
 
+/** Each of this test's own two fallback calls shares the manager's single
+ * native-host request queue; the manager's own per-operation timeouts
+ * (windows-desktop-stage.ts, 15-30s) are supposed to surface a clear error
+ * well before node:test's 90s timeout, but two real runs both silently ate
+ * the full 90s with no error at all -- meaning either that watchdog never
+ * armed, or something outside invokeNative's own promise is what's actually
+ * stuck. Racing an explicit, logged timeout around each call separately
+ * tells us definitively which one, instead of another blind 90s timeout. */
+function withWatchdog<T>(label: string, ms: number, run: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  console.log(`[falsify-whatsapp] watchdog: starting ${label}`);
+  return Promise.race([
+    run().then((value) => { console.log(`[falsify-whatsapp] watchdog: ${label} finished after ${Date.now() - startedAt}ms`); return value; }),
+    delay(ms).then(() => { throw new Error(`[falsify-whatsapp] watchdog: ${label} did not settle within ${ms}ms; it is still running in the background and will be left orphaned.`); }),
+  ]);
+}
+
 function withRoot<T>(run: (root: string) => Promise<T>): Promise<T> {
   const root = mkdtempSync(join(tmpdir(), "m9r-falsify-whatsapp-"));
   return run(root).finally(() => rmSync(root, { recursive: true, force: true }));
@@ -152,9 +169,9 @@ test(
       if (alreadyOpenWindow) {
         console.log(`[falsify-whatsapp] WhatsApp is already open (pid=${alreadyOpenWindow.pid}); attaching directly, no launch() call at all.`);
         stageName = `agent-${createHash("sha256").update(`${identity.handle}\0${identity.sessionId}`).digest("hex").slice(0, 24)}`;
-        await manager.ensureStage(stageName);
-        await manager.presentOwnerWindow(stageName, alreadyOpenWindow.pid, alreadyOpenWindow.windowId);
-        await manager.attachWindow(stageName, String(alreadyOpenWindow.pid), alreadyOpenWindow.windowId, "whatsapp");
+        await withWatchdog("manager.ensureStage", 20_000, () => manager.ensureStage(stageName));
+        await withWatchdog("manager.presentOwnerWindow", 20_000, () => manager.presentOwnerWindow(stageName, alreadyOpenWindow.pid, alreadyOpenWindow.windowId));
+        await withWatchdog("manager.attachWindow", 20_000, () => manager.attachWindow(stageName, String(alreadyOpenWindow.pid), alreadyOpenWindow.windowId, "whatsapp"));
       } else {
         try {
           const launched = await service.launch(identity.token, task.id, "test-window", "background");
