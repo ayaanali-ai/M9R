@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { renameStateFile } from "./atomic-file";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import type { StageApprovalRequest } from "./web-broker-core";
@@ -41,9 +42,20 @@ export function setOwnerWorkMode(root: string, mode: OwnerWorkMode): void {
 interface ForegroundGrant { revision: string; ownerInputEpoch?: number }
 type Turn = { agent: string; provider: string; sessionId: string; taskId: string; signal: AbortSignal;
   grants: Map<string, ForegroundGrant>; oneShotGrants: Map<string, string>; assertActive?: () => void;
+  stageName?: string; operationId?: string;
   readOwnerInputEpoch?: () => Promise<number>; captureOwnerInputEpoch?: (leaseKey: string) => Promise<number>;
   releaseOwnerInputMonitor?: (leaseKey: string) => Promise<void> };
 type GrantOwner = Pick<Turn, "agent" | "provider" | "sessionId" | "taskId">;
+export interface ForegroundAuthorizationTrace {
+  readonly taskId: string;
+  readonly stageName?: string;
+  readonly operationId?: string;
+  readonly operation: string;
+  readonly decision: "agents-free" | "restore-authorized" | "restore-refused" | "grant-reused" | "approval-granted" | "approval-denied" | "refused";
+  readonly reason: string;
+  readonly durationMs: number;
+  readonly status: "ok" | "error";
+}
 function grantOwnerKey(owner: GrantOwner): string {
   return JSON.stringify([owner.agent.trim().replace(/^@+/, "").toLowerCase(), owner.provider.trim().toLowerCase(), owner.sessionId, owner.taskId]);
 }
@@ -58,7 +70,8 @@ function grantOwnerKey(owner: GrantOwner): string {
  */
 export function createOwnerWorkPolicy(root: string,
   approvals: () => { requestApproval(request: StageApprovalRequest): Promise<boolean> } | undefined,
-  options: { isTaskActive?: (taskId: string) => boolean; onTaskRevoked?: (owner: GrantOwner, leaseKey: string) => void } = {}) {
+  options: { isTaskActive?: (taskId: string) => boolean; onTaskRevoked?: (owner: GrantOwner, leaseKey: string) => void;
+    onAuthorizationDecision?: (event: ForegroundAuthorizationTrace) => void } = {}) {
   const context = new AsyncLocalStorage<Turn>();
   const grantsByOwner = new Map<string, Map<string, ForegroundGrant>>();
   const parseGrantOwner = (key: string): GrantOwner | undefined => {
@@ -142,9 +155,25 @@ export function createOwnerWorkPolicy(root: string,
     async authorize(request: Record<string, unknown>): Promise<ForegroundAuthorizationResult> {
       const turn = context.getStore();
       if (!turn) throw new DesktopInputNotDispatchedError("Foreground input requires an active broker-owned task turn; no input was sent.", "foreground-lease");
+      const traceStarted = performance.now();
+      let traceWritten = false;
+      const operation = typeof request.op === "string" && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(request.op) ? request.op : "unknown";
+      const trace = (decision: ForegroundAuthorizationTrace["decision"], reason: string): void => {
+        if (traceWritten) return;
+        traceWritten = true;
+        try { options.onAuthorizationDecision?.({ taskId: turn.taskId,
+          ...(turn.stageName && /^[a-zA-Z0-9._:-]{1,96}$/.test(turn.stageName) ? { stageName: turn.stageName } : {}),
+          ...(turn.operationId && /^[a-zA-Z0-9._:-]{1,128}$/.test(turn.operationId) ? { operationId: turn.operationId } : {}),
+          operation, decision, reason: /^[a-zA-Z0-9._:-]{1,96}$/.test(reason) ? reason : "authorization-error",
+          durationMs: Math.max(0, performance.now() - traceStarted),
+          status: decision === "refused" || decision === "approval-denied" || decision === "restore-refused" ? "error" : "ok" }); }
+        catch { /* diagnostics cannot affect whether an input operation is authorized */ }
+      };
+      try {
       turn.signal.throwIfAborted();
       turn.assertActive?.();
       const preference = readOwnerWorkPreference(root);
+      const hadPriorModeGrant = [...turn.grants.values()].some((grant) => grant.revision !== preference.revision);
       const invalidateChangedModeGrants = async (revision = preference.revision): Promise<void> => {
         let removed = false;
         for (const [key, grant] of turn.grants) if (grant.revision !== revision) {
@@ -156,10 +185,14 @@ export function createOwnerWorkPolicy(root: string,
         }
       };
       await invalidateChangedModeGrants();
-      if (preference.mode === "agents-free") return { restoreOwnerContext: false };
+      if (preference.mode === "agents-free") {
+        trace("agents-free", "agents-free-mode");
+        return { restoreOwnerContext: false };
+      }
       if (request.op === "restoreForegroundContext") {
         const key = foregroundGrantKey(request.pid, request.windowId);
         const valid = Boolean(key && turn.grants.get(key)?.revision === preference.revision);
+        trace(valid ? "restore-authorized" : "restore-refused", valid ? "matching-current-grant" : "no-matching-current-grant");
         return { restoreOwnerContext: valid, retainOwnerInputMonitor: valid };
       }
       const globalMediaInput = request.op === "systemControl" && request.control === "media";
@@ -167,7 +200,10 @@ export function createOwnerWorkPolicy(root: string,
         throw new DesktopInputNotDispatchedError("The requested global media key is not supported; no media input was sent.", "foreground-approval");
       }
       if (request.op === "restoreCursorPosition" && [...turn.grants.entries()].some(([key, grant]) =>
-        key.startsWith("foreground:") && grant.revision === preference.revision)) return { restoreOwnerContext: false, retainOwnerInputMonitor: true };
+        key.startsWith("foreground:") && grant.revision === preference.revision)) {
+        trace("restore-authorized", "preserve-active-foreground-monitor");
+        return { restoreOwnerContext: false, retainOwnerInputMonitor: true };
+      }
       const launchTarget = request.op === "launch" && typeof request.windowId === "string"
         && /^app:[a-z0-9._-]{1,80}$/i.test(request.windowId)
         ? `desktop:${request.windowId}` : undefined;
@@ -185,8 +221,12 @@ export function createOwnerWorkPolicy(root: string,
       };
       const inputEpoch = await readInputEpoch();
       const existingGrant = globalMediaInput ? undefined : turn.grants.get(target);
-      if (!globalMediaInput && turn.readOwnerInputEpoch && (inputEpoch === undefined
-        || [...turn.grants.values()].some((grant) => grant.ownerInputEpoch !== inputEpoch))) {
+      let approvalReason = hadPriorModeGrant ? "mode-revision-changed" : "new-target-or-no-grant";
+      const savedInputEpochUnavailable = [...turn.grants.values()].some((grant) => grant.ownerInputEpoch === undefined);
+      const savedInputEpochChanged = [...turn.grants.values()].some((grant) => grant.ownerInputEpoch !== inputEpoch);
+      if (!globalMediaInput && turn.readOwnerInputEpoch && (inputEpoch === undefined || savedInputEpochChanged)) {
+        approvalReason = inputEpoch === undefined || savedInputEpochUnavailable
+          ? "owner-input-epoch-unavailable" : "owner-input-changed";
         turn.grants.clear();
         try { await turn.releaseOwnerInputMonitor?.(grantOwnerKey(turn)); } catch { /* no stale foreground grant survives an unknown/changed epoch */ }
       }
@@ -194,12 +234,14 @@ export function createOwnerWorkPolicy(root: string,
         ? turn.oneShotGrants.get(target) === preference.revision
         : existingGrant?.revision === preference.revision
           && (!turn.readOwnerInputEpoch || (inputEpoch !== undefined && existingGrant.ownerInputEpoch === inputEpoch))) {
+        trace("grant-reused", turn.readOwnerInputEpoch ? "same-target-and-owner-input-epoch" : "same-target-and-mode-revision");
         return { restoreOwnerContext: !globalMediaInput,
           ...(!globalMediaInput && existingGrant?.ownerInputEpoch !== undefined ? { ownerInputEpoch: existingGrant.ownerInputEpoch } : {}) };
       }
       if (existingGrant && existingGrant.revision === preference.revision) turn.grants.delete(target);
       const route = approvals();
       if (!route) {
+        trace("refused", "approval-route-unavailable");
         if (!globalMediaInput && turn.grants.size === 0) {
           try { await turn.releaseOwnerInputMonitor?.(grantOwnerKey(turn)); } catch { /* the action remains refused */ }
         }
@@ -232,13 +274,16 @@ export function createOwnerWorkPolicy(root: string,
       const current = readOwnerWorkPreference(root);
       if (current.mode === "agents-free") {
         await invalidateChangedModeGrants(current.revision);
+        trace("agents-free", "mode-changed-while-approval-waited");
         return { restoreOwnerContext: false };
       }
       if (current.revision !== preference.revision) {
         await invalidateChangedModeGrants(current.revision);
+        trace("refused", "mode-changed-while-approval-waited");
         throw new DesktopInputNotDispatchedError("The owner changed the work mode while this foreground turn was waiting. No input was sent; request a new turn.", "foreground-approval");
       }
       if (!accepted) {
+        trace("approval-denied", "owner-denied-or-approval-timed-out");
         if (!globalMediaInput && turn.grants.size === 0) {
           try { await turn.releaseOwnerInputMonitor?.(grantOwnerKey(turn)); } catch { /* the action remains refused */ }
         }
@@ -252,6 +297,7 @@ export function createOwnerWorkPolicy(root: string,
       // the foreground turn and makes a later turn ask again.
       if (globalMediaInput) {
         turn.oneShotGrants.set(target, current.revision);
+        trace("approval-granted", "global-media-one-shot");
         return { restoreOwnerContext: false };
       }
       let approvedAtInputEpoch: number | undefined;
@@ -277,6 +323,7 @@ export function createOwnerWorkPolicy(root: string,
         turn.grants.set(target, { revision: current.revision,
           ...(approvedAtInputEpoch !== undefined ? { ownerInputEpoch: approvedAtInputEpoch } : {}) });
         grantInstalled = true;
+        trace("approval-granted", approvalReason);
         return { restoreOwnerContext: true,
           retainOwnerInputMonitor: Boolean(turn.captureOwnerInputEpoch),
           ...(approvedAtInputEpoch !== undefined ? { ownerInputEpoch: approvedAtInputEpoch } : {}) };
@@ -285,6 +332,10 @@ export function createOwnerWorkPolicy(root: string,
           grantsByOwner.delete(grantOwnerKey(turn));
           try { await turn.releaseOwnerInputMonitor?.(grantOwnerKey(turn)); } catch { /* the action remains refused */ }
         }
+      }
+      } catch (error) {
+        trace("refused", error instanceof DesktopInputNotDispatchedError ? error.code : "authorization-error");
+        throw error;
       }
     },
     /** Periodically drop approvals for paused/finished tasks and changed modes. */

@@ -12,12 +12,17 @@ test("foreground approval persists across task actions and expires on input, mod
   let captureCount = 0;
   let releaseCount = 0;
   let monitorActive = false;
+  const authorizationEvents: Array<{ taskId: string; operation: string; decision: string; reason: string; operationId?: string; stageName?: string }> = [];
   const policy = createOwnerWorkPolicy(root, () => ({ requestApproval: async () => { approvalCount++; return true; } }), {
     isTaskActive: taskId => active && taskId === "T1",
     onTaskRevoked: () => { releaseCount++; monitorActive = false; },
+    onAuthorizationDecision: event => authorizationEvents.push(event),
   });
+  let operationNumber = 0;
   const run = (op: Record<string, unknown>) => policy.run({ agent: "codex", provider: "codex", sessionId: "s1", taskId: "T1",
     signal: new AbortController().signal,
+    stageName: "calculator-stage",
+    operationId: `op-${++operationNumber}`,
     assertActive: () => { if (!active) throw new Error("task is not active"); },
     readOwnerInputEpoch: async () => epoch,
     captureOwnerInputEpoch: async () => { captureCount++; monitorActive = true; return epoch; },
@@ -30,10 +35,18 @@ test("foreground approval persists across task actions and expires on input, mod
     assert.equal(approvalCount, 1);
     assert.equal(captureCount, 1);
     assert.equal(monitorActive, true);
+    assert.equal(authorizationEvents[0]?.taskId, "T1");
+    assert.equal(authorizationEvents[0]?.stageName, "calculator-stage");
+    assert.equal(authorizationEvents[0]?.operationId, "op-1");
+    assert.equal(authorizationEvents[0]?.decision, "approval-granted");
+    assert.equal(authorizationEvents[0]?.reason, "new-target-or-no-grant");
 
     await run({ op: "sendKeyCombo", pid: 123, windowId: "0x1c8" });
     assert.equal(approvalCount, 1, "the same exact task/window reuses the approved foreground turn");
     assert.equal(captureCount, 1, "the physical input monitor remains active across tool calls");
+    assert.equal(authorizationEvents[1]?.decision, "grant-reused");
+    assert.equal(authorizationEvents[1]?.reason, "same-target-and-owner-input-epoch");
+    assert.equal(authorizationEvents[1]?.operationId, "op-2");
 
     epoch++;
     const renewed = await run({ op: "sendText", pid: 123, windowId: "456" });
@@ -41,6 +54,8 @@ test("foreground approval persists across task actions and expires on input, mod
     assert.equal(approvalCount, 2, "physical owner input expires the prior turn and requires fresh approval");
     assert.equal(captureCount, 2);
     assert.equal(monitorActive, true, "the renewed grant is retained after its monitor is recaptured");
+    assert.equal(authorizationEvents[2]?.decision, "approval-granted");
+    assert.equal(authorizationEvents[2]?.reason, "owner-input-changed");
 
     policy.revokeTask({ agent: "codex", provider: "provider-alias", sessionId: "s1", taskId: "T1" });
     assert.equal(monitorActive, false, "task stop revokes the grant even when cleanup knows a provider alias");
@@ -58,6 +73,21 @@ test("foreground approval persists across task actions and expires on input, mod
     policy.reapRevokedGrants();
     assert.equal(monitorActive, false, "task completion/pause releases the monitor without needing another task action");
     await assert.rejects(run({ op: "sendClick", pid: 123, windowId: "456" }), /not active/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("authorization tracing is best-effort and cannot change a grant decision", async () => {
+  const root = mkdtempSync(join(process.cwd(), ".tmp-owner-work-trace-"));
+  const policy = createOwnerWorkPolicy(root, () => ({ requestApproval: async () => true }), {
+    onAuthorizationDecision: () => { throw new Error("diagnostics sink failed"); },
+  });
+  try {
+    const result = await policy.run({ agent: "codex", provider: "codex", sessionId: "s1", taskId: "T1",
+      signal: new AbortController().signal, readOwnerInputEpoch: async () => 4,
+      captureOwnerInputEpoch: async () => 4,
+    }, () => policy.authorize({ op: "sendText", pid: 123, windowId: "456" }));
+    assert.equal(result.restoreOwnerContext, true);
+    assert.equal(result.ownerInputEpoch, 4);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

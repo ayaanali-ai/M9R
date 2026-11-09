@@ -245,6 +245,22 @@ export function createTaskDesktopStageService(input: {
       // Revocation remains effective in policy even if the OS monitor needs the
       // helper to exit; closing the stream/task tears down its hook as fallback.
     });
+  }, onAuthorizationDecision: (event) => {
+    // This receipt closes the evidence gap between a foreground request and a
+    // subsequent action: it records whether approval was new, reused, refused,
+    // or invalidated. It contains only bounded operation labels and policy
+    // reasons; never a window handle, title, input text, or provider payload.
+    const endedMs = Date.now();
+    recordStageTiming(event.taskId, {
+      phase: "foreground-lease",
+      startedAt: new Date(endedMs - event.durationMs).toISOString(),
+      endedAt: new Date(endedMs).toISOString(),
+      durationMs: event.durationMs,
+      status: event.status,
+      ...(event.operationId ? { operationId: event.operationId } : {}),
+      ...(event.stageName ? { stageName: event.stageName } : {}),
+      detail: `authorization=${event.decision};operation=${event.operation};reason=${event.reason}`,
+    });
   } });
   const browserSpaces: BrowserSpaceLedger = createBrowserSpaceLedger(root);
   function bindBrowserSpace(stageName: string, executable: string, pid: number, windowId: string): void {
@@ -375,6 +391,7 @@ export function createTaskDesktopStageService(input: {
     durationMs: number;
     status: "ok" | "error";
     operationId?: string;
+    stageName?: string;
     detail?: string;
   }): void {
     try { input.store.recordStageTiming(taskId, event); } catch { /* telemetry must not alter control flow */ }
@@ -422,7 +439,7 @@ export function createTaskDesktopStageService(input: {
   }
 
   function inInputStream<T>(identity: InputStreamIdentity & { provider?: string }, taskId: string, kind: string,
-    run: (context: InputStreamContext) => Promise<T>): Promise<T> {
+    run: (context: InputStreamContext) => Promise<T>, correlation?: { stageName?: string; operationId?: string }): Promise<T> {
     return inputStreams.run(identity, { taskId, kind }, async (context) => {
       recordStageTiming(taskId, { phase: "queue_wait", startedAt: new Date(context.queuedAt).toISOString(),
         endedAt: new Date(context.startedAt).toISOString(), durationMs: context.startedAt - context.queuedAt,
@@ -433,6 +450,8 @@ export function createTaskDesktopStageService(input: {
       // behind that helper's one active request.
       const operation = () => ownerWorkPolicy.run({ agent: identity.handle, provider: identity.provider ?? identity.handle,
         sessionId: identity.sessionId, taskId, signal: context.signal,
+        ...(correlation?.stageName ? { stageName: correlation.stageName } : {}),
+        ...(correlation?.operationId ? { operationId: correlation.operationId } : {}),
         readOwnerInputEpoch: () => manager.physicalInputEpoch(),
         captureOwnerInputEpoch: (leaseKey) => manager.captureOwnerInputEpoch(leaseKey),
         releaseOwnerInputMonitor: (leaseKey) => manager.releaseOwnerInputMonitor(leaseKey),
@@ -1097,7 +1116,7 @@ export function createTaskDesktopStageService(input: {
     const outcome = await inInputStream(streamIdentity, taskId, "action", (context) => {
       streamSignal = context.signal;
       return enqueueTimedStage(queueName, taskId, "action", operationId, guardedRun, stageName);
-    });
+    }, { stageName, ...(operationId ? { operationId } : {}) });
     if (!recoveryNotice) return outcome;
     return { ...(outcome && typeof outcome === "object" ? outcome : { result: outcome }), recoveryNotice };
   }
