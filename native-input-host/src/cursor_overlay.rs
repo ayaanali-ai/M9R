@@ -1062,7 +1062,12 @@ pub mod win {
 
             let dib = create_dib(w, h);
             let mut renderer = Renderer::new().ok();
-            SetTimer(Some(hwnd), 1, 33, None);
+            // 33ms (~30fps) under-sampled the 140ms ease-out-cubic move
+            // animation (MOVE_ANIM_MS) -- only ~4 redraws across its whole
+            // duration, visibly steppy rather than smooth. 16ms (~60fps)
+            // matches standard display refresh and the sampling rate the
+            // tween curve was designed to be seen at.
+            SetTimer(Some(hwnd), 1, 16, None);
 
             // The reader owns only the presentation command pipe. EOF means
             // the broker has shut down; wake the UI thread so the layered
