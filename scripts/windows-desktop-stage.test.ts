@@ -579,7 +579,10 @@ test("attaches only the selected live window without issuing an OS desktop move"
     },
   });
   await manager.register("stage", "4321", "123");
+  const attachRequestStart = requests.length;
   const result = await manager.attachWindow("stage", "7777", "999");
+  assert.equal(requests.slice(attachRequestStart).filter((request) => request.op === "inspect").length, 2,
+    "attach retains the pre-write exact identity check and post-write persisted-anchor verification without a duplicate preflight inspect");
   assert.deepEqual(result.stage.anchor, { pid: 7777, windowId: "999" });
   assert.equal("desktopId" in result.window, false);
   assert.equal(requests.some((request) => /^(?:currentDesktop|createDesktop|inspectDesktop|activateDesktop|moveWindowToDesktop)$/.test(String(request.op))), false);

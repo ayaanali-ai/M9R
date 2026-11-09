@@ -1032,7 +1032,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
     const sharedKey = coordinationKey ?? stage.coordinationKey;
     assertWindowUnclaimed(name, Number(pidInput), windowIdInput, sharedKey);
-    await inspectWindow(pidInput, windowIdInput);
+    // registerWindow performs the exact PID/HWND inspection immediately
+    // before persisting the binding. A separate inspection here duplicated
+    // that native round trip without strengthening the post-write check below.
     const registered = await register(name, pidInput, windowIdInput, appId, sharedKey);
     const inspected = await inspectStage(name);
     if (!inspected.anchor || inspected.anchor.pid !== registered.anchor?.pid || inspected.anchor.windowId !== registered.anchor?.windowId) {
