@@ -162,12 +162,25 @@ for (const scenario of SCENARIOS) {
         // Polling for the foreground window to actually settle, rather than
         // trusting one fixed delay, gives a cold launch exactly as long as
         // it needs without slowing down every later, already-warm scenario.
+        // A single matching read after one 500ms gap is not strong enough
+        // proof of settlement: a real run still failed the foreground
+        // assertion AFTER this poll had already accepted a baseline,
+        // because Chrome can briefly settle on the wrong (not-yet-
+        // activated) window, pass one check, and only self-activate for
+        // real slightly later -- requiring several consecutive unchanged
+        // reads, not just one, is what actually proves it has stopped
+        // moving rather than merely paused once.
         let baselineForeground = await manager.currentForegroundWindow();
-        for (let attempt = 0; attempt < 20; attempt++) {
+        let stableStreak = 0;
+        for (let attempt = 0; attempt < 30 && stableStreak < 3; attempt++) {
           await delay(500);
           const next = await manager.currentForegroundWindow();
-          if (next.pid === baselineForeground.pid) break;
-          baselineForeground = next;
+          if (next.pid === baselineForeground.pid) {
+            stableStreak += 1;
+          } else {
+            baselineForeground = next;
+            stableStreak = 0;
+          }
         }
         // Foreground settling and input-readiness are two different things:
         // a warm chrome.exe window's foreground can stabilize almost
