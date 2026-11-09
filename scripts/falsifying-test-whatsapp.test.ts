@@ -119,7 +119,9 @@ test(
       // is not already open at all does this fall back to the real launch
       // path (which, for a future app-specific adapter, might succeed).
       let stageName: string;
-      const alreadyOpenWindow = (await manager.listVisibleWindows()).find((window) => window.title === "WhatsApp");
+      const visibleWindows = await manager.listVisibleWindows();
+      console.log(`[falsify-whatsapp] diagnostic: native host sees ${visibleWindows.length} visible window(s): ${JSON.stringify(visibleWindows.map((w) => ({ pid: w.pid, title: w.title, processName: w.processName })))}`);
+      const alreadyOpenWindow = visibleWindows.find((window) => window.title === "WhatsApp");
       if (alreadyOpenWindow) {
         console.log(`[falsify-whatsapp] WhatsApp is already open (pid=${alreadyOpenWindow.pid}); attaching directly instead of calling launch().`);
         const pending = await manager.create("test-window-whatsapp");
