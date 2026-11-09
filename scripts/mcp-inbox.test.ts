@@ -55,6 +55,9 @@ test("public stage-action schema exposes popup capture and native filename editi
     assert.deepEqual(action.parse({ kind: "press_key", view: "popup", key: "Enter" }), { kind: "press_key", view: "popup", key: "Enter" });
     assert.throws(() => action.parse({ kind: "read_structure", view: "popup" }));
     assert.match(tools["m9r_stage_action"]?.description ?? "", /view=popup[\s\S]*modal dialog[\s\S]*popup-local coordinates/);
+    assert.match(tools["m9r_stage_action"]?.description ?? "", /prefer current tree actions[\s\S]*semantic UIA and WM_CHAR routes run in the background first/);
+    assert.match(tools["m9r_stage_action"]?.description ?? "", /approval applies to the same task and target until owner input, mode, task, or session changes/);
+    assert.match(tools["m9r_stage_action"]?.description ?? "", /Explicit background mode never falls back to physical input or activates a window/);
   } finally { t.done(); }
 });
 
