@@ -118,14 +118,35 @@ test(
       // success path -- skips that wasted 55s entirely. Only if WhatsApp
       // is not already open at all does this fall back to the real launch
       // path (which, for a future app-specific adapter, might succeed).
+      //
+      // service.act() below only finds an owned app under the stage name
+      // launch() derives internally from identity+mode (not exported, not
+      // under this test's control) -- so the fallback MUST reuse that exact
+      // name, not a literal one of this test's own choosing (an earlier
+      // version used manager.create("test-window-whatsapp") instead, which
+      // registered a stage service.act() never looked up: every later
+      // read_structure call silently failed to find an owned app, and the
+      // "0 elements" that produced was a phantom default, not a real empty
+      // UIA read). launch() registers that real name via manager.ensureStage()
+      // near-instantly, well before its own expensive (up to 55s) discovery
+      // poll -- so race for the pending entry to appear instead of waiting
+      // for the full call to reject, and let that eventual, expected
+      // rejection settle unobserved in the background.
       let stageName: string;
       const visibleWindows = await manager.listVisibleWindows();
       console.log(`[falsify-whatsapp] diagnostic: native host sees ${visibleWindows.length} visible window(s): ${JSON.stringify(visibleWindows.map((w) => ({ pid: w.pid, title: w.title, processName: w.processName })))}`);
       const alreadyOpenWindow = visibleWindows.find((window) => window.title === "WhatsApp");
       if (alreadyOpenWindow) {
-        console.log(`[falsify-whatsapp] WhatsApp is already open (pid=${alreadyOpenWindow.pid}); attaching directly instead of calling launch().`);
-        const pending = await manager.create("test-window-whatsapp");
-        stageName = pending.name;
+        console.log(`[falsify-whatsapp] WhatsApp is already open (pid=${alreadyOpenWindow.pid}); attaching directly instead of waiting on launch().`);
+        const launchPromise = service.launch(identity.token, task.id, "test-window", "background");
+        launchPromise.catch(() => { /* expected: no supported exact-process window for an already-open single-instance app */ });
+        let pendingName: string | undefined;
+        for (let attempt = 0; attempt < 50 && !pendingName; attempt++) {
+          pendingName = manager.list().find((stage) => !stage.anchor)?.name;
+          if (!pendingName) await delay(100);
+        }
+        if (!pendingName) throw new Error("launch() never registered a pending stage entry to attach to.");
+        stageName = pendingName;
         await manager.presentOwnerWindow(stageName, alreadyOpenWindow.pid, alreadyOpenWindow.windowId);
         await manager.attachWindow(stageName, String(alreadyOpenWindow.pid), alreadyOpenWindow.windowId, "whatsapp");
       } else {
