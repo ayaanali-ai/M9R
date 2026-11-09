@@ -152,6 +152,33 @@ test("native window capture owns its dimensions instead of inheriting retired Cu
   assert.equal(calls.some(call => call.method === "getWindowState"), false,"native capture does not depend on Cua snapshots");
 }));
 
+test("native stage capture overlaps screenshot and UIA reads while preserving both results", async () => withRoot(async (root) => {
+  await registerStage(root);
+  const state = { elements: [{ role: "Button", label: "Save", className: "Button", automationId: "save",
+    enabled: true, actions: ["invoke"], frame: { x: 120, y: 70, w: 40, h: 20 } }] };
+  const stage = stageDependencies(root);
+  const invokeNative = stage.invokeNative!;
+  const inFlight = new Set<string>();
+  let screenshotAndTreeOverlapped = false;
+  stage.invokeNative = async (request) => {
+    const operation = String(request.op);
+    if (operation === "captureWindow" || operation === "inspectWindowStructure") {
+      inFlight.add(operation);
+      if (inFlight.has("captureWindow") && inFlight.has("inspectWindowStructure")) screenshotAndTreeOverlapped = true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inFlight.delete(operation);
+    }
+    return invokeNative(request);
+  };
+  const driver = createCuaStageDriver({ stage, loadSdk: async () => makeSdk({ testRoot: root, state, calls: [] }) as never });
+
+  const capture = await driver.capture("stage");
+  assert.equal(screenshotAndTreeOverlapped, true, "independent read-only observations start concurrently");
+  assert.match(capture.dataUrl, /^data:image\/png;base64,/);
+  assert.deepEqual(capture.controls, [{ label: "Save", role: "Button", rect: { x: 20, y: 20, width: 40, height: 20 } }]);
+  await driver.shutdown();
+}));
+
 test("app captures expose bounded accessibility targets in screenshot coordinates", async () => withRoot(async (root) => {
   await registerStage(root);
   const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true,

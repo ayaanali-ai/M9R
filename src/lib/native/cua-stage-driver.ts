@@ -1911,14 +1911,21 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       frame: CuaStageWindowFrame;
       observed?: Awaited<ReturnType<typeof readNativeElements>>;
     }> => {
-      const imageFrame = await captureNativeFrame();
+      // Both observations are read-only and independently anchored to the same
+      // registered HWND. Start them together so a slow screenshot encoder does
+      // not make the UIA walk wait (or vice versa). The tree may still change
+      // while either observation is in flight; every mutating action re-resolves
+      // its selected node immediately before dispatch, so this overlap does not
+      // relax the stale-target guard.
+      const [imageFrame, observed] = await Promise.all([
+        captureNativeFrame(),
+        readNativeElements().catch(() => undefined),
+      ]);
       const bounds = imageFrame.windowBounds!;
       const image = { dataUrl: imageFrame.dataUrl, width: imageFrame.width, height: imageFrame.height };
       let controls: CuaStageTargetDescription[] = [];
       let controlsTruncated = false;
-      let observed: Awaited<ReturnType<typeof readNativeElements>> | undefined;
-      try {
-        observed = await readNativeElements();
+      if (observed) {
         controls = observed.structure.elements.flatMap((element) => {
           const left = Math.max(0, (element.rect.x - bounds.x) * image.width / bounds.width);
           const top = Math.max(0, (element.rect.y - bounds.y) * image.height / bounds.height);
@@ -1930,8 +1937,6 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
             rect: { x: left, y: top, width: right - left, height: bottom - top } }];
         });
         controlsTruncated = observed.structure.truncated;
-      } catch {
-        // A window without a usable UIA provider still returns its native frame.
       }
       return { frame: { ...imageFrame, controls,
         ...(controlsTruncated ? { controlsTruncated: true as const } : {}),
