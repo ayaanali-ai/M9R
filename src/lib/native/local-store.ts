@@ -11,7 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { isProtectedAction, lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_AGENT_REPLY_DEPTH, MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, transitionTaskReceipt, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle, type TaskReceiptSource, type TaskReceiptState } from "./inbox-core";
+import { MAX_AGENT_REPLY_DEPTH, MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, addStageTimingToSummary, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, summarizeStageTimingEvents, transitionTaskReceipt, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle, type TaskReceiptSource, type TaskReceiptState } from "./inbox-core";
 import { canQueue, normCwd } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, PROVIDER_SESSION_RECOVERY_TTL_MS, PROVIDER_TURN_TTL_MS, newConnectionId, sameConnectionCwd, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
@@ -1066,7 +1066,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       return update((s) => {
         const task = s.tasks.find((candidate) => candidate.id === taskId);
         if (!task) return false;
-        const prior = Array.isArray(task.stageTiming) ? task.stageTiming : [];
+        const prior = Array.isArray(task.stageTiming) ? task.stageTiming.slice(-MAX_STAGE_TIMING_EVENTS_PER_TASK) : [];
+        if (!task.stageTimingSummary) {
+          task.stageTimingSummary = summarizeStageTimingEvents(prior);
+          task.stageTimingSummaryStartedAt = prior[0]?.startedAt ?? stored.startedAt;
+          task.stageTimingSummaryMayBeIncomplete = prior.length >= MAX_STAGE_TIMING_EVENTS_PER_TASK;
+        }
+        task.stageTimingSummary = addStageTimingToSummary(task.stageTimingSummary, stored);
         task.stageTiming = [...prior, stored].slice(-MAX_STAGE_TIMING_EVENTS_PER_TASK);
         return true;
       });

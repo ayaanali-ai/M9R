@@ -187,6 +187,41 @@ export interface StageTimingEvent {
   detail?: string;
 }
 
+/** Bounded per-phase totals preserve whole-task latency evidence after raw events roll over. */
+export interface StageTimingAggregate {
+  count: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
+  errorCount: number;
+}
+
+export type StageTimingSummary = Partial<Record<StageTimingPhase, StageTimingAggregate>>;
+
+export function addStageTimingToSummary(summary: StageTimingSummary, event: StageTimingEvent): StageTimingSummary {
+  const previous = summary[event.phase];
+  const validCount = Number.isSafeInteger(previous?.count) && (previous?.count ?? 0) >= 0;
+  const validTotal = Number.isFinite(previous?.totalDurationMs) && (previous?.totalDurationMs ?? -1) >= 0;
+  const validMax = Number.isFinite(previous?.maxDurationMs) && (previous?.maxDurationMs ?? -1) >= 0;
+  const validErrors = Number.isSafeInteger(previous?.errorCount) && (previous?.errorCount ?? 0) >= 0;
+  const count = validCount ? previous!.count : 0;
+  const previousTotal = validTotal ? previous!.totalDurationMs : 0;
+  const total = previousTotal + event.durationMs;
+  const boundedTotal = Math.min(Number.MAX_SAFE_INTEGER, Number.isFinite(total) ? total : Number.MAX_SAFE_INTEGER);
+  summary[event.phase] = {
+    count: Math.min(Number.MAX_SAFE_INTEGER, count + 1),
+    totalDurationMs: Math.round(boundedTotal * 100) / 100,
+    maxDurationMs: Math.max(validMax ? previous!.maxDurationMs : 0, event.durationMs),
+    errorCount: Math.min(Number.MAX_SAFE_INTEGER, (validErrors ? previous!.errorCount : 0) + (event.status === "error" ? 1 : 0)),
+  };
+  return summary;
+}
+
+export function summarizeStageTimingEvents(events: readonly StageTimingEvent[]): StageTimingSummary {
+  const summary: StageTimingSummary = {};
+  for (const event of events) addStageTimingToSummary(summary, event);
+  return summary;
+}
+
 /** Canonical inbox key: tolerate a single mention marker and provider-handle casing. */
 export function normalizeHandle(handle: string): string {
   return (handle.startsWith("@") ? handle.slice(1) : handle).toLowerCase();
@@ -261,6 +296,12 @@ export interface Task {
   answerPushedAt?: string;
   /** Durable, bounded phase timings for native desktop-stage requests. */
   stageTiming?: StageTimingEvent[];
+  /** Per-phase totals cover the entire task even when `stageTiming` raw details reach their cap. */
+  stageTimingSummary?: StageTimingSummary;
+  /** First event included in the durable summary. */
+  stageTimingSummaryStartedAt?: string;
+  /** True when a legacy capped raw history prevented backfilling the complete summary. */
+  stageTimingSummaryMayBeIncomplete?: boolean;
 }
 
 export interface TaskDelivery {

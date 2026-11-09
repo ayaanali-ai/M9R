@@ -199,6 +199,33 @@ test("task timing persists native subphase labels, operation correlation, and fr
   } finally { f.cleanup(); }
 });
 
+test("task timing keeps full per-phase aggregates after raw event history reaches its cap", () => {
+  const f = fixture();
+  try {
+    for (let i = 1; i <= 300; i++) {
+      assert.equal(f.store.recordStageTiming(f.task.id, {
+        phase: "input-dispatch",
+        startedAt: new Date(Date.UTC(2026, 10, 5, 12, 0, i)).toISOString(),
+        endedAt: new Date(Date.UTC(2026, 10, 5, 12, 0, i)).toISOString(),
+        durationMs: i,
+        status: i % 10 === 0 ? "error" : "ok",
+      }), true);
+    }
+
+    const recorded = f.store.getTask(f.task.id)!;
+    assert.equal(recorded.stageTiming?.length, 256, "raw event retention remains bounded");
+    assert.equal(recorded.stageTiming?.[0]?.durationMs, 45, "raw events retain the most recent tail");
+    assert.deepEqual(recorded.stageTimingSummary?.["input-dispatch"], {
+      count: 300,
+      totalDurationMs: 45_150,
+      maxDurationMs: 300,
+      errorCount: 30,
+    });
+    assert.equal(recorded.stageTimingSummaryStartedAt, "2026-11-05T12:00:01.000Z");
+    assert.equal(recorded.stageTimingSummaryMayBeIncomplete, false);
+  } finally { f.cleanup(); }
+});
+
 test("a stalled cursor compositor cannot delay stage preparation or dispatch", async () => {
   const f = fixture(true);
   try {

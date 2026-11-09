@@ -225,7 +225,8 @@ test("task-log exports only the selected task's retained evidence for the owner"
     task: { id: string; instruction: string };
     stageTiming: Array<{ phase: string; operationId?: string; cached?: boolean }>;
     correlatedStoreEvents: Array<{ taskId?: string }>;
-    retention: { stageTimingEvents: number; stageTimingMayBeTruncated: boolean; note: string };
+    stageTimingSummary: Record<string, { count: number; totalDurationMs: number; maxDurationMs: number; errorCount: number }>;
+    retention: { stageTimingEvents: number; stageTimingMayBeTruncated: boolean; stageTimingSummaryMayBeIncomplete: boolean; stageTimingSummaryEventCount: number; note: string };
   };
   assert.equal(report.schema, "m9r.task-evidence.v1");
   assert.equal(report.task.id, "T1");
@@ -236,6 +237,9 @@ test("task-log exports only the selected task's retained evidence for the owner"
   assert.ok(report.correlatedStoreEvents.every((event) => event.taskId === "T1"));
   assert.equal(report.retention.stageTimingEvents, 1);
   assert.equal(report.retention.stageTimingMayBeTruncated, false);
+  assert.equal(report.retention.stageTimingSummaryMayBeIncomplete, false);
+  assert.equal(report.retention.stageTimingSummaryEventCount, 1);
+  assert.deepEqual(report.stageTimingSummary["input-dispatch"], { count: 1, totalDurationMs: 4.37, maxDurationMs: 4.37, errorCount: 1 });
   assert.match(report.retention.note, /does not retain provider conversation transcripts/);
   assert.doesNotMatch(s.out[0] ?? "", /Unrelated task/);
 });

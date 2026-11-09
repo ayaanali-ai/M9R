@@ -5,7 +5,7 @@
 import { createLocalStore, handleForProvider, MAX_LOCAL_EVENT_HISTORY, MAX_STAGE_TIMING_EVENTS_PER_TASK } from "./local-store";
 import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { isHumanContext, lapsedPending, parseDuration, PENDING_TTL_MS } from "./approval-core";
-import type { Task } from "./inbox-core";
+import { summarizeStageTimingEvents, type Task } from "./inbox-core";
 
 export interface ApprovalIo {
   env: Record<string, string | undefined>;
@@ -100,6 +100,7 @@ export function runTaskLog(io: ApprovalIo, storeRoot: string, rawId: string | un
   }
 
   const stageTiming = task.stageTiming ?? [];
+  const stageTimingSummary = task.stageTimingSummary ?? summarizeStageTimingEvents(stageTiming);
   const correlatedStoreEvents = snapshot.events.filter((event) => event.taskId === task.id);
   const report = {
     schema: "m9r.task-evidence.v1",
@@ -158,15 +159,19 @@ export function runTaskLog(io: ApprovalIo, storeRoot: string, rawId: string | un
       completion: task.completion,
     },
     stageTiming,
+    stageTimingSummary,
+    stageTimingSummaryStartedAt: task.stageTimingSummaryStartedAt ?? stageTiming[0]?.startedAt ?? null,
     correlatedStoreEvents,
     retention: {
       stageTimingEvents: stageTiming.length,
       perTaskStageTimingLimit: MAX_STAGE_TIMING_EVENTS_PER_TASK,
       stageTimingMayBeTruncated: stageTiming.length >= MAX_STAGE_TIMING_EVENTS_PER_TASK,
+      stageTimingSummaryMayBeIncomplete: task.stageTimingSummaryMayBeIncomplete ?? stageTiming.length >= MAX_STAGE_TIMING_EVENTS_PER_TASK,
+      stageTimingSummaryEventCount: Object.values(stageTimingSummary).reduce((total, phase) => total + (phase?.count ?? 0), 0),
       correlatedStoreEvents: correlatedStoreEvents.length,
       globalEventHistoryLimit: MAX_LOCAL_EVENT_HISTORY,
       globalEventHistoryMayBeTruncated: snapshot.events.length >= MAX_LOCAL_EVENT_HISTORY,
-      note: "The store retains bounded task-stage timings and task-linked state events; timing details are redacted and length-bounded when stored. It does not retain provider conversation transcripts, screenshots, or the broker process stderr stream; this export reports only evidence that was actually persisted.",
+      note: "Raw task-stage timing details are bounded; per-phase count, duration sum, maximum, and error totals continue after that detail cap. A summary backfilled from a legacy capped history is marked possibly incomplete. Timing details are redacted and length-bounded when stored. The store does not retain provider conversation transcripts, screenshots, or the broker process stderr stream; this export reports only evidence that was actually persisted.",
     },
   };
   io.out(JSON.stringify(report, null, 2));
