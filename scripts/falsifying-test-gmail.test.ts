@@ -116,7 +116,7 @@ test(
       let dispatchError: unknown;
       try {
         await service.act(identity.token, task.id,
-          { kind: "replace_element", ref: composeBody.ref, text, expectedRole: composeBody.role, expectedLabel: composeBody.label },
+          { kind: "replace_element", view: "app", ref: composeBody.ref, text, expectedRole: composeBody.role, expectedLabel: composeBody.label },
           "background");
       } catch (error) {
         dispatchError = error;
@@ -131,7 +131,7 @@ test(
       let readBack: { status: string; value?: string } | undefined;
       try {
         const result = await service.act(identity.token, task.id,
-          { kind: "read_value", ref: composeBody.ref, expectedRole: composeBody.role, expectedLabel: composeBody.label },
+          { kind: "read_value", view: "app", ref: composeBody.ref, expectedRole: composeBody.role, expectedLabel: composeBody.label },
           "background") as unknown as { readValue: { status: string; value?: string } };
         readBack = result.readValue;
       } catch (error) {
