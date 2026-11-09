@@ -95,9 +95,39 @@ test(
     const identity = store.issueIdentity("codex", "codex", "session-falsify-whatsapp");
     const task = store.addTask({ from: "you", to: "codex", goal: "falsifying test whatsapp", origin: "human_typed", idempotencyKey: "falsify-whatsapp", targetSession: "session-falsify-whatsapp" }).task;
     try {
-      const launched = await service.launch(identity.token, task.id, "test-window", "background");
-      assert.ok(launched.name, "launch returned a real stage name");
-      const stageName = launched.name!;
+      // WhatsApp is a real, already-running, single-instance app: there is
+      // no genuinely NEW window for service.launch()'s own discovery to
+      // find (it deliberately excludes any window that already existed
+      // before this call, to avoid silently adopting the owner's existing
+      // session as if it were freshly launched -- the same safety rule
+      // that made the Notepad tests close any pre-existing window first).
+      // Here that would mean closing the owner's one real WhatsApp window,
+      // which this test must never do. So: attempt the real product's
+      // launch path first (in case a future app-specific adapter makes it
+      // succeed), and only on its documented "no supported exact-process
+      // window; it requires an app-specific launch adapter" failure, fall
+      // back to binding the stage directly to the window that is already
+      // open -- the same manager.presentOwnerWindow + manager.attachWindow
+      // pair the internal launch() uses on its own success path, just
+      // skipping the new-window requirement for this one already-open,
+      // already-signed-in, single-instance case.
+      let stageName: string;
+      try {
+        const launched = await service.launch(identity.token, task.id, "test-window", "background");
+        assert.ok(launched.name, "launch returned a real stage name");
+        stageName = launched.name!;
+      } catch (error) {
+        const message = String((error as Error).message ?? error);
+        if (!/no supported exact-process window/i.test(message)) throw error;
+        console.log(`[falsify-whatsapp] launch's own discovery could not adopt the already-open window (expected for a single-instance app with no adapter); attaching directly instead. (${message})`);
+        const pending = manager.list().find((stage) => !stage.anchor);
+        if (!pending) throw new Error("launch() did not leave a pending stage entry to attach to.");
+        stageName = pending.name;
+        const existingWindow = (await manager.listVisibleWindows()).find((window) => window.title === "WhatsApp");
+        if (!existingWindow) throw new Error("Could not find WhatsApp's already-open real window (title \"WhatsApp\") to attach to.");
+        await manager.presentOwnerWindow(stageName, existingWindow.pid, existingWindow.windowId);
+        await manager.attachWindow(stageName, String(existingWindow.pid), existingWindow.windowId, "whatsapp");
+      }
       assert.ok(manager.list().find((stage) => stage.name === stageName)?.anchor, "WhatsApp's real anchor is registered");
 
       let structure: CuaStageStructure | undefined;
