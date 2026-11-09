@@ -131,22 +131,38 @@ test(
       // Real Save needs genuine OS foreground (same as Notepad's dialog in
       // scripts/background-input-phase0-t3.test.ts) -- borrowed briefly,
       // for this one necessary step, never a return to exclusive input.
-      await manager.withForegroundAuthorization(async () => {}, () => manager.bringToForeground(anchor!.pid, anchor!.windowId));
-      let leaseConfirmed = false;
-      for (let attempt = 0; attempt < 20 && !leaseConfirmed; attempt++) {
-        const current = await manager.currentForegroundWindow();
-        leaseConfirmed = current.pid === anchor!.pid;
-        if (!leaseConfirmed) await delay(100);
+      // Word is heavier than Notepad and can transiently steal its own
+      // foreground back (update checks, account/telemetry prompts) between
+      // the confirm loop and the next keystroke, so each real-input step
+      // re-confirms and retries rather than assuming one lease holds.
+      async function withConfirmedForeground<T>(run: () => Promise<T>): Promise<T> {
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          await manager.withForegroundAuthorization(async () => {}, () => manager.bringToForeground(anchor!.pid, anchor!.windowId));
+          let confirmed = false;
+          for (let wait = 0; wait < 20 && !confirmed; wait++) {
+            confirmed = (await manager.currentForegroundWindow()).pid === anchor!.pid;
+            if (!confirmed) await delay(100);
+          }
+          if (!confirmed) { await delay(200); continue; }
+          try {
+            return await manager.withForegroundAuthorization(async () => {}, run);
+          } catch (error) {
+            lastError = error;
+            console.log(`[falsify-office] foreground step attempt ${attempt} failed, retrying: ${String((error as Error).message ?? error)}`);
+            await delay(300);
+          }
+        }
+        throw lastError instanceof Error ? lastError : new Error("could not keep Word as the real OS foreground window long enough to send input");
       }
-      assert.ok(leaseConfirmed, "the foreground lease never actually made Word the real OS foreground window");
 
       // F12 = Save As. A brand-new, never-saved document always needs a
       // target path; this is the normal, expected first save for this file.
-      await manager.withForegroundAuthorization(async () => {}, () => manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["F12"]));
+      await withConfirmedForeground(() => manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["F12"]));
       await delay(1500);
-      await manager.withForegroundAuthorization(async () => {}, () => manager.sendText(anchor!.pid, anchor!.windowId, savePath));
+      await withConfirmedForeground(() => manager.sendText(anchor!.pid, anchor!.windowId, savePath));
       await delay(300);
-      await manager.withForegroundAuthorization(async () => {}, () => manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["enter"]));
+      await withConfirmedForeground(() => manager.sendKeyCombo(anchor!.pid, anchor!.windowId, ["enter"]));
       await delay(1500);
 
       let saved: ReturnType<typeof statSync> | undefined;
