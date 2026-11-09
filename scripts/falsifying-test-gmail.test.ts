@@ -128,10 +128,26 @@ test(
       assert.deepEqual(cursorAfter, baselineCursor, "the real owner cursor position must be unchanged regardless of outcome");
 
       await delay(500);
+      // Gmail is heavily React-driven and can replace its own DOM/UIA node
+      // for the compose body on re-render -- reusing the PRE-write ref for
+      // the read-back would then fail with a stale-element error that looks
+      // like a verification failure but is really just an invalidated
+      // reference. Re-finding the element fresh, by the same real label,
+      // after the write is the honest way to read back what a React app's
+      // own UI actually ended up holding.
       let readBack: { status: string; value?: string } | undefined;
+      let postWriteStructure: CuaStageStructure | undefined;
+      let freshRef: string | undefined;
+      try {
+        postWriteStructure = await service.act(identity.token, task.id, { kind: "read_structure", view: "app" }, "background") as unknown as CuaStageStructure;
+        freshRef = findComposeBody(postWriteStructure)?.ref;
+      } catch (error) {
+        console.log(`[falsify-gmail] re-reading structure after write failed: ${String((error as Error).message ?? error)}`);
+      }
+      console.log(`[falsify-gmail] pre-write ref=${composeBody.ref}; post-write ref=${freshRef ?? "not found"} (${freshRef === composeBody.ref ? "SAME element" : "DIFFERENT -- Gmail replaced its own node"})`);
       try {
         const result = await service.act(identity.token, task.id,
-          { kind: "read_value", view: "app", ref: composeBody.ref, expectedRole: composeBody.role, expectedLabel: composeBody.label },
+          { kind: "read_value", view: "app", ref: freshRef ?? composeBody.ref, expectedRole: composeBody.role, expectedLabel: composeBody.label },
           "background") as unknown as { readValue: { status: string; value?: string } };
         readBack = result.readValue;
       } catch (error) {
