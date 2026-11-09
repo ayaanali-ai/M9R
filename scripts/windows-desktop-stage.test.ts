@@ -219,6 +219,31 @@ test("native input errors preserve whether SendInput dispatched any events", asy
     "an old or malformed helper response cannot be misreported as proof that no input was sent");
 }));
 
+test("WM_CHAR text receipts report only the native route and exact target match", async () => withRoot(async (root) => {
+  let response: Record<string, unknown> = {
+    ok: true,
+    dispatchState: "dispatched",
+    route: "wm-char-post-message",
+    target: { pid: anchor.pid, windowId: anchor.windowId },
+  };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: {},
+    invokeNative: async () => response as never });
+
+  assert.deepEqual(await manager.sendTextToWindow(anchor.pid, anchor.windowId, "hello"), {
+    dispatchState: "dispatched", route: "wm-char-post-message", targetMatches: true,
+  });
+
+  response = { ok: true, dispatchState: "dispatched", route: "unexpected-route",
+    target: { pid: anchor.pid + 1, windowId: anchor.windowId } };
+  assert.deepEqual(await manager.sendTextToWindow(anchor.pid, anchor.windowId, "hello"), {
+    dispatchState: "dispatched", targetMatches: false,
+  }, "a mismatched target is visible as a diagnostic and is never presented as exact-target proof");
+
+  response = { ok: true };
+  assert.deepEqual(await manager.sendTextToWindow(anchor.pid, anchor.windowId, "hello"), {},
+    "older helpers remain compatible without fabricated route or target evidence");
+}));
+
 test("targeted UIA value reads revalidate the exact window and bound returned text", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   let semanticAction: { dispatched: boolean; read: boolean; value?: string; truncated?: boolean; redacted?: boolean; reason?: string } =

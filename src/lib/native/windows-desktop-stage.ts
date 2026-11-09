@@ -67,7 +67,9 @@ export interface NativeDispatchEvidence {
 
 interface NativeStageResponse {
   ok: boolean;
-  dispatchState?: "not-dispatched" | "uncertain";
+  dispatchState?: "not-dispatched" | "dispatched" | "uncertain";
+  route?: string;
+  target?: { pid?: number | null; windowId?: string | null };
   type?: string;
   error?: string;
   window?: NativeWindowStageInfo;
@@ -196,6 +198,15 @@ export interface WindowsStageDependencies {
    * never frees a finished task's claim on it. Defaults to always-active (preserves prior
    * behavior) when the caller has no task store to check against, e.g. in tests. */
   taskActive?: (taskId: string) => boolean;
+}
+
+export interface NativeWindowTextDispatchReceipt {
+  /** Present only when the native helper explicitly reported a dispatch. */
+  dispatchState?: "dispatched";
+  /** Present only when the native route is the expected WM_CHAR message path. */
+  route?: "wm-char-post-message";
+  /** True/false only when an explicit native target identity was returned and checked. */
+  targetMatches?: boolean;
 }
 
 function defaultProcessAlive(pid: number): boolean {
@@ -1405,11 +1416,28 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
    * with custom input handling must still go through sendText (real foreground) or a UIA
    * SetValue/pattern call.
    */
-  async function sendTextToWindow(pid: number, windowId: string, text: string) {
+  async function sendTextToWindow(pid: number, windowId: string, text: string): Promise<NativeWindowTextDispatchReceipt> {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendTextToWindow", pid, windowId, text });
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the background-typed text.");
+    if (result.dispatchState !== "dispatched") return {};
+
+    // Preserve the native receipt without treating the helper's success bit as
+    // proof of the target or route. Older helper builds may still return only
+    // { ok: true }; those remain compatible but carry no fabricated evidence.
+    const returnedTarget = result.target;
+    const targetMatches = typeof returnedTarget?.pid === "number"
+      && Number.isSafeInteger(returnedTarget.pid)
+      && returnedTarget.pid === pid
+      && typeof returnedTarget.windowId === "string"
+      && returnedTarget.windowId === windowId;
+    const route = result.route === "wm-char-post-message" ? result.route : undefined;
+    return {
+      dispatchState: "dispatched",
+      ...(route ? { route } : {}),
+      ...(returnedTarget?.pid !== undefined || returnedTarget?.windowId !== undefined ? { targetMatches } : {}),
+    };
   }
 
   /**

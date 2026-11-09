@@ -355,9 +355,14 @@ test("background text delivers through the WM_CHAR channel without touching real
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls, state,
     typeTextError: driverError,
   }) as never });
+  setNativeFixture(root, { responses: { sendTextToWindow: { ok: true, dispatchState: "dispatched",
+    route: "wm-char-post-message", target: { pid: 4321, windowId: "4567" } } } });
 
   const proof = await driver.typeText("stage", "echo M9R_TERM_OK", identity, { deliveryMode: "background" });
   assert.equal(proof.outcome.status, "unverifiable");
+  assert.deepEqual(proof.outcome.dispatch, { channel: "wm-char", state: "dispatched",
+    route: "wm-char-post-message", targetMatches: true },
+  "the action reports the helper's explicit route and matching-target receipt without claiming app persistence");
   assert.ok(nativeFixture(root).calls.some((item) => item.op === "sendTextToWindow" && item.pid === 4321 && item.windowId === "4567" && item.text === "echo M9R_TERM_OK"),
     "background mode dispatches the new WM_CHAR channel to the exact target window");
   assert.equal(nativeFixture(root).calls.some((item) => ["bringToForeground", "sendText"].includes(String(item.op))), false,

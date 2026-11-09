@@ -158,6 +158,13 @@ export interface CuaStageActionOutcome {
   status: "confirmed" | "partial" | "unverifiable" | "suspected-noop" | "unverified";
   route?: number;
   summary?: string;
+  /** Bounded native receipt for background WM_CHAR text delivery; never includes HWND/PID. */
+  dispatch?: {
+    channel: "wm-char";
+    state: "dispatched" | "acknowledged";
+    route?: "wm-char-post-message";
+    targetMatches?: boolean;
+  };
   /** Exact outer-window bounds observed after a native geometry operation. */
   windowFrame?: {
     requested: { x: number; y: number; width: number; height: number };
@@ -1585,8 +1592,20 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         }
       }
       try {
-        await manager.sendTextToWindow(input.pid, target, input.text);
-        return { status: "unverifiable", summary: "Posted text to the target window's own message queue (WM_CHAR, no OS foreground required); application effect requires verification." };
+        const receipt = await manager.sendTextToWindow(input.pid, target, input.text);
+        const targetMismatch = receipt.targetMatches === false;
+        return {
+          status: "unverifiable",
+          summary: targetMismatch
+            ? "The native helper reported WM_CHAR dispatch, but its returned target identity did not match the requested window; the application effect remains unverified."
+            : "The native helper acknowledged background text delivery (WM_CHAR); the application effect requires verification.",
+          dispatch: {
+            channel: "wm-char",
+            state: receipt.dispatchState ?? "acknowledged",
+            ...(receipt.route ? { route: receipt.route } : {}),
+            ...(receipt.targetMatches !== undefined ? { targetMatches: receipt.targetMatches } : {}),
+          },
+        };
       } catch (error) {
         // The native helper explicitly proved zero WM_CHAR delivery. Only that
         // typed pre-dispatch result may move to the owner-approved foreground
