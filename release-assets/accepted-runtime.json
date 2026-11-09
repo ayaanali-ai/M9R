@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "buildId": "fd96a445831ed0073adf0e1dab435bc6afc006d00f0a64ee467003850ee00341",
-  "builtAt": "2026-11-06T22:15:26.721Z",
+  "buildId": "b033a6d253dc998dda926aa8362c4365634ec95ac6d143e817d00da0a92ced66",
+  "builtAt": "2026-11-09T06:10:59.325Z",
   "artifacts": {
     "cua-driver-runtime/bin/cua-cursor-theme.exe": "27cab49c44aa9ed2013d969ef8b53955bbf4df87ae3522aa9167e1f9e4c33ca0",
     "cua-driver-runtime/bin/cua-driver-uia.exe": "e9dd9f16d55acc3b029d84aec3ae699d8244a1fc72414b206512d52f7ed77f5b",
@@ -182,13 +182,13 @@
     "cua-driver-runtime/node_modules/@ubjs/node/readme.md": "11e5dbeb25331e10eb30b8af3a7e50275225e3806b6fe0f55db85db0ed21b8e7",
     "cua-driver-runtime/node_modules/@ubjs/node/typescript/dist/resolve-lib.d.ts": "32c737545ff3d885d004a276b8099bf3ebbb050ca124bf39c9c741ac39461515",
     "cua-driver-runtime/node_modules/@ubjs/node/typescript/dist/resolve-lib.js": "133624993961574f194a1bbdac8f3c2bccd49892de92d0359f711f4dbfc1a0da",
-    "m9r-engine.exe": "ae769c759ae18e1e08433fa3a1b12d44195578e5c438aff81551c42226b334b4",
-    "m9r-native-input-host.exe": "30fefa28e5211a8a8b68ece71db40dbcbe7efc9dd5646e1b6970ca35f9fd38b6",
+    "m9r-engine.exe": "70e36883bc5378c630c0212f7b67c66967b6887e20759ce0434dc5118e4e826b",
+    "m9r-native-input-host.exe": "946769e0657b6201e73eec3747538677f5c1bd7e42bc7127be0531e365a6ac47",
     "m9r-overlay.exe": "0044a576f8e127dbc104f522e0e23f03a30e8097962fab1f4d2594bb0ae128fe",
-    "m9r-web-broker.exe": "3591ee79d577d344ac26657d3b4b089e6d2d01354bfe1c3dc10e18f226d5fb27"
+    "m9r-web-broker.exe": "2f28631e4971280b53ae9e90466e6bb92d50b9a96a7786e5edd5778de59160d6"
   },
   "source": {
-    "sourceCommit": "595f3703d94fa723661f312861316131722cd41d",
+    "sourceCommit": "7e88570cd14b2f64330207eb7e52f0d387c42ceb",
     "sourceDirty": false
   }
 }
