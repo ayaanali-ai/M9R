@@ -254,12 +254,16 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
   if (!delivery.ok) throw new DesktopInputNotDispatchedError(delivery.reason,
     delivery.code === "foreground-lease-required" ? "foreground-lease" : "background-unavailable");
   const confirmFocusForeground = requestedFocus;
-  // A background task can ask for one owner-approved foreground turn without
-  // changing the task's standing mode. This action-only override is consumed
-  // by the driver's native boundary; the next action returns to background.
-  const actionDeliveryMode = delivery.mode === "exclusive-input" ? "owner-preview" : mode;
+  // Semantic routes stay background-first even while the owner is supervising
+  // an owner-preview task. A physical/focus action, or a semantic action whose
+  // target has no usable background route, may escalate through the same
+  // task-scoped native approval boundary. Explicit background mode never gets
+  // that escalation permission.
+  const actionDeliveryMode: "background" | "owner-preview" = delivery.mode === "exclusive-input" ? "owner-preview" : "background";
+  const allowForegroundEscalation = mode === "owner-preview" || requestedFocus === true || mediaKeyRequest;
   const stageOptions = <T extends Record<string, unknown>>(options: T): T | undefined => {
-    const normalized = { ...options, deliveryMode: actionDeliveryMode, ...(signal ? { signal } : {}) } as Record<string, unknown>;
+    const normalized = { ...options, deliveryMode: actionDeliveryMode,
+      ...(allowForegroundEscalation ? { allowForegroundEscalation: true } : {}), ...(signal ? { signal } : {}) } as Record<string, unknown>;
     for (const key of Object.keys(normalized)) if (normalized[key] === undefined) delete normalized[key];
     return Object.keys(normalized).length ? normalized as T : undefined;
   };
@@ -268,7 +272,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
   const capture = () => popupTargeted ? driver.capturePopup(name) : desktopWide ? driver.captureDesktop(name, identity) : driver.capture(name, identity);
   const cursor = (x: number, y: number) => desktopWide ? driver.moveDesktopCursor(name, x, y, identity) : driver.moveCursor(name, x, y, identity);
   const click = (x: number, y: number, options: { button?: "left" | "middle" | "right"; count?: 1 | 2; confirmFocusForeground?: boolean } = {}) => {
-    const normalized = { ...options, deliveryMode: actionDeliveryMode, ...(signal ? { signal } : {}) };
+    const normalized = { ...options, deliveryMode: actionDeliveryMode,
+      ...(allowForegroundEscalation ? { allowForegroundEscalation: true } : {}), ...(signal ? { signal } : {}) };
     if (normalized.confirmFocusForeground === undefined) delete normalized.confirmFocusForeground;
     if (popupTargeted) return driver.clickPopup(name, x, y, normalized);
     return desktopWide
@@ -291,7 +296,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "type": {
       const options = stageOptions({ confirmFocusForeground, mode: action.mode,
         x: action.x, y: action.y, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel });
-      if (popupTargeted) return driver.typeTextPopup(name, action.text, options ?? { deliveryMode: mode });
+      if (popupTargeted) return driver.typeTextPopup(name, action.text, options ?? stageOptions({})!);
       if (desktopWide) return driver.typeTextDesktop(name, action.text, identity, options);
       return driver.typeText(name, action.text, identity, options);
     }
@@ -338,9 +343,9 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
         : driver.scrollDelta(name, action.x, action.y, action.deltaX, action.deltaY, action.unit, identity, stageOptions({ confirmFocusForeground }));
     case "drag": return desktopWide ? driver.dragDesktop(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }))
       : driver.drag(name, action.fromX, action.fromY, action.toX, action.toY, identity, stageOptions({ durationMs: action.durationMs, confirmFocusForeground }));
-    case "press_key": return popupTargeted ? driver.pressKeyPopup(name, action.key, { confirmFocusForeground, deliveryMode: mode, ...(signal ? { signal } : {}) })
+    case "press_key": return popupTargeted ? driver.pressKeyPopup(name, action.key, stageOptions({ confirmFocusForeground })!)
       : desktopWide ? driver.pressKeyDesktop(name, action.key, identity, stageOptions({ confirmFocusForeground })) : driver.pressKey(name, action.key, identity, stageOptions({ confirmFocusForeground }));
-    case "hotkey": return popupTargeted ? driver.hotkeyPopup(name, action.keys, { confirmFocusForeground, deliveryMode: mode, ...(signal ? { signal } : {}) })
+    case "hotkey": return popupTargeted ? driver.hotkeyPopup(name, action.keys, stageOptions({ confirmFocusForeground })!)
       : desktopWide ? driver.hotkeyDesktop(name, action.keys, identity, stageOptions({ confirmFocusForeground })) : driver.hotkey(name, action.keys, identity, stageOptions({ confirmFocusForeground }));
     case "click_element": return driver.clickElement(name, action.ref, identity, stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }));
     case "scroll_element": return driver.scrollElement(name, action.ref, action.direction, identity,
