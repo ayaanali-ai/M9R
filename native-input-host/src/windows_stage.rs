@@ -297,27 +297,52 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
         },
         #[cfg(windows)]
         Some("sendClick") => match platform::send_click(value) {
-            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Ok(()) => input_dispatch_success(
+                request_id,
+                "send-input-click",
+                value,
+                crate::InputDispatchState::Dispatched,
+            ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         #[cfg(windows)]
         Some("sendDrag") => match platform::send_drag(value) {
-            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Ok(()) => input_dispatch_success(
+                request_id,
+                "send-input-drag",
+                value,
+                crate::InputDispatchState::Dispatched,
+            ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         #[cfg(windows)]
         Some("sendScroll") => match platform::send_scroll(value) {
-            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Ok(()) => input_dispatch_success(
+                request_id,
+                "send-input-scroll",
+                value,
+                crate::InputDispatchState::Dispatched,
+            ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         #[cfg(windows)]
         Some("sendKeyCombo") => match platform::send_key_combo(value) {
-            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Ok(()) => input_dispatch_success(
+                request_id,
+                "send-input-key-combo",
+                value,
+                crate::InputDispatchState::Dispatched,
+            ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         #[cfg(windows)]
         Some("sendText") => match platform::send_text(value) {
-            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Ok(()) => input_dispatch_success(
+                request_id,
+                "send-input-unicode-text",
+                value,
+                crate::InputDispatchState::Dispatched,
+            ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         // Background-safe text entry: posts WM_CHAR straight to the target
@@ -339,7 +364,12 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
         // foreground, the same way sendTextToWindow avoids them for text.
         #[cfg(windows)]
         Some("postCloseWindow") => match platform::post_close_window(value) {
-            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Ok(()) => input_dispatch_success(
+                request_id,
+                "wm-close-post-message",
+                value,
+                crate::InputDispatchState::Dispatched,
+            ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         // Resolves a window's descendant classic-Edit-class child, if any,
@@ -1956,6 +1986,55 @@ mod tests {
         assert_eq!(partial["ok"], false);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn input_dispatch_success_reports_route_and_target_for_every_dispatch_op() {
+        // Every op that can actually send input builds its success response
+        // through `input_dispatch_success`, each with its own route string.
+        // Prove the helper reports them consistently rather than trusting
+        // each call site separately, since this is the one place a route
+        // name could silently drift from what Codex is told to expect.
+        for (route, state) in [
+            ("wm-char-post-message", crate::InputDispatchState::Dispatched),
+            ("wm-close-post-message", crate::InputDispatchState::Dispatched),
+            ("send-input-click", crate::InputDispatchState::Dispatched),
+            ("send-input-drag", crate::InputDispatchState::Dispatched),
+            ("send-input-scroll", crate::InputDispatchState::Dispatched),
+            ("send-input-key-combo", crate::InputDispatchState::Dispatched),
+            ("send-input-unicode-text", crate::InputDispatchState::Dispatched),
+        ] {
+            let response = super::input_dispatch_success(
+                "request-1",
+                route,
+                &json!({ "pid": 4242, "windowId": "778899" }),
+                state,
+            );
+            assert_eq!(response["ok"], true);
+            assert_eq!(response["dispatchState"], "dispatched");
+            assert_eq!(response["route"], route);
+            assert_eq!(response["target"]["pid"], 4242);
+            assert_eq!(response["target"]["windowId"], "778899");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn input_dispatch_success_omits_target_identity_it_cannot_resolve() {
+        // A request with no (or invalid) pid/windowId still gets a
+        // dispatchState/route back -- it just can't claim a target it
+        // never actually parsed. Never fabricate pid/windowId here.
+        let response = super::input_dispatch_success(
+            "request-1",
+            "send-input-click",
+            &json!({}),
+            crate::InputDispatchState::Dispatched,
+        );
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["route"], "send-input-click");
+        assert!(response["target"]["pid"].is_null());
+        assert!(response["target"]["windowId"].is_null());
+    }
+
     #[test]
     fn removed_virtual_desktop_operations_are_not_exposed() {
         for op in [
@@ -2207,6 +2286,10 @@ mod tests {
             "windowId": format!("{handle}"),
         }));
         assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["dispatchState"], "dispatched");
+        assert_eq!(response["route"], "wm-close-post-message");
+        assert_eq!(response["target"]["pid"], pid);
+        assert_eq!(response["target"]["windowId"], format!("{handle}"));
 
         let mut message = MSG::default();
         while unsafe { PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE) }.as_bool() {
