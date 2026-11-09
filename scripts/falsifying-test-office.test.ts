@@ -77,7 +77,27 @@ test(
     const savePath = join(workDir, "falsify-office.docx");
     let anchor: { pid: number; windowId: string } | undefined;
     try {
-      const launched = await service.launch(identity.token, task.id, "test-window", "background");
+      // Word's own splash-window-to-real-document-window handoff is slower
+      // and less uniform than Chrome's or Notepad's -- the native host can
+      // occasionally observe a transitional window it cannot yet present
+      // ("Windows did not show the requested application window"). This is
+      // a timing race in Word's own startup, not a leftover-process state
+      // (confirmed separately: no WINWORD.EXE survives a prior run's
+      // cleanup), so a short retry of the launch itself is the honest fix,
+      // not a workaround around a real dispatch failure.
+      let launched: Awaited<ReturnType<typeof service.launch>> | undefined;
+      let launchError: unknown;
+      for (let attempt = 0; attempt < 3 && !launched; attempt++) {
+        try {
+          launched = await service.launch(identity.token, task.id, "test-window", "background");
+        } catch (error) {
+          launchError = error;
+          console.log(`[falsify-office] launch attempt ${attempt} failed, retrying: ${String((error as Error).message ?? error)}`);
+          try { await service.closeApp(identity.token, task.id, "background"); } catch { /* best-effort */ }
+          await delay(2000);
+        }
+      }
+      if (!launched) throw launchError instanceof Error ? launchError : new Error("Word's launch never produced a presentable window after 3 attempts");
       assert.ok(launched.name, "launch returned a real stage name");
       const stageName = launched.name!;
       anchor = manager.list().find((stage) => stage.name === stageName)?.anchor;
