@@ -169,6 +169,20 @@ for (const scenario of SCENARIOS) {
           if (next.pid === baselineForeground.pid) break;
           baselineForeground = next;
         }
+        // Foreground settling and input-readiness are two different things:
+        // a warm chrome.exe window's foreground can stabilize almost
+        // immediately (as little as ~500ms), well before the new page/tab
+        // itself has actually finished loading and attaching its own real
+        // "input" listener. Two real runs each intermittently (~1 in 6)
+        // dropped a dispatch entirely -- reported success, but the page's
+        // own listener never fired at all -- always on a freshly-opened
+        // window, never corrupted text, exactly what a too-early dispatch
+        // into a not-yet-ready page looks like. The fixed 3s delay this
+        // replaced gave every scenario that minimum regardless of how fast
+        // foreground itself settled; restoring a floor here (on top of,
+        // not instead of, the foreground-stabilization poll above) keeps
+        // the cold-launch fix while not shortchanging page readiness.
+        await delay(1500);
         const baselineCursor = await manager.getOwnerCursorPosition();
 
         let dispatchError: unknown;
