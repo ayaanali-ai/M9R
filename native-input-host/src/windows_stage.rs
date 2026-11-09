@@ -305,6 +305,15 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
+        // Target-window mouse messages are the non-physical pointer route.
+        // They are delivered by this agent stream's helper to the exact HWND;
+        // the owner pointer is never moved or restored. The app effect still
+        // requires a separate observation after the message is queued.
+        #[cfg(windows)]
+        Some("postClickToWindow") => match platform::post_click_to_window(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id,"dispatchState":"dispatched","route":"PostMessageW","target":"exact-window"}),
+            Err(error) => input_dispatch_failure(request_id, error),
+        },
         #[cfg(windows)]
         Some("sendDrag") => match platform::send_drag(value) {
             Ok(()) => input_dispatch_success(
@@ -323,6 +332,11 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
                 value,
                 crate::InputDispatchState::Dispatched,
             ),
+            Err(error) => input_dispatch_failure(request_id, error),
+        },
+        #[cfg(windows)]
+        Some("postScrollToWindow") => match platform::post_scroll_to_window(value) {
+            Ok(()) => json!({"ok":true,"requestId":request_id,"dispatchState":"dispatched","route":"PostMessageW","target":"exact-window"}),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         #[cfg(windows)]
@@ -1746,6 +1760,47 @@ mod platform {
         Ok((x, y))
     }
 
+    /// Posts a one-click sequence through the exact target window's message
+    /// queue. Unsupported click counts are refused before dispatch so they
+    /// can use the owner-authorized foreground route without replay risk.
+    pub(super) fn post_click_to_window(value: &serde_json::Value) -> Result<(), crate::InputDispatchError> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        let (x, y) = screen_point(value, "x", "y")?;
+        let button = match value.get("button").and_then(serde_json::Value::as_str).unwrap_or("left") {
+            "left" => crate::MouseButton::Left,
+            "right" => crate::MouseButton::Right,
+            "middle" => crate::MouseButton::Middle,
+            other => return Err(crate::InputDispatchError::not_dispatched(format!("unsupported mouse button \"{other}\""))),
+        };
+        let count = match value.get("count") {
+            None => 1,
+            Some(raw) => raw.as_u64().ok_or_else(|| crate::InputDispatchError::not_dispatched("click count must be an integer"))?,
+        };
+        if count != 1 {
+            return Err(crate::InputDispatchError::not_dispatched("window-message input supports one click; other click counts require the foreground route"));
+        }
+        crate::win32::post_click_to_window(window as usize, pid, x, y, button)
+    }
+
+    /// Posts a bounded wheel event to a same-process target control without
+    /// moving the system pointer. The caller observes the app after dispatch.
+    pub(super) fn post_scroll_to_window(value: &serde_json::Value) -> Result<(), crate::InputDispatchError> {
+        let (pid, handle) = super::parse_window_identity(value)?;
+        let window = validate_window(pid, handle)?;
+        let (x, y) = screen_point(value, "x", "y")?;
+        let amount = value.get("amount").and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value != 0 && (-50..=50).contains(value))
+            .ok_or_else(|| crate::InputDispatchError::not_dispatched("scroll amount must be between -50 and 50 notches"))?;
+        let horizontal = match value.get("axis").and_then(serde_json::Value::as_str).unwrap_or("vertical") {
+            "vertical" => false,
+            "horizontal" => true,
+            _ => return Err(crate::InputDispatchError::not_dispatched("scroll axis must be vertical or horizontal")),
+        };
+        crate::win32::post_scroll_to_window(window as usize, pid, x, y, amount, horizontal)
+    }
+
     /// Sends a real click at an absolute screen point via `SendInput`, after
     /// confirming the target is the real foreground window. The caller
     /// supplies final screen coordinates already resolved from whatever
@@ -1871,9 +1926,10 @@ mod platform {
             .get("text")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| crate::InputDispatchError::not_dispatched("text must be a string"))?;
-        if text.is_empty()
-            || text.chars().count() > 5_000
-            || text
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if normalized.is_empty()
+            || normalized.chars().count() > 5_000
+            || normalized
                 .chars()
                 .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
@@ -1881,7 +1937,7 @@ mod platform {
                 "invalid input text",
             ));
         }
-        crate::win32::send_unicode_text(text)
+        crate::win32::send_unicode_text(&normalized)
     }
 
     /// Types literal text into one specific window via `WM_CHAR` messages
@@ -1900,9 +1956,10 @@ mod platform {
             .get("text")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| crate::InputDispatchError::not_dispatched("text must be a string"))?;
-        if text.is_empty()
-            || text.chars().count() > 5_000
-            || text
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if normalized.is_empty()
+            || normalized.chars().count() > 5_000
+            || normalized
                 .chars()
                 .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
@@ -1910,7 +1967,7 @@ mod platform {
                 "invalid input text",
             ));
         }
-        crate::win32::post_text_to_window(window as usize, text)
+        crate::win32::post_text_to_window(window as usize, &normalized)
     }
 
     pub(super) fn post_close_window(
@@ -2133,8 +2190,8 @@ mod tests {
         use windows::core::{w, PCWSTR};
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow, GetWindowTextW,
-            GetWindowThreadProcessId, PeekMessageW, TranslateMessage, ES_AUTOHSCROLL, MSG,
-            PM_REMOVE, WS_OVERLAPPED,
+            GetWindowThreadProcessId, PeekMessageW, TranslateMessage, ES_AUTOHSCROLL,
+            ES_AUTOVSCROLL, ES_MULTILINE, MSG, PM_REMOVE, WS_OVERLAPPED,
         };
 
         let window = unsafe {
@@ -2143,7 +2200,9 @@ mod tests {
                 w!("Edit"),
                 PCWSTR::null(),
                 WS_OVERLAPPED
-                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
+                        (ES_AUTOHSCROLL | ES_AUTOVSCROLL | ES_MULTILINE) as u32,
+                    ),
                 0,
                 0,
                 200,
@@ -2170,7 +2229,7 @@ mod tests {
             "op": "sendTextToWindow",
             "pid": pid,
             "windowId": format!("{handle}"),
-            "text": "m9r background",
+            "text": "m9r background\nline two\r\nline three",
         });
         let response = handle_desktop_stage_request(&request);
         assert_eq!(response["ok"], true, "{response}");
@@ -2205,11 +2264,140 @@ mod tests {
             "windowId": format!("{handle}"),
         }));
         assert_eq!(read_back["ok"], true, "{read_back}");
-        assert_eq!(read_back["text"], "m9r background");
+        assert_eq!(read_back["text"], "m9r background\r\nline two\r\nline three");
 
         unsafe { DestroyWindow(window) }.ok();
 
-        assert_eq!(actual, "m9r background");
+        assert_eq!(actual, "m9r background\r\nline two\r\nline three");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn post_click_to_window_delivers_to_exact_win32_window_without_moving_system_cursor() {
+        use std::cell::RefCell;
+        use windows::core::w;
+        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+            GetForegroundWindow, GetWindowThreadProcessId, PeekMessageW, RegisterClassW,
+            TranslateMessage, MSG, PM_REMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL,
+            WM_MOUSEMOVE, WM_MOUSEWHEEL, WNDCLASSW, WS_OVERLAPPED,
+        };
+
+        thread_local! {
+            static MOUSE_MESSAGES: RefCell<Vec<(u32, usize)>> = const { RefCell::new(Vec::new()) };
+        }
+
+        unsafe extern "system" fn wndproc(
+            window: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if matches!(
+                message,
+                WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEWHEEL | WM_MOUSEHWHEEL
+            ) {
+                MOUSE_MESSAGES.with(|messages| messages.borrow_mut().push((message, wparam.0)));
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+
+        let class_name = w!("M9RPostClickWindowTest");
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        assert_ne!(unsafe { RegisterClassW(&class) }, 0, "registering the click-test window class");
+        let window = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                class_name,
+                windows::core::PCWSTR::null(),
+                WS_OVERLAPPED,
+                20,
+                20,
+                300,
+                200,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("creating a hidden Win32 window for the targeted click test");
+        let handle = window.0 as usize;
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+        assert_ne!(unsafe { GetForegroundWindow() }, window, "the test target must remain out of foreground");
+
+        let mut cursor_before = POINT::default();
+        unsafe { GetCursorPos(&mut cursor_before) }.expect("reading the system cursor before posting input");
+        let response = handle_desktop_stage_request(&json!({
+            "op": "postClickToWindow",
+            "pid": pid,
+            "windowId": handle.to_string(),
+            "x": 40,
+            "y": 80,
+            "button": "left",
+            "count": 1,
+        }));
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["dispatchState"], "dispatched", "{response}");
+        assert_eq!(response["route"], "PostMessageW", "{response}");
+        assert_eq!(response["target"], "exact-window", "{response}");
+        let vertical = handle_desktop_stage_request(&json!({
+            "op": "postScrollToWindow",
+            "pid": pid,
+            "windowId": handle.to_string(),
+            "x": 40,
+            "y": 80,
+            "amount": 1,
+            "axis": "vertical",
+        }));
+        assert_eq!(vertical["ok"], true, "{vertical}");
+        assert_eq!(vertical["dispatchState"], "dispatched", "{vertical}");
+        let horizontal = handle_desktop_stage_request(&json!({
+            "op": "postScrollToWindow",
+            "pid": pid,
+            "windowId": handle.to_string(),
+            "x": 40,
+            "y": 80,
+            "amount": -2,
+            "axis": "horizontal",
+        }));
+        assert_eq!(horizontal["ok"], true, "{horizontal}");
+        assert_eq!(horizontal["dispatchState"], "dispatched", "{horizontal}");
+
+        // PostMessageW only queues the sequence. Pump this test window's own
+        // queue just as its UI thread would, then inspect the exact messages.
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        MOUSE_MESSAGES.with(|messages| {
+            assert_eq!(
+                *messages.borrow(),
+                vec![
+                    (WM_MOUSEMOVE, 0),
+                    (WM_LBUTTONDOWN, 1),
+                    (WM_LBUTTONUP, 0),
+                    (WM_MOUSEWHEEL, (120_i16 as u16 as usize) << 16),
+                    (WM_MOUSEHWHEEL, ((-240_i16) as u16 as usize) << 16),
+                ]
+            );
+        });
+
+        let mut cursor_after = POINT::default();
+        unsafe { GetCursorPos(&mut cursor_after) }.expect("reading the system cursor after dispatch");
+        assert_eq!(cursor_after.x, cursor_before.x);
+        assert_eq!(cursor_after.y, cursor_before.y);
+        unsafe { DestroyWindow(window) }.expect("destroying the hidden test window");
     }
 
     #[test]

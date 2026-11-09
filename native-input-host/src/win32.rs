@@ -9,6 +9,14 @@ use std::thread;
 type Hwnd = *mut c_void;
 
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Point { x: i32, y: i32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Rect { left: i32, top: i32, right: i32, bottom: i32 }
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct MouseInput {
     dx: i32,
@@ -49,6 +57,10 @@ extern "system" {
     fn GetForegroundWindow() -> Hwnd;
     fn GetWindowThreadProcessId(window: Hwnd, process_id: *mut u32) -> u32;
     fn IsWindowVisible(window: Hwnd) -> i32;
+    fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> i32;
+    fn GetClientRect(window: Hwnd, rect: *mut Rect) -> i32;
+    fn ScreenToClient(window: Hwnd, point: *mut Point) -> i32;
+    fn ChildWindowFromPointEx(parent: Hwnd, point: Point, flags: u32) -> Hwnd;
     fn GetSystemMetrics(index: i32) -> i32;
     fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
     fn Sleep(milliseconds: u32);
@@ -82,6 +94,22 @@ const LLMHF_INJECTED: u32 = 0x01;
 const PM_NOREMOVE: u32 = 0;
 const WM_M9R_INPUT_MONITOR_START: u32 = 0x8001;
 const WM_M9R_INPUT_MONITOR_STOP: u32 = 0x8002;
+const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_RBUTTONDOWN: u32 = 0x0204;
+const WM_RBUTTONUP: u32 = 0x0205;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_MBUTTONUP: u32 = 0x0208;
+const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_MOUSEHWHEEL: u32 = 0x020E;
+const CWP_SKIPINVISIBLE: u32 = 0x0001;
+const CWP_SKIPDISABLED: u32 = 0x0002;
+const CWP_SKIPTRANSPARENT: u32 = 0x0004;
+const MK_LBUTTON: usize = 0x0001;
+const MK_RBUTTON: usize = 0x0002;
+const MK_MBUTTON: usize = 0x0010;
+const WHEEL_DELTA: i32 = 120;
 static PHYSICAL_INPUT_EPOCH: AtomicU64 = AtomicU64::new(0);
 static PHYSICAL_INPUT_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PHYSICAL_INPUT_MONITOR_STATUS: AtomicU8 = AtomicU8::new(0);
@@ -270,6 +298,17 @@ fn send_key_event(key: KeySpec, up: bool) -> bool {
         },
     };
     unsafe { SendInput(1, &input, size_of::<Input>() as i32) == 1 }
+}
+
+fn keyboard_input(key: KeySpec, up: bool) -> Input {
+    let (vk, scan, mut flags) = match key {
+        KeySpec::Virtual { vk, extended } => (vk, 0, if extended { KEYEVENTF_EXTENDEDKEY } else { 0 }),
+        KeySpec::Unicode(unit) => (0, unit, KEYEVENTF_UNICODE),
+    };
+    if up { flags |= KEYEVENTF_KEYUP; }
+    Input { kind: INPUT_KEYBOARD, data: InputData { keyboard: KeyboardInput {
+        vk, scan, flags, time: 0, extra_info: 0,
+    } } }
 }
 
 /// One attempt at `AttachThreadInput` + `SetForegroundWindow` for `window`.
@@ -528,25 +567,27 @@ pub fn send_key_combo(keys: &[KeySpec]) -> Result<(), InputDispatchError> {
 /// for any character the target control can render, not just what the
 /// system's active keyboard layout can produce.
 pub fn send_unicode_text(text: &str) -> Result<(), InputDispatchError> {
-    let mut input_sent = false;
-    for unit in text.encode_utf16() {
-        if !send_key_event(KeySpec::Unicode(unit), false) {
-            return Err(dispatch_error(
-                "Windows declined a trusted Unicode key-down event",
-                input_sent,
-            ));
-        }
-        input_sent = true;
-        if !send_key_event(KeySpec::Unicode(unit), true) {
-            return Err(dispatch_error(
-                "Windows declined a trusted Unicode key-up event",
-                input_sent,
-            ));
-        }
-        input_sent = true;
-        unsafe { Sleep(4) };
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    if units.is_empty() { return Ok(()); }
+    let mut inputs = Vec::with_capacity(units.len().saturating_mul(2));
+    for unit in units {
+        let key = if unit == b'\n' as u16 {
+            KeySpec::Virtual { vk: 0x0D, extended: false }
+        } else {
+            KeySpec::Unicode(unit)
+        };
+        inputs.push(keyboard_input(key, false));
+        inputs.push(keyboard_input(key, true));
     }
-    Ok(())
+    let expected = inputs.len() as u32;
+    let inserted = unsafe { SendInput(expected, inputs.as_ptr(), size_of::<Input>() as i32) };
+    if inserted == expected { return Ok(()); }
+    if inserted == 0 {
+        return Err(InputDispatchError::not_dispatched("Windows declined the Unicode text input sequence"));
+    }
+    return Err(InputDispatchError::uncertain(format!(
+        "Windows accepted {inserted} of {expected} Unicode text events; inspect the field before retrying"
+    )));
 }
 
 /// `WM_CHAR`: a UTF-16 code unit delivered as a window message, consumed
@@ -581,7 +622,12 @@ pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatc
         ));
     }
     let mut input_sent = false;
-    for unit in text.encode_utf16() {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    for unit in normalized.encode_utf16() {
+        // Standard Win32 text controls represent Enter as carriage return;
+        // normalize platform line endings before queueing so LF-only task text
+        // becomes a real multiline edit instead of a literal line-feed event.
+        let unit = if unit == b'\n' as u16 { b'\r' as u16 } else { unit };
         if unsafe { PostMessageW(window, WM_CHAR, unit as usize, 0) } == 0 {
             return Err(dispatch_error(
                 "Windows declined to queue a WM_CHAR message for the target window",
@@ -589,7 +635,6 @@ pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatc
             ));
         }
         input_sent = true;
-        unsafe { Sleep(2) };
     }
     Ok(())
 }
@@ -733,6 +778,101 @@ pub fn send_click_at_screen_point(
         }
     }
     Ok(())
+}
+
+/// Resolves an exact window's deepest same-process child at a screen point and
+/// converts the point into that child window's client coordinates. This does
+/// not inspect or change the OS cursor position.
+fn window_message_target(window: usize, pid: u32, x: i32, y: i32) -> Result<(Hwnd, Point), InputDispatchError> {
+    let root = window as Hwnd;
+    if root.is_null() || !(-32_768..=32_767).contains(&x) || !(-32_768..=32_767).contains(&y) {
+        return Err(InputDispatchError::not_dispatched("invalid target window or screen point for window-message input"));
+    }
+    let mut bounds = Rect::default();
+    if unsafe { GetWindowRect(root, &mut bounds) } == 0
+        || x < bounds.left || y < bounds.top || x >= bounds.right || y >= bounds.bottom {
+        return Err(InputDispatchError::not_dispatched("the input point is outside the exact target window"));
+    }
+
+    let mut target = root;
+    for _ in 0..64 {
+        let mut local = Point { x, y };
+        if unsafe { ScreenToClient(target, &mut local) } == 0 {
+            return Err(InputDispatchError::not_dispatched("Windows could not map the screen point into the target window"));
+        }
+        let child = unsafe { ChildWindowFromPointEx(
+            target,
+            local,
+            CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT,
+        ) };
+        if child.is_null() || child == target { break; }
+        let mut child_pid = 0u32;
+        if unsafe { GetWindowThreadProcessId(child, &mut child_pid) } == 0 || child_pid != pid {
+            return Err(InputDispatchError::not_dispatched("the point resolves to a child outside the exact target process"));
+        }
+        target = child;
+    }
+
+    let mut local = Point { x, y };
+    if unsafe { ScreenToClient(target, &mut local) } == 0 {
+        return Err(InputDispatchError::not_dispatched("Windows could not map the point into the resolved target control"));
+    }
+    let mut client = Rect::default();
+    if unsafe { GetClientRect(target, &mut client) } == 0
+        || local.x < client.left || local.y < client.top || local.x >= client.right || local.y >= client.bottom
+        || !(-32_768..=32_767).contains(&local.x) || !(-32_768..=32_767).contains(&local.y) {
+        return Err(InputDispatchError::not_dispatched("the resolved control has no usable client point for window-message input"));
+    }
+    Ok((target, local))
+}
+
+fn packed_signed_point(x: i32, y: i32) -> Result<isize, InputDispatchError> {
+    if !(-32_768..=32_767).contains(&x) || !(-32_768..=32_767).contains(&y) {
+        return Err(InputDispatchError::not_dispatched("mouse-message coordinates exceed the Win32 signed-point range"));
+    }
+    let packed = (x as u16 as u32) | ((y as u16 as u32) << 16);
+    Ok((packed as i32) as isize)
+}
+
+fn post_mouse_message(window: Hwnd, message: u32, wparam: usize, lparam: isize, input_sent: &mut bool) -> Result<(), InputDispatchError> {
+    if unsafe { PostMessageW(window, message, wparam, lparam) } == 0 {
+        return Err(dispatch_error("Windows declined to queue a targeted mouse message", *input_sent));
+    }
+    *input_sent = true;
+    Ok(())
+}
+
+/// Posts a single mouse click to a same-process child of the exact target
+/// window. Unlike SendInput, this queues messages to the target HWND and does
+/// not move, sample, or restore the owner's physical pointer. Queue acceptance
+/// is dispatch evidence only; the caller must inspect the app effect.
+pub fn post_click_to_window(window: usize, pid: u32, x: i32, y: i32, button: MouseButton) -> Result<(), InputDispatchError> {
+    let (target, local) = window_message_target(window, pid, x, y)?;
+    let point = packed_signed_point(local.x, local.y)?;
+    let (down, up, mask) = match button {
+        MouseButton::Left => (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON),
+        MouseButton::Right => (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON),
+        MouseButton::Middle => (WM_MBUTTONDOWN, WM_MBUTTONUP, MK_MBUTTON),
+    };
+    let mut input_sent = false;
+    post_mouse_message(target, WM_MOUSEMOVE, 0, point, &mut input_sent)?;
+    post_mouse_message(target, down, mask, point, &mut input_sent)?;
+    post_mouse_message(target, up, 0, point, &mut input_sent)
+}
+
+/// Posts a wheel event to the deepest same-process control at the exact screen
+/// point without using the system pointer. `amount` is a signed number of
+/// standard wheel notches, bounded to keep the packed delta well-formed.
+pub fn post_scroll_to_window(window: usize, pid: u32, x: i32, y: i32, amount: i32, horizontal: bool) -> Result<(), InputDispatchError> {
+    if amount == 0 || !(-50..=50).contains(&amount) {
+        return Err(InputDispatchError::not_dispatched("window-message scroll amount must be between -50 and 50 notches"));
+    }
+    let (target, _) = window_message_target(window, pid, x, y)?;
+    let point = packed_signed_point(x, y)?;
+    let delta = (amount * WHEEL_DELTA) as i16 as u16 as usize;
+    let message = if horizontal { WM_MOUSEHWHEEL } else { WM_MOUSEWHEEL };
+    let mut input_sent = false;
+    post_mouse_message(target, message, delta << 16, point, &mut input_sent)
 }
 
 /// Presses and holds the left button at an absolute screen point without

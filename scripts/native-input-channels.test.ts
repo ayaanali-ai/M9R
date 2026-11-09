@@ -37,6 +37,42 @@ test("manager routes two streams through separate persistent channels and retain
   assert.throws(() => manager.withInputStream(one, () => manager.getOwnerCursorPosition()), /closed/);
 });
 
+test("target-window mouse messages use independent agent input-stream helpers concurrently", async () => {
+  const opened: Array<string | undefined> = [];
+  const dispatched: Array<{ streamId: string | undefined; op: string }> = [];
+  const entered = new Set<string>();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const manager = createWindowsDesktopStageManager({ platform: "win32", terminal: true, env: {},
+    nativeHostFactory: (streamId) => {
+      opened.push(streamId);
+      return { invoke: async (request) => {
+        dispatched.push({ streamId, op: String(request.op) });
+        if (streamId) { entered.add(streamId); await gate; }
+        return { ok: true, dispatchState: "dispatched", route: "PostMessageW", target: "exact-window" };
+      }, close: () => undefined };
+    } });
+  const one = agentInputStreamId({ handle: "codex", sessionId: "mouse-one" });
+  const two = agentInputStreamId({ handle: "claude", sessionId: "mouse-two" });
+  try {
+    const calls = [
+      manager.withInputStream(one, () => manager.postClickToWindow(123, "456", 20, 30)),
+      manager.withInputStream(two, () => manager.postScrollToWindow(123, "456", 40, 50, -1)),
+    ];
+    assert.deepEqual(entered, new Set([one, two]), "both agent-owned native helpers have active requests before either finishes");
+    release();
+    assert.deepEqual(await Promise.all(calls), [
+      { route: "PostMessageW", target: "exact-window", dispatched: true },
+      { route: "PostMessageW", target: "exact-window", dispatched: true },
+    ]);
+    assert.deepEqual(opened, [undefined, one, two], "owner metadata uses the default helper while each agent action uses its own persistent helper");
+    assert.deepEqual(dispatched, [
+      { streamId: one, op: "postClickToWindow" },
+      { streamId: two, op: "postScrollToWindow" },
+    ]);
+  } finally { release(); manager.close(); }
+});
+
 test("shared HWND binding requires the owner broker's mutation fence", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-shared-window-"));
   const native = async () => ({ ok: true, window: { pid: 123, windowId: "456" } });

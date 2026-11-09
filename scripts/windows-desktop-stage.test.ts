@@ -26,6 +26,42 @@ test("visible window inventory keeps ordinary windows whose optional shell ident
     "native JSON nulls mean identity metadata is unavailable, not that the real app window is invalid");
 }));
 
+test("exact-window mouse messages bypass the foreground authorization gate and require typed dispatch proof", async () => withRoot(async (root) => {
+  const requests: Record<string, unknown>[] = [];
+  const manager = createManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async request => {
+    requests.push({ ...request });
+    return { ok: true, dispatchState: "dispatched", route: "PostMessageW", target: "exact-window" };
+  } });
+  try {
+    assert.deepEqual(await manager.postClickToWindow(anchor.pid, anchor.windowId, 124, 82),
+      { route: "PostMessageW", target: "exact-window", dispatched: true });
+    assert.deepEqual(await manager.postScrollToWindow(anchor.pid, anchor.windowId, 124, 82, -2, "vertical"),
+      { route: "PostMessageW", target: "exact-window", dispatched: true });
+    assert.deepEqual(requests, [
+      { op: "postClickToWindow", pid: anchor.pid, windowId: anchor.windowId, x: 124, y: 82 },
+      { op: "postScrollToWindow", pid: anchor.pid, windowId: anchor.windowId, x: 124, y: 82, amount: -2, axis: "vertical" },
+    ]);
+    await assert.rejects(() => manager.sendClick(anchor.pid, anchor.windowId, 1, 1),
+      /Foreground dispatch requires an owner-authorized task turn/);
+  } finally { manager.close(); }
+}));
+
+test("exact-window mouse message failures preserve not-dispatched versus uncertain outcomes", async () => withRoot(async (root) => {
+  let response: Record<string, unknown> = { ok: false, dispatchState: "not-dispatched", error: "Windows declined to queue the target message" };
+  const manager = createManager({ platform: "win32", root, terminal: true, env: {}, invokeNative: async () => response as never });
+  try {
+    await assert.rejects(() => manager.postClickToWindow(anchor.pid, anchor.windowId, 124, 82),
+      error => error instanceof DesktopInputNotDispatchedError && error.code === "native-dispatch-unavailable");
+    response = { ok: false, dispatchState: "uncertain", error: "helper stopped after partial message queueing" };
+    await assert.rejects(() => manager.postScrollToWindow(anchor.pid, anchor.windowId, 124, 82, 1),
+      error => error instanceof DesktopInputOutcomeUnknownError);
+    response = { ok: true };
+    await assert.rejects(() => manager.postClickToWindow(anchor.pid, anchor.windowId, 124, 82),
+      error => error instanceof DesktopInputOutcomeUnknownError,
+      "missing route/target acknowledgement is not treated as success");
+  } finally { manager.close(); }
+}));
+
 test("window frame accepts every positive size exposed by the action contract and returns Windows' actual bounds", async () => withRoot(async (root) => {
   const requests: Record<string, unknown>[] = [];
   const actual = { x: -120, y: 40, width: 240, height: 180 };

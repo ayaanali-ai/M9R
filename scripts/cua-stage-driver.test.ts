@@ -65,32 +65,38 @@ test("native refs survive token-prefix rotation and revalidate changed control i
   await driver.shutdown();
 }));
 
-test("explicit background click never falls through to the owner's physical pointer", async () => withRoot(async root => {
+test("explicit background click uses the exact-window message route without the owner's physical pointer", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{method:string;value?:unknown}> = [];
   const driver=createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({ testRoot: root,calls,
     callToolResult:{isError:true,errorCode:"background_unavailable",text:"background input is unavailable"}}) as never});
-  await assert.rejects(driver.click("stage",42,24,undefined,{deliveryMode:"background"}),
-    error => error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+  const result = await driver.click("stage",42,24,undefined,{deliveryMode:"background"});
+  assert.equal(result.outcome.status,"unverified");
+  assert.equal(nativeFixture(root).calls.some(call => call.op === "postClickToWindow"), true);
   assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick"].includes(String(call.op))), false);
   assert.equal(calls.some(call=>call.method==="click"),false,"the overlay SDK never dispatches app input");
   await driver.shutdown();
 }));
 
-test("foreground input remains available when owner-pointer presentation preservation is unavailable", async () => withRoot(async root => {
+test("foreground activation uses target messages without requiring owner-pointer APIs", async () => withRoot(async root => {
   await registerStage(root);
   const calls:Array<{method:string;value?:unknown}>=[];
   const driver=createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({ testRoot: root,calls}) as never,
     ownerPointer:{get:async()=>{throw Error("native pointer operation missing")},restore:async()=>{throw Error("must not restore")}}});
   const result = await driver.click("stage",42,24,undefined,{confirmFocusForeground:true});
   assert.equal(result.outcome.status,"unverified");
-  assert.ok(nativeFixture(root).calls.some(call => call.op === "sendClick"),"owner-pointer sampling is a courtesy, not an input gate");
+  assert.ok(nativeFixture(root).calls.some(call => call.op === "bringToForeground"), "the requested target window is activated");
+  assert.ok(nativeFixture(root).calls.some(call => call.op === "postClickToWindow"), "the click is posted to the target window");
+  assert.equal(nativeFixture(root).calls.some(call => call.op === "sendClick"), false, "the user's pointer is not used when target messaging works");
   assert.equal(calls.some(call=>call.method==="callTool"),false);
   await driver.shutdown();
 }));
 
 test("foreground input dispatches immediately regardless of concurrent owner pointer movement, then restores the pointer", async () => withRoot(async root => {
   await registerStage(root);
+  setNativeFixture(root, { responses: { postClickToWindow: {
+    ok: false, dispatchState: "not-dispatched", error: "target does not accept window messages",
+  } } });
   const calls: Array<{ method: string; value?: unknown }> = [];
   const positions = [{ x: 10, y: 10 }, { x: 30, y: 30 }, { x: 30, y: 30 }];
   const restored: Array<{ x: number; y: number }> = [];
@@ -101,8 +107,8 @@ test("foreground input dispatches immediately regardless of concurrent owner poi
   });
   const result = await driver.click("stage", 42, 24, undefined, { confirmFocusForeground: true });
   assert.equal(result.outcome.foregroundConfirmed, true);
-  assert.ok(nativeFixture(root).calls.some((call) => call.op === "sendClick"), "native input dispatches without waiting for the owner to go idle");
-  assert.equal(restored.length, 1, "the owner's resting pointer position is restored exactly once after dispatch");
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "sendClick"), "a proven message refusal uses the authorized foreground fallback");
+  assert.equal(restored.length, 1, "the owner's resting pointer position is restored after physical input fallback");
   await driver.shutdown();
 }));
 
@@ -390,7 +396,7 @@ test("owner-preview preserves the clicked HWND for the next native text step", a
   await driver.clickDesktop("preview", 0, 0, identity);
   await driver.typeTextDesktop("preview", "hello", identity);
   const ops = nativeFixture(root).calls.map((call) => String(call.op));
-  assert.ok(ops.includes("sendClick"));
+  assert.ok(ops.includes("postClickToWindow"));
   assert.ok(ops.includes("sendText"), "the click's exact HWND remains the target for subsequent typing");
   assert.ok(ops.includes("bringToForeground"), "the keyboard step acquires its own exact-window foreground lease");
   assert.equal(calls.some((call) => ["click", "typeText"].includes(call.method)), false, "app input stays on the native path");
@@ -616,6 +622,9 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
       if (request.op === "desktopStructure") return { ok: false, error: "Unexpected legacy desktopStructure operation." };
       if (["bringToForeground", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText"].includes(String(request.op))) {
         return { ok: true };
+      }
+      if (["postClickToWindow", "postScrollToWindow"].includes(String(request.op))) {
+        return { ok: true, dispatchState: "dispatched", route: "PostMessageW", target: "exact-window" };
       }
       return { ok: true, window: { pid: Number(request.pid), windowId: String(request.windowId) } };
     },
@@ -875,7 +884,7 @@ test("native action timings separate observation, targeting, dispatch, and the r
   assert.ok(dispatchIndex >= 0 && postObservationIndex > dispatchIndex, "the refreshed observation follows actual input delivery");
   assert.ok(timings.every((event) => event.stageName === "stage" && Number.isFinite(event.durationMs)
     && event.durationMs >= 0 && ["ok", "error"].includes(event.status)));
-  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1,
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "postClickToWindow").length, 1,
     "timing instrumentation must preserve the existing single-dispatch behavior");
   await driver.shutdown();
 }));
@@ -910,7 +919,7 @@ test("native click waits briefly for the matching M9R overlay position when pres
   const stage = stageDependencies(root);
   const invokeNative = stage.invokeNative!;
   stage.invokeNative = async (request) => {
-    if (request.op === "sendClick") assert.equal(moveCompleted, true, "native pointer delivery must follow its visible cursor move");
+    if (request.op === "postClickToWindow") assert.equal(moveCompleted, true, "native target delivery must follow its visible cursor move");
     return invokeNative(request);
   };
   const driver = createCuaStageDriver({ stage,
@@ -927,11 +936,11 @@ test("native click waits briefly for the matching M9R overlay position when pres
   await driver.showAgentCursor("stage", identity);
   const click = driver.click("stage", 42, 24, identity);
   await moveStarted;
-  assert.equal(nativeFixture(root).calls.some((call) => call.op === "sendClick"), false,
-    "the real click cannot overtake an in-flight overlay move");
+  assert.equal(nativeFixture(root).calls.some((call) => call.op === "postClickToWindow"), false,
+    "target delivery cannot overtake an in-flight overlay move");
   releaseMove();
   await click;
-  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1);
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "postClickToWindow").length, 1);
   await driver.shutdown();
 }));
 
@@ -944,7 +953,7 @@ test("a stalled M9R overlay move is bounded and cannot block native input", asyn
   await driver.showAgentCursor("stage", identity);
   const result = await driver.click("stage", 42, 24, identity);
   assert.equal(result.outcome.status, "unverified");
-  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1,
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "postClickToWindow").length, 1,
     "a presentation-only compositor stall does not suppress a valid native click");
   await driver.shutdown();
 }));
@@ -987,7 +996,7 @@ test("an M9R overlay refusal is typed for cursor proof but does not block ordina
   await assert.rejects(driver.moveCursor("stage", 42, 24, identity), (error: unknown) =>
     error instanceof DesktopInputNotDispatchedError && error.code === "overlay-not-visible");
   assert.equal((await driver.click("stage", 42, 24, identity)).outcome.status, "unverified");
-  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1);
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "postClickToWindow").length, 1);
   await driver.shutdown();
 }));
 
@@ -1021,8 +1030,8 @@ test("owner preview captures the whole desktop and positions the M9R cursor in s
   await driver.hotkeyDesktop("preview", ["Ctrl", "L"], identity);
 
   assert.equal(calls.length, 0, "desktop observation and cursor presentation never start CUA");
-  const nativeClick = nativeFixture(root).calls.find((call) => call.op === "sendClick");
-  assert.ok(nativeClick, "desktop app input uses the native exact-HWND sender");
+  const nativeClick = nativeFixture(root).calls.find((call) => call.op === "postClickToWindow");
+  assert.ok(nativeClick, "a single desktop click uses the headless exact-HWND message sender");
   assert.equal(nativeClick?.pid, 4321);
   assert.equal(nativeClick?.windowId, windowId);
   assert.deepEqual(points.at(-1), { x: 0, y: 0 }, "the desktop point is rendered at its resolved screen coordinate");
@@ -1049,14 +1058,18 @@ test("desktop pointer actions reproject through the hit window's screenshot size
   await driver.scrollDesktop("preview", 300, 150, "down", identity);
   await driver.scrollDeltaDesktop("preview", 300, 150, 0, -3, "line", identity);
 
-  for (const operation of ["sendClick", "sendScroll"]) {
+  for (const operation of ["postClickToWindow", "postScrollToWindow"]) {
     const callsForOperation = nativeFixture(root).calls.filter((call) => call.op === operation);
-    assert.equal(callsForOperation.length, operation === "sendScroll" ? 2 : 1);
+    assert.equal(callsForOperation.length, operation === "postScrollToWindow" ? 2 : 1);
     for (const call of callsForOperation) {
       assert.ok(Math.abs(Number(call.x) - 300) <= 2, `${operation} x should stay at the observed desktop point, got ${call.x}`);
       assert.ok(Math.abs(Number(call.y) - 150) <= 2, `${operation} y should stay at the observed desktop point, got ${call.y}`);
     }
   }
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "captureWindow").length, 0,
+    "desktop point resolution uses the live HWND rectangle instead of taking an extra full-window screenshot");
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "windowRect"),
+    "coordinate mapping still reads the exact target's current native bounds");
   await driver.shutdown();
 }));
 
@@ -1106,9 +1119,10 @@ test("owner-preview excludes the daemon's unlabeled overlay before snapshot and 
   await driver.moveDesktopCursor("preview", 0, 0, identity);
   await driver.clickDesktop("preview", 0, 0, identity);
   await driver.typeTextDesktop("preview", "hello", identity);
-  const inspected = nativeFixture(root).calls.filter((call) => call.op === "inspect");
-  assert.ok(inspected.length > 0);
-  assert.ok(inspected.every((call) => call.pid === 4321 && call.windowId === windowId));
+  const appInput = nativeFixture(root).calls.filter((call) => ["postClickToWindow", "sendClick", "sendText"].includes(String(call.op)));
+  assert.ok(appInput.length > 0, "the selected app received the task's input");
+  assert.ok(appInput.every((call) => call.pid === 4321 && String(call.windowId) === windowId),
+    "the daemon overlay HWND is never selected as the input target");
   assert.equal(calls.some((call) => call.method === "desktopTarget"), false);
   await driver.shutdown();
 }));
@@ -1236,7 +1250,7 @@ test("owner-preview refuses ambiguous or missing window targets without sending 
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await driver.captureDesktop("preview", identity);
-  await assert.rejects(() => driver.clickDesktop("preview", 0, 0, identity), /selected desktop point is outside the exact window snapshot/);
+  await assert.rejects(() => driver.clickDesktop("preview", 0, 0, identity), /screen point moved outside the exact target window/);
   assert.equal(calls.some((call) => call.method === "click"), false);
   await assert.rejects(() => driver.typeTextDesktop("preview", "hello", identity), /desktop-wide view has no input window/);
   assert.equal(calls.some((call) => call.method === "typeText"), false);
@@ -1363,7 +1377,7 @@ test("owner-preview scroll and drag use the exact window under the cursor", asyn
   await driver.scrollDesktop("preview", 0, 0, "down", identity);
   await driver.dragDesktop("preview", 0, 0, 0, 0, identity);
 
-  assert.ok(nativeFixture(root).calls.some((call) => call.op === "sendScroll" && call.pid === 4321));
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "postScrollToWindow" && call.pid === 4321));
   assert.ok(nativeFixture(root).calls.some((call) => call.op === "sendDrag" && call.pid === 4321));
   assert.equal(calls.some((call) => ["scroll", "drag", "capturedPosition"].includes(call.method)), false);
   await driver.shutdown();
@@ -1543,7 +1557,7 @@ test("coalesces delayed cursor moves to the latest target while native actions c
   await firstMoveStarted;
   const secondClick = driver.click("stage", 60, 60, identity);
   await secondClick;
-  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 2,
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "postClickToWindow").length, 2,
     "the second native action is not held behind a slow presentation move");
 
   releaseFirstMove();
@@ -1590,7 +1604,7 @@ test("warm native actions and task observations never initialize CUA", async () 
   await driver.click("stage", 42, 24, identity);
   assert.equal(loads, 0, "the CUA SDK loader remains unused after repeated native actions");
   assert.equal(calls.length, 0, "native input and observation use no CUA cursor runtime");
-  assert.equal(nativeFixture(root).calls.filter((c) => c.op === "sendClick").length, 2,
+  assert.equal(nativeFixture(root).calls.filter((c) => c.op === "postClickToWindow").length, 2,
     "native clicks continue when no overlay session is present");
   at += 60_001;
   await driver.capture("stage", identity);
@@ -1668,7 +1682,7 @@ test("an absent M9R overlay fails explicit cursor proof without suppressing norm
   await assert.rejects(driver.moveCursor("stage", 42, 24, identity), (error: unknown) =>
     error instanceof DesktopInputNotDispatchedError && error.code === "overlay-not-visible");
   assert.equal((await driver.click("stage", 42, 24, identity)).outcome.status, "unverified");
-  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "sendClick").length, 1);
+  assert.equal(nativeFixture(root).calls.filter((call) => call.op === "postClickToWindow").length, 1);
   assert.equal(calls.length, 0);
   await driver.shutdown();
 }));
@@ -1790,14 +1804,14 @@ test("window discovery reads the native owner inventory without starting the cur
   await driver.shutdown();
 }));
 
-test("targets click at exact window-local coordinates through native foreground input", async () => withRoot(async (root) => {
+test("targets a headless click at exact window-local coordinates through PostMessageW", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
   const proof = await driver.click("stage", 42, 24);
   assert.equal(proof.outcome.status, "unverified");
   assert.equal(proof.capture.width, 200);
-  const click = nativeFixture(root).calls.find((call) => call.op === "sendClick");
+  const click = nativeFixture(root).calls.find((call) => call.op === "postClickToWindow");
   assert.equal(click?.pid, 4321);
   assert.equal(click?.windowId, windowId);
   assert.equal(click?.x, 142);
@@ -1818,24 +1832,24 @@ test("click uses native exact-window point targeting when no semantic target is 
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls, state }) as never });
   await driver.click("stage", 42, 24);
   const native = nativeFixture(root).calls;
-  assert.ok(native.some((call) => call.op === "sendClick"), "unnamed UIA nodes remain reachable through the exact native point");
+  assert.ok(native.some((call) => call.op === "postClickToWindow"), "unnamed UIA nodes remain reachable through the exact native point");
   assert.equal(calls.some((call) => call.method === "click"), false);
 }));
 
-test("native input dispatch uses exact HWND SendInput primitives instead of Cua action calls", async () => withRoot(async (root) => {
+test("native input dispatch uses exact HWND routes instead of Cua action calls", async () => withRoot(async (root) => {
   await registerStage(root);
   const nativeCalls: Record<string, unknown>[] = [];
   const base = stageDependencies(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: { ...base, invokeNative: async (request) => {
-    if (["bringToForeground", "sendClick", "sendText", "sendScroll"].includes(String(request.op))) nativeCalls.push(request);
+    if (["bringToForeground", "sendClick", "postClickToWindow", "sendText", "sendScroll", "postScrollToWindow"].includes(String(request.op))) nativeCalls.push(request);
     return base.invokeNative!(request);
   } }, loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
   await driver.click("stage", 42, 24);
   await driver.typeText("stage", "hello");
   await driver.scroll("stage", 42, 24, "down");
-  const dispatched = nativeCalls.filter((call) => ["sendClick", "sendText", "sendScroll"].includes(String(call.op)));
-  assert.deepEqual(dispatched.map((call) => call.op), ["sendClick", "sendText", "sendScroll"]);
+  const dispatched = nativeCalls.filter((call) => ["sendClick", "postClickToWindow", "sendText", "sendScroll", "postScrollToWindow"].includes(String(call.op)));
+  assert.deepEqual(dispatched.map((call) => call.op), ["postClickToWindow", "sendText", "postScrollToWindow"]);
   for (const call of dispatched) {
     assert.equal(call.pid, 4321);
     assert.equal(call.windowId, windowId);
@@ -1906,7 +1920,7 @@ test("scroll and drag use native screen coordinates and validate bounds before d
   });
   await driver.scroll("stage", 42, 24, "down");
   const native = nativeFixture(root).calls;
-  const scroll = native.find((call) => call.op === "sendScroll");
+  const scroll = native.find((call) => call.op === "postScrollToWindow");
   assert.equal(scroll?.x, 142);
   assert.equal(scroll?.y, 74);
   assert.equal(scroll?.amount, -3);
@@ -1932,21 +1946,21 @@ test("scroll and drag use native screen coordinates and validate bounds before d
 test("a clean native input refusal is typed as not dispatched", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  setNativeFixture(root, { responses: { sendClick: { ok: false, dispatchState: "not-dispatched", error: "OS rejected test click" } } });
+  setNativeFixture(root, { responses: { postClickToWindow: { ok: false, dispatchState: "not-dispatched", error: "OS rejected test click" } } });
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
-  await assert.rejects(() => driver.click("stage", 42, 24), error =>
-    error instanceof DesktopInputNotDispatchedError && error.code === "native-dispatch-unavailable");
+  await assert.rejects(() => driver.click("stage", 42, 24, undefined, { deliveryMode: "background" }), error =>
+    error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
   assert.equal(calls.some((call) => call.method === "click"), false);
 }));
 
 test("a native input failure without dispatch certainty is typed uncertain and is not replayed", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
-  setNativeFixture(root, { responses: { sendClick: { ok: false, error: "helper disconnected during SendInput" } } });
+  setNativeFixture(root, { responses: { postClickToWindow: { ok: false, error: "helper disconnected during PostMessageW" } } });
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
   await assert.rejects(driver.click("stage", 42, 24), (error: unknown) =>
     error instanceof DesktopInputOutcomeUnknownError);
-  assert.equal(nativeFixture(root).calls.filter(call => call.op === "sendClick").length, 1,
+  assert.equal(nativeFixture(root).calls.filter(call => call.op === "postClickToWindow").length, 1,
     "uncertain OS delivery is observed rather than replayed");
   assert.equal(calls.some((call) => call.method === "click"), false);
 }));
@@ -1986,9 +2000,10 @@ test("native UI Automation click dispatch is headless and reports verification s
   await driver.shutdown();
 }));
 
-test("explicit background click never falls through to foreground input", async () => withRoot(async root => {
+test("explicit background click never falls through after a proven headless refusal", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
+  setNativeFixture(root, { responses: { postClickToWindow: { ok: false, dispatchState: "not-dispatched", error: "unsupported target" } } });
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
     loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
 
@@ -1999,7 +2014,7 @@ test("explicit background click never falls through to foreground input", async 
   await driver.shutdown();
 }));
 
-test("owner-preview click uses the native foreground lease when no semantic action exists", async () => withRoot(async root => {
+test("owner-preview click uses the headless exact-window route when no semantic action exists", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const driver = createCuaStageDriver({ stage: stageDependencies(root),
@@ -2007,8 +2022,8 @@ test("owner-preview click uses the native foreground lease when no semantic acti
 
   const result = await driver.click("stage", 42, 24);
   assert.equal(result.outcome.status, "unverified");
-  assert.equal(nativeFixture(root).calls.filter(call => call.op === "bringToForeground").length, 1);
-  assert.equal(nativeFixture(root).calls.filter(call => call.op === "sendClick").length, 1);
+  assert.equal(nativeFixture(root).calls.filter(call => call.op === "bringToForeground").length, 0);
+  assert.equal(nativeFixture(root).calls.filter(call => call.op === "postClickToWindow").length, 1);
   assert.equal(calls.some(call => call.method === "click"), false);
   await driver.shutdown();
 }));
@@ -2027,7 +2042,7 @@ test("an exact UIA ref with no advertised activation pattern still uses native p
   assert.equal(result.outcome.status, "unverified");
   const native = nativeFixture(root).calls;
   assert.ok(native.some(call => call.op === "invokeWindowElement"), "M9R tries the semantic route first");
-  assert.ok(native.some(call => call.op === "sendClick"), "unsupported UIA patterns do not veto a physical click on the exact live point");
+  assert.ok(native.some(call => call.op === "postClickToWindow"), "unsupported UIA patterns do not veto a headless exact-point click");
   assert.equal(calls.some(call => call.method === "click"), false, "the native fallback does not route through Cua input dispatch");
   await driver.shutdown();
 }));
@@ -2099,9 +2114,9 @@ test("scroll-element fallback is one observed wheel notch when UIA has no Scroll
   const result = await driver.scrollElement("stage", observation.elements[0]!.ref, "down");
   assert.equal(result.outcome.status, "unverified");
   const native = nativeFixture(root).calls;
-  const wheel = native.find((call) => call.op === "sendScroll");
+  const wheel = native.find((call) => call.op === "postScrollToWindow");
   assert.equal(wheel?.amount, -1);
-  assert.equal(native.filter((call) => call.op === "sendScroll").length, 1);
+  assert.equal(native.filter((call) => call.op === "postScrollToWindow").length, 1);
   await driver.shutdown();
 }));
 
@@ -2134,7 +2149,7 @@ test("a missing cursor overlay never blocks native click dispatch", async () => 
 
   const result = await driver.click("stage", 42, 24, identity);
   assert.equal(result.outcome.status, "unverified");
-  assert.equal(nativeFixture(root).calls.filter(call => call.op === "sendClick").length, 1);
+  assert.equal(nativeFixture(root).calls.filter(call => call.op === "postClickToWindow").length, 1);
   assert.equal(calls.some(call => call.method === "click"), false);
   await driver.shutdown();
 }));

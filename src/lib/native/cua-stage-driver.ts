@@ -1024,6 +1024,18 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     };
   }
 
+  function nativeWindowClick(pid: number, windowId: string | bigint, x: number, y: number,
+    options: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3 } = {}) {
+    const target = windowId.toString();
+    return { route: "PostMessageW", send: () => manager.postClickToWindow(pid, target, x, y, options) };
+  }
+
+  function nativeWindowScroll(pid: number, windowId: string | bigint, x: number, y: number, amount: number,
+    axis: "horizontal" | "vertical" = "vertical") {
+    const target = windowId.toString();
+    return { route: "PostMessageW", send: () => manager.postScrollToWindow(pid, target, x, y, amount, axis) };
+  }
+
   function invokeWindowElementTimed(pid: number, windowId: string, input: Parameters<typeof manager.invokeWindowElement>[2]) {
     return timedInputDispatch("uia-element", () => manager.invokeWindowElement(pid, windowId, input), (result) => result.dispatched);
   }
@@ -1452,6 +1464,7 @@ function backgroundRefusalMessage(value: unknown): string {
  */
 async function driverInputAction(name: string, args: Record<string, unknown>, fallback: string,
   options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview"; allowForegroundEscalation?: boolean;
+    nativeHeadless?: { route: string; send: () => Promise<{ route: string; target: string; dispatched: true }> };
     nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void> } } = {}) {
   assertNotAbortedBeforeInput(options.signal);
   // Omitted mode follows the owner-visible stage contract. Background is an
@@ -1459,7 +1472,6 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   // reach this physical sender.
   const deliveryMode = options.deliveryMode ?? "owner-preview";
   const ownerPointer = deps.ownerPointer ?? { get: () => manager.getOwnerCursorPosition(), restore: (x: number, y: number) => manager.restoreOwnerCursorPosition(x, y) };
-  let foregroundPointer: { x: number; y: number } | undefined;
   const deliverForeground = async (): Promise<CuaStageActionOutcome> => {
     const pid = args.pid;
     const windowId = args.window_id;
@@ -1469,7 +1481,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     }
     const targetPid = pid as number;
     const targetWindowId = windowId as number;
-    const saved = foregroundPointer;
+    let saved: { x: number; y: number } | undefined;
     // The manager's native owner-work policy authorizes this exact foreground
     // operation before it reaches this callback. Pointer movement is not used
     // as a dispatch gate; its resting position is preserved for restoration.
@@ -1490,10 +1502,27 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         );
       }
       assertNotAbortedBeforeInput(options.signal);
-      await options.nativeForeground.send();
-      // Native SendInput reports only OS-level delivery. The caller's refreshed
-      // UIA capture is the separate semantic verification signal.
-      outcome = { status: "unverified" };
+      if (options.nativeHeadless) {
+        try {
+          const dispatched = await timedInputDispatch(options.nativeHeadless.route, options.nativeHeadless.send,
+            (result) => result.dispatched === true);
+          outcome = { status: "unverified",
+            summary: `Windows queued the input to the exact target window through ${dispatched.route}; the refreshed app state is the effect check.` };
+        } catch (error) {
+          if (!(error instanceof DesktopInputNotDispatchedError)) throw error;
+          // Only a proven pre-dispatch refusal permits the authorized physical
+          // input fallback. An accepted or uncertain message is never replayed.
+        }
+      }
+      if (!outcome) {
+        // Sample and restore the owner pointer only if the target-message route
+        // proved unavailable and we are about to use global SendInput.
+        saved = await ownerPointer.get().catch(() => undefined);
+        await options.nativeForeground.send();
+        // Native SendInput reports only OS-level delivery. The caller's
+        // refreshed UIA capture is the separate semantic verification signal.
+        outcome = { status: "unverified" };
+      }
     } catch (error) {
       actionError = error;
     }
@@ -1507,11 +1536,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       ...(restoreError ? { summary: "Native input was delivered. Restoring the owner's pointer was unavailable; this presentation detail did not affect delivery." } : {}) };
   };
   const runForeground = async () => {
-    // The owner-work policy inside the native manager gates the input operation.
-    // Pointer movement is not used as a dispatch gate; its resting position is
-    // captured only for restoration after the authorized action.
-    const saved = await ownerPointer.get().catch(() => undefined);
-    foregroundPointer = saved;
+    // The owner-work policy inside the native manager gates the foreground
+    // activation. The target-message route stays off the user's global pointer;
+    // pointer preservation is needed only if the authorized action must fall
+    // back to SendInput.
     return timed("foreground-lease", () => foregroundLease.run(name, options.signal, deliverForeground), {
     detail: `action=${name};delivery=foreground`,
   }).catch((error) => {
@@ -1521,6 +1549,23 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     throw error;
     });
   };
+  // Try an exact-window, per-agent message route before any foreground lease
+  // or SendInput path. Windows accepting PostMessage proves only queueing, so
+  // the caller must still refresh the app and verify the requested effect.
+  // An uncertain result is never replayed through foreground input.
+  if (!options.preferForeground && options.nativeHeadless) {
+    try {
+      const dispatched = await timedInputDispatch(options.nativeHeadless.route, options.nativeHeadless.send,
+        (result) => result.dispatched === true);
+      return { status: "unverified" as const,
+        summary: `Windows queued the input to the exact target window through ${dispatched.route}; the refreshed app state is the effect check.` };
+    } catch (error) {
+      if (!(error instanceof DesktopInputNotDispatchedError)) throw error;
+      // Only a proven pre-dispatch refusal may fall through to a separately
+      // authorized foreground path. The target helper never uses the physical
+      // pointer for the successful message route.
+    }
+  }
   // Semantic UIA actions are dispatched headlessly by their call sites. A
   // background request must never fall through to SendInput, because Windows
   // delivers it to the real foreground window and physical pointer. The one
@@ -1655,9 +1700,15 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { target: { pid, windowId }, localPoint: { x: screenPoint.x - origin.x, y: screenPoint.y - origin.y },
         shellControl, nativeKeyboardWindow: selected.keyboardWindow, state: undefined };
     }
-    const image = await manager.captureWindow(pid, windowId.toString());
-    const frame: CuaStageWindowFrame = { ...image, windowBounds: boundsAtWindowCapture(image) };
-    const localPoint = desktopPointInWindow(screenPoint, frame);
+    // Capture used to be performed here only to learn the origin and dimensions
+    // for coordinate conversion. `windowRect` is the same GetWindowRect source
+    // used by captureWindow, without encoding/copying a screenshot before each
+    // desktop-coordinate action.
+    const bounds = await manager.windowRect(pid, windowId.toString());
+    const localPoint = { x: Math.floor(screenPoint.x - bounds.x), y: Math.floor(screenPoint.y - bounds.y) };
+    if (localPoint.x < 0 || localPoint.y < 0 || localPoint.x >= bounds.width || localPoint.y >= bounds.height) {
+      throw new DesktopInputNotDispatchedError("The screen point moved outside the exact target window before coordinate mapping; no input was sent.", "target-identity");
+    }
     let elements: CuaWindowElement[] = [];
     if (includeAccessibilityTree) {
       const structure = await manager.windowStructure(pid, windowId.toString(), { maxElements: 4096, maxDepth: 64 });
@@ -1681,7 +1732,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         ...(element?.elementToken ? { nativeElement: nativeElements.find((item) => item.ref === element.elementToken) } : {}) };
     }
     return { target: { pid, windowId }, localPoint,
-      windowCaptureSize: { width: frame.width, height: frame.height }, state: { elements } };
+      windowCaptureSize: { width: bounds.width, height: bounds.height }, state: { elements } };
   }
 
   async function resolveOwnerDesktopPoint(runtime: CuaRuntime | undefined, session: AgentCursorSession, x: number, y: number,
@@ -2325,6 +2376,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         session: session.session,
       }, "Cua Driver could not click the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeHeadless: nativeWindowClick(point.target.pid, point.target.windowId,
+          point.screenPoint.x, point.screenPoint.y, {
+            ...(options.button ? { button: options.button } : {}), ...(options.count ? { count: options.count } : {}),
+          }),
         nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
             const screen = await desktopPointToCurrentScreen(point);
             await manager.sendClick(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, {
@@ -2428,6 +2483,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         direction, by: "line", amount, session: session.session,
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeHeadless: nativeWindowScroll(point.target.pid, point.target.windowId, point.screenPoint.x, point.screenPoint.y,
+          direction === "up" ? amount : -amount),
         nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
             const screen = await desktopPointToCurrentScreen(point);
             await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount);
@@ -2449,16 +2506,20 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       await inspectOwnerDesktop(name, identity);
       await moveOwnerCursor(runtime, session, point);
       await inspectOwnerDesktop(name, identity);
+      const scrollScreenPoint = point.screenPoint;
+      const scrollAmount = (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount;
+      const scrollAxis = (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical";
       return driverInputAction("scroll", {
         pid: point.target.pid, window_id: Number(point.target.windowId), x: point.localPoint.x, y: point.localPoint.y,
         direction: scroll.direction, by: scroll.by, amount: scroll.amount, session: session.session,
       }, "Cua Driver could not scroll the exact window under the agent cursor.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeHeadless: nativeWindowScroll(point.target.pid, point.target.windowId,
+          scrollScreenPoint.x, scrollScreenPoint.y, scrollAmount, scrollAxis),
         nativeForeground: nativeStageInput(point.target.pid, point.target.windowId, async () => {
-            const screen = await desktopPointToCurrentScreen(point);
-            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), screen.x, screen.y,
-              (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount,
-              (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical");
+            const foregroundPoint = await desktopPointToCurrentScreen(point);
+            await manager.sendScroll(point.target.pid, point.target.windowId.toString(), foregroundPoint.x, foregroundPoint.y,
+              scrollAmount, scrollAxis);
           }),
       });
     });
@@ -2644,15 +2705,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // selected. First let UIA hit-test and activate the exact live control at
       // that screen point (a headless action); if it has no semantic action,
       // the owner-visible route falls through to native pointer input.
+      let targetScreenPoint: { x: number; y: number } | undefined;
       if ((options.button === undefined || options.button === "left") && (options.count ?? 1) === 1) {
-        const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
+        targetScreenPoint = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
         let control: NativePointControl | undefined;
-        try { control = await timed("target-resolution", () => manager.pointControl(screen.x, screen.y),
+        try { control = await timed("target-resolution", () => manager.pointControl(targetScreenPoint!.x, targetScreenPoint!.y),
           { detail: "source=uia-element-at-point" }); }
         catch { /* an inspection miss sends nothing; the owner-visible fallback remains available */ }
         if (control?.pid === pid && control.windowPid === pid && control.windowId === windowId.toString()) {
           try {
-            const invoked = await timedInputDispatch("uia-point", () => manager.pointControl(screen.x, screen.y, control),
+            const invoked = await timedInputDispatch("uia-point", () => manager.pointControl(targetScreenPoint!.x, targetScreenPoint!.y, control),
               (result) => result.invoked === true);
             if (invoked.invoked) {
               return { capture: stageCapture(await captureWindow(), now), outcome: {
@@ -2667,6 +2729,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           }
         }
       }
+      targetScreenPoint ??= await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
       const outcome = await driverInputAction("click", {
         pid,
         window_id: Number(windowId),
@@ -2676,9 +2739,11 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         session,
       }, "Cua Driver could not click the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeHeadless: nativeWindowClick(pid, windowId, targetScreenPoint.x, targetScreenPoint.y, {
+          ...(options.button ? { button: options.button } : {}), ...(options.count ? { count: options.count } : {}),
+        }),
         nativeForeground: nativeStageInput(pid, windowId, async () => {
-            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
-            await manager.sendClick(pid, windowId.toString(), screen.x, screen.y, {
+            await manager.sendClick(pid, windowId.toString(), targetScreenPoint!.x, targetScreenPoint!.y, {
               ...(options.button ? { button: options.button } : {}),
               ...(options.count ? { count: options.count } : {}),
             });
@@ -2881,6 +2946,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return withRegisteredPopup(name, async ({ driver, session, pid, popupWindowId, capture }) => {
       const before = await capture();
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the current popup window snapshot.");
+      const screen = await localToScreenPoint(pid, popupWindowId, x, y, before.width, before.height);
       const outcome = await driverInputAction("click", {
         pid, window_id: Number(popupWindowId), x, y,
         ...(options.button ? { button: options.button === "right" ? "right" : options.button === "middle" ? "middle" : "left" } : {}),
@@ -2888,8 +2954,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         session,
       }, "Cua Driver could not click the owned popup window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeHeadless: nativeWindowClick(pid, popupWindowId, screen.x, screen.y, {
+          ...(options.button ? { button: options.button } : {}), ...(options.count ? { count: options.count } : {}),
+        }),
         nativeForeground: nativeStageInput(pid, popupWindowId, async () => {
-            const screen = await localToScreenPoint(pid, popupWindowId, x, y, before.width, before.height);
             await manager.sendClick(pid, popupWindowId.toString(), screen.x, screen.y, {
               ...(options.button ? { button: options.button } : {}),
               ...(options.count ? { count: options.count } : {}),
@@ -3400,13 +3468,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const amount = Math.min(50, Math.max(1, Math.round(options.amount ?? 3)));
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
+      const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
       const outcome = await driverInputAction("scroll", {
         pid, window_id: Number(windowId), x, y,
         direction, by: "line", amount, session,
       }, "Cua Driver could not scroll the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeHeadless: nativeWindowScroll(pid, windowId, screen.x, screen.y, direction === "up" ? amount : -amount),
         nativeForeground: nativeStageInput(pid, windowId, async () => {
-            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
             await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, direction === "up" ? amount : -amount, "vertical");
           }),
       });
@@ -3518,6 +3587,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }, "Cua Driver could not click the selected accessibility element.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         allowForegroundEscalation: options.allowForegroundEscalation,
+        nativeHeadless: nativeWindowClick(pid, windowId, screenPoint.x, screenPoint.y),
         nativeForeground: nativeStageInput(pid, windowId, () => manager.sendClick(pid, windowId.toString(), screenPoint.x, screenPoint.y, {})),
       });
       if (cursorIdentity && outcome.status === "confirmed" && selected.element.actions?.includes("set_value")
@@ -3581,6 +3651,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }, "Cua Driver could not scroll the observed container by one wheel notch.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
         allowForegroundEscalation: options.allowForegroundEscalation,
+        nativeHeadless: nativeWindowScroll(pid, windowId, screen.x, screen.y, signedAmount,
+          horizontal ? "horizontal" : "vertical"),
         nativeForeground: nativeStageInput(pid, windowId, () => manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, signedAmount, horizontal ? "horizontal" : "vertical")),
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };
@@ -3654,15 +3726,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const y = yInput ?? Math.floor(before.height / 2);
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
+      const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
+      const signedAmount = (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount;
+      const axis = (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical";
       const outcome = await driverInputAction("scroll", {
         pid, window_id: Number(windowId), x, y, direction: scroll.direction, by: scroll.by, amount: scroll.amount, session,
       }, "Cua Driver could not scroll the registered stage window.", {
         preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode, signal: options.signal,
+        nativeHeadless: nativeWindowScroll(pid, windowId, screen.x, screen.y, signedAmount, axis),
         nativeForeground: nativeStageInput(pid, windowId, async () => {
-            const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height);
-            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y,
-              (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount,
-              (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical");
+            await manager.sendScroll(pid, windowId.toString(), screen.x, screen.y, signedAmount, axis);
           }),
       });
       return { capture: stageCapture(await captureWindow(), now), outcome };

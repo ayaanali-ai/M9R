@@ -69,7 +69,7 @@ interface NativeStageResponse {
   ok: boolean;
   dispatchState?: "not-dispatched" | "dispatched" | "uncertain";
   route?: string;
-  target?: { pid?: number | null; windowId?: string | null };
+  target?: string | { pid?: number | null; windowId?: string | null };
   type?: string;
   error?: string;
   window?: NativeWindowStageInfo;
@@ -1381,6 +1381,19 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the click.");
   }
 
+  /** Posts one click to the exact target HWND/child, without touching the OS pointer or foreground. */
+  async function postClickToWindow(pid: number, windowId: string, x: number, y: number,
+    options: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3 } = {}) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "postClickToWindow", pid, windowId, x, y, ...options });
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the targeted click message.");
+    if (result.dispatchState !== "dispatched" || result.route !== "PostMessageW" || result.target !== "exact-window") {
+      throw new DesktopInputOutcomeUnknownError("The native helper did not prove that the targeted click was queued to the exact window.");
+    }
+    return { route: result.route, target: result.target, dispatched: true as const };
+  }
+
   async function sendDrag(pid: number, windowId: string, fromX: number, fromY: number, toX: number, toY: number, durationMs?: number) {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
@@ -1393,6 +1406,19 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendScroll", pid, windowId, x, y, amount, axis });
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the scroll.");
+  }
+
+  /** Posts a wheel message to the exact target HWND/child, without touching the OS pointer or foreground. */
+  async function postScrollToWindow(pid: number, windowId: string, x: number, y: number, amount: number,
+    axis: "horizontal" | "vertical" = "vertical") {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "postScrollToWindow", pid, windowId, x, y, amount, axis });
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the targeted scroll message.");
+    if (result.dispatchState !== "dispatched" || result.route !== "PostMessageW" || result.target !== "exact-window") {
+      throw new DesktopInputOutcomeUnknownError("The native helper did not prove that the targeted scroll was queued to the exact window.");
+    }
+    return { route: result.route, target: result.target, dispatched: true as const };
   }
 
   async function sendKeyCombo(pid: number, windowId: string, keys: string[]) {
@@ -1427,16 +1453,17 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     // proof of the target or route. Older helper builds may still return only
     // { ok: true }; those remain compatible but carry no fabricated evidence.
     const returnedTarget = result.target;
-    const targetMatches = typeof returnedTarget?.pid === "number"
-      && Number.isSafeInteger(returnedTarget.pid)
-      && returnedTarget.pid === pid
-      && typeof returnedTarget.windowId === "string"
-      && returnedTarget.windowId === windowId;
+    const targetObject = returnedTarget && typeof returnedTarget === "object" ? returnedTarget : undefined;
+    const targetMatches = typeof targetObject?.pid === "number"
+      && Number.isSafeInteger(targetObject.pid)
+      && targetObject.pid === pid
+      && typeof targetObject.windowId === "string"
+      && targetObject.windowId === windowId;
     const route = result.route === "wm-char-post-message" ? result.route : undefined;
     return {
       dispatchState: "dispatched",
       ...(route ? { route } : {}),
-      ...(returnedTarget?.pid !== undefined || returnedTarget?.windowId !== undefined ? { targetMatches } : {}),
+      ...(targetObject?.pid !== undefined || targetObject?.windowId !== undefined ? { targetMatches } : {}),
     };
   }
 
@@ -1563,7 +1590,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, physicalInputEpoch, captureOwnerInputEpoch, releaseOwnerInputMonitor, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
     close: closeManager,
     withInputStream, closeInputStream, attachSharedWindow, withForegroundAuthorization,
-    bringToForeground, sendClick, sendDrag, sendScroll, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
+    bringToForeground, sendClick, postClickToWindow, sendDrag, sendScroll, postScrollToWindow, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
 }
 
 function parsePid(value: string): number {
@@ -1626,7 +1653,7 @@ function createPersistentWindowsStageHost(executable: string) {
   const pending = new Map<string, PendingNativeStageRequest>();
   let activeRequestId: string | undefined;
   const startAcknowledgementTimeoutMs = 15_000;
-  const inputOperations = new Set(["sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "sendTextToWindow", "postCloseWindow", "invokeWindowElement"]);
+  const inputOperations = new Set(["sendClick", "postClickToWindow", "sendDrag", "sendScroll", "postScrollToWindow", "sendKeyCombo", "sendText", "sendTextToWindow", "postCloseWindow", "invokeWindowElement"]);
 
 
   const notDispatchedError = (request: Pick<PendingNativeStageRequest, "operation">, message: string): Error => inputOperations.has(request.operation)
