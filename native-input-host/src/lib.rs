@@ -14,6 +14,7 @@ pub const MAX_RESPONSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub enum InputDispatchState {
     NotDispatched,
     Uncertain,
+    Dispatched,
 }
 
 impl InputDispatchState {
@@ -21,6 +22,7 @@ impl InputDispatchState {
         match self {
             Self::NotDispatched => "not-dispatched",
             Self::Uncertain => "uncertain",
+            Self::Dispatched => "dispatched",
         }
     }
 }

@@ -326,7 +326,12 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
         // `platform::send_text_to_window` and `win32::post_text_to_window`.
         #[cfg(windows)]
         Some("sendTextToWindow") => match platform::send_text_to_window(value) {
-            Ok(()) => json!({"ok":true,"requestId":request_id}),
+            Ok(()) => input_dispatch_success(
+                request_id,
+                "wm-char-post-message",
+                value,
+                crate::InputDispatchState::Dispatched,
+            ),
             Err(error) => input_dispatch_failure(request_id, error),
         },
         // Test-only scaffolding for the Phase 0 T3 proof: provoke a real
@@ -390,6 +395,28 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             json!({ "ok": false, "requestId": request_id, "error": "unsupported desktop stage operation" })
         }
     }
+}
+
+/// Success companion to `input_dispatch_failure`: reports which route
+/// actually delivered the input and which window it was addressed to, so
+/// callers never have to infer the route from the op name alone.
+#[cfg(windows)]
+fn input_dispatch_success(
+    request_id: &str,
+    route: &str,
+    value: &Value,
+    state: crate::InputDispatchState,
+) -> Value {
+    let (pid, window_id) = parse_window_identity(value)
+        .map(|(pid, handle)| (Some(pid), Some(handle.to_string())))
+        .unwrap_or((None, None));
+    json!({
+        "ok": true,
+        "requestId": request_id,
+        "dispatchState": state.as_str(),
+        "route": route,
+        "target": { "pid": pid, "windowId": window_id },
+    })
 }
 
 fn input_dispatch_failure(request_id: &str, error: crate::InputDispatchError) -> Value {
@@ -2068,6 +2095,10 @@ mod tests {
         });
         let response = handle_desktop_stage_request(&request);
         assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["dispatchState"], "dispatched");
+        assert_eq!(response["route"], "wm-char-post-message");
+        assert_eq!(response["target"]["pid"], pid);
+        assert_eq!(response["target"]["windowId"], format!("{handle}"));
 
         // `PostMessageW` only queues the message; a real target app's own
         // message loop is what actually delivers it to the control's
