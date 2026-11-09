@@ -78,26 +78,29 @@ test(
     let anchor: { pid: number; windowId: string } | undefined;
     try {
       // Word's own splash-window-to-real-document-window handoff is slower
-      // and less uniform than Chrome's or Notepad's -- the native host can
-      // occasionally observe a transitional window it cannot yet present
-      // ("Windows did not show the requested application window"). This is
-      // a timing race in Word's own startup, not a leftover-process state
-      // (confirmed separately: no WINWORD.EXE survives a prior run's
-      // cleanup), so a short retry of the launch itself is the honest fix,
-      // not a workaround around a real dispatch failure.
+      // and less uniform than Chrome's or Notepad's -- the native host's own
+      // present_owner_window (native-input-host/src/windows_stage.rs) finds
+      // a candidate HWND via discovery, then asserts IsWindowVisible on it.
+      // A real run observed this failing on all 3 of a quick, 2s-gap retry,
+      // which points at Word needing more real settle time before the next
+      // discovery, not just one more immediate try. Never force-kill
+      // WINWORD.EXE by image name here: that would risk closing a real Word
+      // window the owner has open with unsaved work, not just whatever this
+      // test itself spawned -- service.closeApp (scoped to this test's own
+      // registered stage, if any) is the only cleanup used between attempts.
       let launched: Awaited<ReturnType<typeof service.launch>> | undefined;
       let launchError: unknown;
-      for (let attempt = 0; attempt < 3 && !launched; attempt++) {
+      for (let attempt = 0; attempt < 5 && !launched; attempt++) {
         try {
           launched = await service.launch(identity.token, task.id, "test-window", "background");
         } catch (error) {
           launchError = error;
           console.log(`[falsify-office] launch attempt ${attempt} failed, retrying: ${String((error as Error).message ?? error)}`);
           try { await service.closeApp(identity.token, task.id, "background"); } catch { /* best-effort */ }
-          await delay(2000);
+          await delay(5000);
         }
       }
-      if (!launched) throw launchError instanceof Error ? launchError : new Error("Word's launch never produced a presentable window after 3 attempts");
+      if (!launched) throw launchError instanceof Error ? launchError : new Error("Word's launch never produced a presentable window after 5 attempts");
       assert.ok(launched.name, "launch returned a real stage name");
       const stageName = launched.name!;
       anchor = manager.list().find((stage) => stage.name === stageName)?.anchor;
