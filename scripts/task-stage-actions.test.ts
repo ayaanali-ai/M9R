@@ -113,7 +113,7 @@ test("owner-preview actions route through desktop-wide driver methods", async ()
   assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity,
     { count: 2, deliveryMode: "owner-preview", allowForegroundEscalation: true }]);
   assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity,
-    { deliveryMode: "background", allowForegroundEscalation: true }]);
+    { deliveryMode: "owner-preview", allowForegroundEscalation: true }]);
   assert.deepEqual(calls[3]?.args, ["preview", 30, 45, identity]);
 });
 
@@ -183,7 +183,7 @@ test("scroll_element routes to the exact app tree ref and carries the bounded gr
     ref: "window-ui-element-a-1", direction: "down", expectedRole: "List", expectedLabel: "Installed apps" }), identity, "owner-preview");
   assert.equal(result, proof);
   assert.deepEqual(calls, [{ method: "scrollElement", args: ["settings", "window-ui-element-a-1", "down", identity,
-    { expectedRole: "List", expectedLabel: "Installed apps", deliveryMode: "background", allowForegroundEscalation: true }] }]);
+    { expectedRole: "List", expectedLabel: "Installed apps", deliveryMode: "owner-preview", allowForegroundEscalation: true }] }]);
 });
 
 test("read_value is a bounded, non-focus, exact app control observation", async () => {
@@ -232,12 +232,12 @@ test("text and save shortcuts stay on the selected app while modal controls stay
   assert.deepEqual(calls[2]?.args, ["selected-app"], "the modal is captured from the selected app's owned popup");
   assert.equal(calls[3]?.args[0], "selected-app", "popup coordinates are dispatched to the owned popup route");
   assert.equal(calls[4]?.args[0], "selected-app", "whole-field replacement is dispatched to the popup itself");
-  assert.deepEqual(calls[4]?.args[2], { deliveryMode: "background", allowForegroundEscalation: true, mode: "replace", x: 40, y: 20 });
+  assert.deepEqual(calls[4]?.args[2], { deliveryMode: "owner-preview", allowForegroundEscalation: true, mode: "replace", x: 40, y: 20 });
   assert.equal(calls[5]?.args[0], "selected-app", "caret insertion after selecting a popup field stays on the popup route");
   assert.equal(calls[6]?.args[0], "selected-app", "popup confirmation keys are dispatched to the owned popup route");
 });
 
-test("app actions use background-first semantic delivery and gate foreground fallback at the owner boundary", async () => {
+test("owner-preview actions use the visible route while explicit background mode remains available", async () => {
   const options: Array<{ confirmFocusForeground?: boolean; deliveryMode?: string; allowForegroundEscalation?: boolean }> = [];
   const driver = { clickElement: async (_name: string, _ref: string, _identity: unknown, value: typeof options[number]) => { options.push(value); } } as unknown as ReturnType<typeof createCuaStageDriver>;
   const identity = { handle: "codex", sessionId: "session" };
@@ -245,8 +245,8 @@ test("app actions use background-first semantic delivery and gate foreground fal
   await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity);
   assert.equal(options[0].confirmFocusForeground, undefined);
   assert.equal(options[1].confirmFocusForeground, true);
-  assert.equal(options[0].allowForegroundEscalation, true, "owner-preview can request a scoped foreground turn when its background route is unavailable");
-  assert.equal(options[0].deliveryMode, "background", "semantic actions try their non-activating route first");
+  assert.equal(options[0].allowForegroundEscalation, true, "owner-preview uses the native owner authorization boundary");
+  assert.equal(options[0].deliveryMode, "owner-preview", "default owner-preview actions stay on the visible route");
   assert.equal(options[1].allowForegroundEscalation, true);
   assert.equal(options[1].deliveryMode, "owner-preview", "an explicit action foreground request is kept on the native authorization route");
   await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app" }, identity, "background");

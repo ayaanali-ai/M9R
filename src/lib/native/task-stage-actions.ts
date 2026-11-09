@@ -254,12 +254,10 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
   if (!delivery.ok) throw new DesktopInputNotDispatchedError(delivery.reason,
     delivery.code === "foreground-lease-required" ? "foreground-lease" : "background-unavailable");
   const confirmFocusForeground = requestedFocus;
-  // Semantic routes stay background-first even while the owner is supervising
-  // an owner-preview task. A physical/focus action, or a semantic action whose
-  // target has no usable background route, may escalate through the same
-  // task-scoped native approval boundary. Explicit background mode never gets
-  // that escalation permission.
-  const actionDeliveryMode: "background" | "owner-preview" = delivery.mode === "exclusive-input" ? "owner-preview" : "background";
+  // Keep owner-preview tasks on the visible route for the demo workflow. A
+  // background route remains available when the caller explicitly selects it;
+  // exclusive input always uses the owner-preview route.
+  const actionDeliveryMode: "background" | "owner-preview" = delivery.mode === "exclusive-input" ? "owner-preview" : mode;
   const allowForegroundEscalation = mode === "owner-preview" || requestedFocus === true || mediaKeyRequest;
   const stageOptions = <T extends Record<string, unknown>>(options: T): T | undefined => {
     const normalized = { ...options, deliveryMode: actionDeliveryMode,
