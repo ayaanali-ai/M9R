@@ -18,7 +18,7 @@ use std::io::{stdin, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const MARKER_SIZE: f32 = 20.0;
+pub const MARKER_SIZE: f32 = 30.0;
 const CHIP_OFFSET_SCALE: f32 = MARKER_SIZE / 46.0;
 const MOVE_ANIM_MS: f32 = 140.0;
 const EYE_BLINK_MIN_MS: u64 = 2000;

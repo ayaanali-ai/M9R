@@ -149,11 +149,26 @@ for (const scenario of SCENARIOS) {
         anchor = manager.list().find((stage) => stage.name === launched.name)?.anchor ?? undefined;
 
         // Chrome's own launch-settle takes real time (it is not finished the
-        // moment the OS reports a window exists).
-        await delay(3000);
-
-        // Direct, same mechanism Phase 0 T1/T2 already proved.
-        const baselineForeground = await manager.currentForegroundWindow();
+        // moment the OS reports a window exists) -- and a genuinely cold
+        // chrome.exe start (its very first window of this process, as
+        // opposed to a later "--new-window" into an already-running
+        // instance) can self-activate well after that: a real run's FIRST
+        // scenario failed the foreground-unchanged assertion because the
+        // fixed 3s delay here ended before Chrome's own delayed, internal
+        // self-activation did -- caught only by the automated check, not
+        // visibly (the window had flashed for attention in the taskbar,
+        // never actually stealing focus from the owner's eyes), and never
+        // reproduced on later scenarios once chrome.exe was already warm.
+        // Polling for the foreground window to actually settle, rather than
+        // trusting one fixed delay, gives a cold launch exactly as long as
+        // it needs without slowing down every later, already-warm scenario.
+        let baselineForeground = await manager.currentForegroundWindow();
+        for (let attempt = 0; attempt < 20; attempt++) {
+          await delay(500);
+          const next = await manager.currentForegroundWindow();
+          if (next.pid === baselineForeground.pid) break;
+          baselineForeground = next;
+        }
         const baselineCursor = await manager.getOwnerCursorPosition();
 
         let dispatchError: unknown;
