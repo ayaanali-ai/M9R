@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createMultiplayerA2ARouter } from "../src/lib/native/multiplayer-a2a";
+import { createMultiplayerA2ARouter, MAX_A2A_CONVERSATION_MESSAGES } from "../src/lib/native/multiplayer-a2a";
 import type { A2AMessage, MultiplayerRoster } from "../src/lib/native/multiplayer-contract";
 
 const roster: MultiplayerRoster = {
@@ -64,6 +64,89 @@ test("rejects expired, cross-run, unknown-recipient, and dangling-reply messages
   assert.equal(router.send(message({ messageId: "dangling-reply", idempotencyKey: "dangling-reply", replyToMessageId: "missing" })).ok, false);
 });
 
+test("restored durable routing metadata keeps reply references valid after router restart", () => {
+  const router = createMultiplayerA2ARouter(roster, {
+    now: () => 200,
+    knownMessageIds: ["persisted-parent"],
+    knownMessageReferences: [{
+      messageId: "persisted-parent",
+      agentId: "agent-1",
+      recipientAgentIds: ["agent-2"],
+      conversationId: "persisted-conversation",
+      replyDepth: 0,
+    }],
+  });
+  const reply = router.send(message({
+    agentId: "agent-2",
+    branchId: "branch-2",
+    recipient: { kind: "agent", agentId: "agent-1" },
+    messageId: "reply-after-restart",
+    idempotencyKey: "reply-after-restart",
+    conversationId: "persisted-conversation",
+    replyToMessageId: "persisted-parent",
+    replyDepth: 1,
+    summary: "I have a new verified result.",
+  }));
+  assert.equal(reply.ok, true);
+});
+
+test("conversation roots cannot be restarted to reset the reply and message bounds", () => {
+  const router = createMultiplayerA2ARouter(roster, { now: () => 200 });
+  const root = router.send(message({ conversationId: "thread-1" }));
+  assert.equal(root.ok, true);
+  const repeatedRoot = router.send(message({ messageId: "root-2", idempotencyKey: "root-2", conversationId: "thread-1" }));
+  assert.equal(repeatedRoot.ok, false);
+  for (let index = 1; index < MAX_A2A_CONVERSATION_MESSAGES; index += 1) {
+    const reply = router.send(message({
+      agentId: "agent-2",
+      branchId: "branch-2",
+      recipient: { kind: "agent", agentId: "agent-1" },
+      messageId: `parallel-reply-${index}`,
+      idempotencyKey: `parallel-reply-${index}`,
+      conversationId: "thread-1",
+      replyToMessageId: "message-1",
+      replyDepth: 1,
+    }));
+    assert.equal(reply.ok, true);
+  }
+  const overLimit = router.send(message({
+    agentId: "agent-2",
+    branchId: "branch-2",
+    recipient: { kind: "agent", agentId: "agent-1" },
+    messageId: "parallel-reply-over-limit",
+    idempotencyKey: "parallel-reply-over-limit",
+    conversationId: "thread-1",
+    replyToMessageId: "message-1",
+    replyDepth: 1,
+  }));
+  assert.equal(overLimit.ok, false);
+});
+
+test("task-linked replies stay in one conversation and follow the referenced message depth", () => {
+  const router = createMultiplayerA2ARouter(roster, { now: () => 200 });
+  const first = router.send(message({ taskId: "task-a", conversationId: "conversation-a" }));
+  assert.equal(first.ok, true);
+  const reply = router.send(message({
+    agentId: "agent-2",
+    branchId: "branch-2",
+    recipient: { kind: "agent", agentId: "agent-1" },
+    messageId: "message-2",
+    idempotencyKey: "reply-1",
+    taskId: "task-a",
+    conversationId: "conversation-a",
+    replyToMessageId: "message-1",
+    replyDepth: 1,
+    summary: "Verified result.",
+  }));
+  assert.equal(reply.ok, true);
+  assert.equal(router.send(message({
+    messageId: "wrong-conversation",
+    idempotencyKey: "wrong-conversation",
+    taskId: "task-a",
+    conversationId: "conversation-b",
+  })).ok, false);
+});
+
 test("task-room progress sidecars expose the latest witness without parsing prose", () => {
   const router = createMultiplayerA2ARouter(roster, { now: () => 300 });
   const first = router.send(message({
@@ -79,6 +162,8 @@ test("task-room progress sidecars expose the latest witness without parsing pros
   const second = router.send(message({
     taskId: "task-1",
     conversationId: "conversation-1",
+    replyToMessageId: "progress-1",
+    replyDepth: 1,
     messageId: "progress-2",
     idempotencyKey: "progress-2",
     progressFingerprint: "state-b",

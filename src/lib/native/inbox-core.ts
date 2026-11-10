@@ -1,3 +1,5 @@
+import type { A2AMessage, A2AMessageKind, A2AProgressKind } from "./multiplayer-contract";
+
 /**
  * Task, inbox and injection-format core for the native front door (design sections 6, 7, 9 and 12).
  * Pure functions only: no file, network or clock access, so the same code runs in a hook, the Node and a test.
@@ -30,10 +32,30 @@ export type CoordinationCompletion = "pending" | "accepted" | "completed" | "fai
 
 /** Compact coordination metadata; task prose remains separate and is never duplicated into activity events. */
 export interface TaskCoordination {
-  intent: "request";
+  intent: "request" | "message";
   target: string;
+  conversationId?: string;
+  messageId?: string;
+  replyToMessageId?: string;
   dependencyTaskId?: string;
   completion: CoordinationCompletion;
+}
+
+/** Durable link from an inbox delivery back to its structured team conversation. */
+export interface TaskA2ALink {
+  conversationId: string;
+  messageId: string;
+  senderAgentId: string;
+  recipientAgentId: string;
+  replyDepth: number;
+  kind: A2AMessageKind;
+  summary: string;
+  taskId?: string;
+  replyToMessageId?: string;
+  progressFingerprint?: string;
+  progressKind?: A2AProgressKind;
+  /** Sanitized transport envelope retained so retries remain idempotent after owner-broker restart. */
+  wireMessage?: A2AMessage;
 }
 
 /**
@@ -253,6 +275,8 @@ export interface Task {
   parentTaskId?: string;
   /** Compact A2A state used for dedupe/acknowledgement; full prose remains in `goal`. */
   coordination?: TaskCoordination;
+  /** Structured teammate-message identity, persisted with the durable inbox delivery. */
+  a2a?: TaskA2ALink;
   /** The session the task was shown in (its inbox delivery), so its answer is read from that session's transcript. */
   deliveredSession?: string;
   /** Set when the answer was pushed back into the sender's session. */
@@ -310,6 +334,10 @@ export interface NewTaskInput {
   fromSession?: string;
   /** Internal authorization lineage; trusted broker code derives this from an active owner-approved task. */
   parentTaskId?: string;
+  /** Structured A2A context for the durable recipient inbox item. */
+  a2a?: TaskA2ALink;
+  /** Agent-to-agent informational message vs. delegated task request. */
+  coordinationIntent?: TaskCoordination["intent"];
 }
 
 /** Approximate token count; good enough to enforce a budget without a tokenizer dependency. */
@@ -381,10 +409,33 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     receipt: initialTaskReceipt(nowIso),
     ...(input.origin === "agent_initiated" ? {
       coordination: {
-        intent: "request" as const,
+        intent: input.coordinationIntent ?? "request",
         target: normalizeHandle(input.to),
+        ...(input.a2a ? {
+          conversationId: input.a2a.conversationId,
+          messageId: input.a2a.messageId,
+          ...(input.a2a.replyToMessageId ? { replyToMessageId: input.a2a.replyToMessageId } : {}),
+        } : {}),
         ...(input.parentTaskId ? { dependencyTaskId: input.parentTaskId } : {}),
         completion: "pending" as const,
+      },
+    } : {}),
+    ...(input.a2a ? {
+      a2a: {
+        ...input.a2a,
+        summary: redactSecrets(input.a2a.summary.trim()).slice(0, 280),
+        ...(input.a2a.wireMessage ? {
+          wireMessage: {
+            ...input.a2a.wireMessage,
+            summary: redactSecrets(input.a2a.wireMessage.summary.trim()).slice(0, 280),
+            ...(input.a2a.wireMessage.details ? {
+              details: Object.fromEntries(Object.entries(input.a2a.wireMessage.details).map(([key, value]) => [
+                key,
+                typeof value === "string" ? redactSecrets(value).slice(0, 2_000) : value,
+              ])),
+            } : {}),
+          },
+        } : {}),
       },
     } : {}),
     ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -396,17 +447,61 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
 
 const RESULT_ITEMS = 3;
 const RESULT_CHARS = 400;
+const CONVERSATION_ITEMS = 30;
 
-/** Answers to tasks this agent sent, shown once at its next prompt. Empty when there are none (zero tokens). */
+/** Answers to tasks this agent sent, shown once at its next prompt or inbox recovery lookup. */
 export function renderResultsInjection(tasks: readonly Task[], handle: string, options: { includeTaskIds?: boolean } = {}): { text: string; ids: string[] } {
   const normalizedHandle = normalizeHandle(handle);
-  const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle && t.resultSummary && !t.resultShownAt).slice(0, RESULT_ITEMS);
+  const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle
+    && !t.resultShownAt
+    && (t.resultSummary || (t.completion?.status === "incomplete" && t.completion.summary))).slice(0, RESULT_ITEMS);
   if (ready.length === 0) return { text: "", ids: [] };
   const includeTaskIds = options.includeTaskIds !== false;
-  const lines = ready.map((t) => includeTaskIds
-    ? `[${t.id} finished by @${t.to}] ${neutralizeBracketHeaders(clip(t.resultSummary ?? "", RESULT_CHARS).text)}`
-    : `Work finished by @${t.to}: ${neutralizeBracketHeaders(clip(t.resultSummary ?? "", RESULT_CHARS).text)}`);
+  const lines = ready.map((t) => {
+    const incomplete = t.completion?.status === "incomplete" && !t.resultSummary;
+    const summary = t.resultSummary ?? t.completion?.summary ?? "";
+    const safeSummary = neutralizeBracketHeaders(clip(summary, RESULT_CHARS).text);
+    if (t.a2a) {
+      return includeTaskIds
+        ? `[${t.id} peer reply from @${t.to}; conversation ${t.a2a.conversationId}; message ${t.a2a.messageId}] ${safeSummary}`
+        : `Peer reply from @${t.to}: ${safeSummary}`;
+    }
+    return includeTaskIds
+      ? `[${t.id} ${incomplete ? "incomplete report" : "finished"} by @${t.to}] ${safeSummary}`
+      : `${incomplete ? "Incomplete report" : "Work finished"} by @${t.to}: ${safeSummary}`;
+  });
   return { text: `M9R results (${ready.length})\n${lines.join("\n")}`, ids: ready.map((t) => t.id) };
+}
+
+/** Render only the A2A messages this exact identity can see, without advancing inbox cursors. */
+export function renderA2AConversation(
+  tasks: readonly Task[],
+  conversationId: string,
+  identity: { handle: string; sessionId: string },
+): { text: string; count: number; total: number } {
+  const handle = normalizeHandle(identity.handle);
+  const visible = tasks.filter((task) => task.a2a?.conversationId === conversationId
+    && (normalizeHandle(task.to) === handle
+      || (normalizeHandle(task.from) === handle && task.fromSession === identity.sessionId)))
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.seq - right.seq);
+  if (visible.length === 0) return { text: `No stored messages in conversation ${conversationId} are addressed to this agent or were sent by this session.`, count: 0, total: 0 };
+  const messages = visible.slice(-CONVERSATION_ITEMS);
+  const lines = messages.map((task) => {
+    const link = task.a2a!;
+    const reply = link.replyToMessageId ? ` reply-to ${link.replyToMessageId}` : "";
+    const details = link.wireMessage?.details;
+    const detailText = details && Object.keys(details).length > 0
+      ? `\n  Details: ${neutralizeBracketHeaders(clip(JSON.stringify(details), RESULT_CHARS).text)}`
+      : "";
+    const outcome = task.resultSummary ? `\n  Result: ${neutralizeBracketHeaders(clip(task.resultSummary, RESULT_CHARS).text)}` : "";
+    return `- [${link.kind}; ${link.messageId}${reply}; @${task.from} → @${task.to}; ${task.lifecycle?.state ?? "queued"}] ${neutralizeBracketHeaders(link.summary)}${detailText}${outcome}`;
+  });
+  const omitted = visible.length - messages.length;
+  return {
+    text: `M9R conversation ${conversationId} (${messages.length} of ${visible.length} visible messages${omitted ? `; showing the most recent ${CONVERSATION_ITEMS}` : ""}):\n${lines.join("\n")}`,
+    count: messages.length,
+    total: visible.length,
+  };
 }
 
 /** Same key means the same task: a repeated send must not create or deliver a second one. */
@@ -502,7 +597,9 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
     // a connected agent cannot mistake the sender label for another M9R agent
     // or ask the owner to re-authorize an ordinary direct task.
     const sender = t.origin === "human_typed" ? "the owner" : `@${t.from}`;
-    const head = includeTaskIds ? `[${t.id} from ${sender}, ${approvalLabel(t)}] ` : `M9R work from ${sender}: `;
+    const head = t.a2a
+      ? `[${t.id} peer message from ${sender}; conversation ${t.a2a.conversationId}; message ${t.a2a.messageId}${t.a2a.replyToMessageId ? ` replying to ${t.a2a.replyToMessageId}` : ""}] `
+      : includeTaskIds ? `[${t.id} from ${sender}, ${approvalLabel(t)}] ` : `M9R work from ${sender}: `;
     const tail = includeTaskIds ? ` Details: get_task ${t.id}.` : " More detail is available through the connected M9R context.";
     const room = Math.max(40, Math.min(goalChars, perItemChars - head.length - tail.length));
     // The pointer is only useful (and only safe to mention) when the text shown is not the whole goal.

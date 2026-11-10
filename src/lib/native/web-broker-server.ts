@@ -27,9 +27,10 @@ import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
 import type { WebUiBridge } from "./web-ui-bridge";
 import { canQueue } from "./codex-delivery-core";
-import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
+import { MAX_AGENT_REPLY_DEPTH, normalizeHandle } from "./inbox-core";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
 import type { MultiplayerA2ASendInput, MultiplayerRuntime } from "./multiplayer-runtime";
+import type { TaskContext } from "./multiplayer-task-context";
 import { computerUseLatencySummary } from "./computer-use-latency";
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -177,7 +178,7 @@ export interface WebBrokerServerOptions {
     primeCursor?(token: string, taskId: string): Promise<unknown>;
     primeCursorForOwner?(taskId: string): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
-  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">;
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult" | "markResultShown">;
   /** Production owner broker has a native desktop route; no extension handshake is required. */
   nativeDesktopRoute?: boolean;
   key: string;
@@ -236,6 +237,8 @@ type AgentMcpStoreResult = {
     duplicate?: boolean;
     message?: unknown;
     recipientAgentIds?: string[];
+    delivery?: { state: "queued" | "already-present" | "pending" | "uncertain" | "completed" | "held-no-progress" | "not-configured" | "failed"; taskId?: string; created?: boolean; error?: string };
+    context?: TaskContext;
   };
 };
 
@@ -246,7 +249,7 @@ type AgentMcpStoreResult = {
  * own user ACL. This is intentionally not a generic store/RPC endpoint.
  */
 export function applyAgentMcpStoreMutation(
-  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">,
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult" | "markResultShown">,
   input: unknown,
   multiplayerRuntime?: MultiplayerRuntime,
 ): AgentMcpStoreResult {
@@ -263,13 +266,17 @@ export function applyAgentMcpStoreMutation(
 
   try {
     if (value.action === "a2a") {
-      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "to", "summary", "kind", "priority", "taskId", "conversationId", "details", "idempotencyKey", "replyToMessageId", "supersedesMessageId", "progressFingerprint", "progressKind", "replyDepth"].includes(key))
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "to", "summary", "kind", "priority", "taskId", "conversationId", "details", "idempotencyKey", "replyToMessageId", "supersedesMessageId", "progressFingerprint", "progressKind"].includes(key))
         || typeof value.to !== "string" || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 280
         || (value.taskId !== undefined && (typeof value.taskId !== "string" || value.taskId.length > 128))
         || (value.conversationId !== undefined && (typeof value.conversationId !== "string" || value.conversationId.length > 128))
-        || (value.kind !== undefined && typeof value.kind !== "string") || (value.priority !== undefined && typeof value.priority !== "string")
-        || (value.replyDepth !== undefined && (!Number.isSafeInteger(value.replyDepth) || (value.replyDepth as number) < 0 || (value.replyDepth as number) > MAX_AGENT_REPLY_DEPTH))) {
+        || (value.kind !== undefined && typeof value.kind !== "string") || (value.priority !== undefined && typeof value.priority !== "string")) {
         return { status: 400, body: { ok: false, error: "Invalid structured M9R teammate message." } };
+      }
+      const actionableKinds = new Set(["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"]);
+      if (typeof value.taskId === "string" && actionableKinds.has(String(value.kind ?? "delegate"))
+        && (typeof value.progressFingerprint !== "string" || typeof value.progressKind !== "string")) {
+        return { status: 400, body: { ok: false, error: "A task-bound teammate message needs a progressFingerprint and progressKind. Use a stable fingerprint of the current task state so M9R can stop repeated no-progress handoffs." } };
       }
       const result = multiplayerRuntime.send(identity, {
         to: value.to,
@@ -284,21 +291,62 @@ export function applyAgentMcpStoreMutation(
         ...(typeof value.supersedesMessageId === "string" ? { supersedesMessageId: value.supersedesMessageId } : {}),
         ...(typeof value.progressFingerprint === "string" ? { progressFingerprint: value.progressFingerprint } : {}),
         ...(typeof value.progressKind === "string" ? { progressKind: value.progressKind as MultiplayerA2ASendInput["progressKind"] } : {}),
-        ...(value.replyDepth === undefined ? {} : { replyDepth: value.replyDepth as number }),
       });
       if (!result.ok) return { status: 409, body: { ok: false, error: result.error } };
       return {
         status: 200,
         body: {
           ok: true,
-          taskId: result.message.messageId,
+          ...(result.delivery.taskId ? { taskId: result.delivery.taskId } : {}),
           created: !result.duplicate,
           messageId: result.message.messageId,
           duplicate: result.duplicate,
           message: result.message,
           recipientAgentIds: [...result.recipientAgentIds],
+          delivery: result.delivery,
         },
       };
+    }
+    if (value.action === "task_state") {
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "taskId"].includes(key))
+        || typeof value.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.taskId)) {
+        return { status: 400, body: { ok: false, error: "Invalid shared task-state request." } };
+      }
+      const result = multiplayerRuntime.readTaskContext(identity, value.taskId);
+      return result.ok
+        ? { status: 200, body: { ok: true, context: result.context } }
+        : { status: 404, body: { ok: false, error: result.error ?? "Shared task state is unavailable." } };
+    }
+    if (value.action === "claim_work") {
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "taskId", "assignmentId", "workKey", "summary"].includes(key))
+        || typeof value.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.taskId)
+        || typeof value.assignmentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.assignmentId)
+        || typeof value.workKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.workKey)
+        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 280) {
+        return { status: 400, body: { ok: false, error: "Invalid shared-work claim." } };
+      }
+      const result = multiplayerRuntime.claimWork(identity, {
+        taskId: value.taskId,
+        assignmentId: value.assignmentId,
+        workKey: value.workKey,
+        summary: value.summary,
+      });
+      return result.ok
+        ? { status: 200, body: { ok: true, duplicate: result.duplicate === true, context: result.context } }
+        : { status: 409, body: { ok: false, error: result.error ?? "Shared-work claim was refused.", context: result.context } };
+    }
+    if (value.action === "complete_work" || value.action === "release_work") {
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "taskId", "assignmentId"].includes(key))
+        || typeof value.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.taskId)
+        || typeof value.assignmentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.assignmentId)) {
+        return { status: 400, body: { ok: false, error: "Invalid shared-work assignment update." } };
+      }
+      const result = value.action === "complete_work"
+        ? multiplayerRuntime.completeWork(identity, value.taskId, value.assignmentId)
+        : multiplayerRuntime.releaseWork(identity, value.taskId, value.assignmentId);
+      return result.ok
+        ? { status: 200, body: { ok: true, duplicate: result.duplicate === true, context: result.context } }
+        : { status: 409, body: { ok: false, error: result.error ?? "Shared-work assignment update was refused.", context: result.context } };
     }
     if (value.action === "send") {
       if (Object.keys(value).some((key) => !["action", "token", "to", "goal"].includes(key))
@@ -345,6 +393,26 @@ export function applyAgentMcpStoreMutation(
       }
       const tasks = store.claimInboxTasks(ownHandle, identity.sessionId, value.taskIds as string[]);
       return { status: 200, body: { ok: true, taskIds: tasks.map((task) => task.id) } };
+    }
+
+    if (value.action === "mark_results_shown") {
+      if (inRoom || Object.keys(value).some((key) => !["action", "token", "taskIds"].includes(key))
+        || !Array.isArray(value.taskIds) || value.taskIds.length > 10
+        || value.taskIds.some((id) => typeof id !== "string" || !/^T[0-9]{1,12}$/.test(id))) {
+        return { status: 400, body: { ok: false, error: "Invalid native M9R teammate-result acknowledgement." } };
+      }
+      const taskIds = value.taskIds as string[];
+      const valid = taskIds.every((id) => {
+        const task = store.getTask(id);
+        return task !== undefined
+          && task.origin === "agent_initiated"
+          && normalizeHandle(task.from) === ownHandle
+          && task.fromSession === identity!.sessionId
+          && Boolean(task.resultSummary || (task.completion?.status === "incomplete" && task.completion.summary));
+      });
+      if (!valid) return { status: 403, body: { ok: false, error: "A teammate result is not addressed to this provider session." } };
+      store.markResultShown(taskIds);
+      return { status: 200, body: { ok: true, taskIds } };
     }
 
     if (value.action === "result") {

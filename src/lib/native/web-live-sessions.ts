@@ -1212,9 +1212,13 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           const witness = `${normalizeHandle(from.handle)}\0${normalizeHandle(handle)}\0${ask.goal.trim()}`;
           if (exchangeWitnesses.has(witness)) continue;
           if (ask.approval === "pending") store.setApproval(ask.id, "approved");
-          const text = `@${from.handle} messaged you (${ask.id}): ${ask.goal}
+          const text = ask.a2a
+            ? `@${from.handle} sent one message in M9R conversation ${ask.a2a.conversationId} (${ask.id}; message ${ask.a2a.messageId}${ask.a2a.replyToMessageId ? `, replying to ${ask.a2a.replyToMessageId}` : ""}): ${ask.goal}
 
-Answer with m9r_result for ${ask.id}, in a sentence or two, so @${from.handle} sees it right away. If you need something from them, ask with m9r_send.`;
+Treat this as one peer turn, not an invitation to keep a chat loop running. If it asks for work or a decision, do the requested part and answer once with m9r_result for ${ask.id}. Do not poll or send a second message just to acknowledge. If continuing the shared task truly needs another peer turn, send one concise m9r_team_message with the same taskId and conversationId, replyToMessageId set to ${ask.a2a.messageId}, and a progress witness showing what changed; otherwise continue your own work.`
+            : `@${from.handle} messaged you (${ask.id}): ${ask.goal}
+
+Answer with m9r_result for ${ask.id}, in a sentence or two, so @${from.handle} sees it right away. Do not poll or send a follow-up just to acknowledge.`;
           const sent = deliver(handle, text, ask.id);
           if (sent.ok) { store.markDelivered([ask.id], slot.sessionId); exchangeWitnesses.set(witness, at); }
           continue;
@@ -1228,7 +1232,7 @@ Answer with m9r_result for ${ask.id}, in a sentence or two, so @${from.handle} s
           if (haltedByOwner) return;
           const text = `@${to.handle} answered ${asked.id}: ${asked.resultSummary}
 
-Continue your work with this. If you need more from them, ask again with m9r_send; when you both agree, say so plainly.`;
+Continue the task with this result. Do not automatically send another teammate message. If a genuine dependency remains, send one concise message that reuses the same conversation/task identity and cites the new progress; otherwise continue independently.`;
           const sent = deliver(handle, text);
           const witness = `${normalizeHandle(handle)}\0${normalizeHandle(to.handle)}\0${asked.resultSummary}`;
           if (exchangeWitnesses.has(witness)) continue;

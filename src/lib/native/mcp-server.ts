@@ -15,7 +15,7 @@ import { z } from "zod";
 import { taskCompletionReport, taskCompletionReportSchema } from "./task-completion-contract";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import { handleForProvider, type LocalStore } from "./local-store";
-import { inboxMaxAgeMs, MAX_AGENT_REPLY_DEPTH, normalizeHandle, renderInboxInjection, type Task } from "./inbox-core";
+import { inboxMaxAgeMs, MAX_AGENT_REPLY_DEPTH, normalizeHandle, renderA2AConversation, renderInboxInjection, renderResultsInjection, type Task } from "./inbox-core";
 import { canQueue, isThreadId, normCwd } from "./codex-delivery-core";
 import type { VerifiedIdentity } from "./identity-core";
 import type { WebBrokerClient } from "./web-broker-client";
@@ -834,7 +834,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_send",
     {
-      description: "Send a task to another M9R agent by handle. It goes into their inbox and arrives at their next prompt or turn -- this does not wait for a reply.",
+      description: "Send a task to another M9R agent by handle. It goes into their inbox and arrives at their next prompt or turn; sending does not wait for a reply. The result includes the task ID. In a native/terminal session, if that reply is needed before you continue, call m9r_inbox once with that taskId and waitSeconds up to 30. M9R returns only the matching reply or an explicit pending/failed delivery status. Web-room replies are pushed automatically. Do not poll repeatedly; continue independent work or report that the teammate has not replied yet.",
       inputSchema: {
         ...AUTH_FIELD,
         to: z.string().min(1).max(80).describe("The recipient's handle, without the @, e.g. \"codex\"."),
@@ -896,14 +896,14 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_team_message",
     {
-      description: "Send one structured teammate message inside the current M9R multiplayer run. This records a concise human-readable message plus machine-readable task/progress sidecar; it does not replace or cancel an active task.",
+      description: "Send one structured peer message to a connected M9R agent inside an existing shared task. taskId is required; use m9r_send when assigning a separate task. Reuse the task's conversationId after the first message; replyToMessageId must be the exact messageId you are answering. Include a progressFingerprint and progressKind on actionable messages so M9R can hold repeated no-progress turns. Send one concise message; do not poll for a reply or send acknowledgements just to keep the conversation alive. If prior thread context is missing, call m9r_inbox once with conversationId. The result distinguishes durable inbox queueing from provider receipt or start.",
       inputSchema: {
         ...AUTH_FIELD,
         to: z.string().min(1).max(80).describe("Recipient handle without @."),
         summary: z.string().min(1).max(280).describe("The concise teammate message."),
         kind: z.enum(["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request", "stop", "supersede"]).default("delegate"),
         priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
-        taskId: z.string().min(1).max(128).optional(),
+        taskId: z.string().min(1).max(128).describe("Required shared task identifier; separate assigned work belongs in m9r_send."),
         conversationId: z.string().min(1).max(128).optional(),
         details: z.record(z.string(), z.union([z.string().max(2_000), z.number(), z.boolean(), z.null()])).optional(),
         idempotencyKey: z.string().min(1).max(256).optional(),
@@ -911,12 +911,15 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         supersedesMessageId: z.string().min(1).max(128).optional(),
         progressFingerprint: z.string().min(1).max(128).optional(),
         progressKind: z.enum(["observation", "operation-completed", "artifact-changed", "postcondition-verified", "blocker"]).optional(),
-        replyDepth: z.number().int().min(0).max(MAX_AGENT_REPLY_DEPTH).default(0),
       },
     },
-    async ({ token, to, summary, kind, priority, taskId, conversationId, details, idempotencyKey, replyToMessageId, supersedesMessageId, progressFingerprint, progressKind, replyDepth }) => {
+    async ({ token, to, summary, kind, priority, taskId, conversationId, details, idempotencyKey, replyToMessageId, supersedesMessageId, progressFingerprint, progressKind }) => {
       const { identity, token: authToken } = await authenticate(token);
       if (!deps.web?.sendA2A) throw new Error("The owner broker's structured multiplayer runtime is unavailable.");
+      if (["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"].includes(kind)
+        && (!progressFingerprint || !progressKind)) {
+        throw new Error("A task-bound teammate message needs a progressFingerprint and progressKind so repeated no-progress turns can be held safely.");
+      }
       const normalizedDetails = details
         ? Object.fromEntries(Object.entries(details).map(([key, value]) => [key, value])) as Record<string, string | number | boolean | null>
         : undefined;
@@ -924,14 +927,121 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         to, summary, kind, priority, ...(taskId ? { taskId } : {}), ...(conversationId ? { conversationId } : {}),
         ...(normalizedDetails ? { details: normalizedDetails } : {}), ...(idempotencyKey ? { idempotencyKey } : {}),
         ...(replyToMessageId ? { replyToMessageId } : {}), ...(supersedesMessageId ? { supersedesMessageId } : {}),
-        ...(progressFingerprint && progressKind ? { progressFingerprint, progressKind } : {}), replyDepth,
+        ...(progressFingerprint && progressKind ? { progressFingerprint, progressKind } : {}),
       };
       const result = await deps.web.sendA2A(authToken, input);
       if (!result.ok) throw new Error(result.error);
-      const recipients = result.recipientAgentIds.map((agentId) => `@${agentId}`).join(", ");
-      return { content: [{ type: "text", text: result.duplicate
-        ? `M9R deduplicated the structured teammate message for ${recipients || `@${to}`}.`
-        : `M9R accepted the structured teammate message for ${recipients || `@${to}`}; it remains in the task room and will not cancel unrelated work.` }] };
+      const receipt = result.delivery;
+      const recipientTask = receipt.taskId
+        ? receipt.created === false ? ` Existing recipient inbox task: ${receipt.taskId}; no second provider task was created.` : ` Recipient inbox task: ${receipt.taskId}.`
+        : "";
+      const status = receipt.state === "queued"
+        ? `The owner broker durably queued this message for @${to}; this does not claim the provider has read or started it.${recipientTask}`
+        : receipt.state === "already-present"
+          ? `This exact message already has a durable recipient inbox task. M9R did not create another provider turn; inspect that task's status before retrying.${recipientTask}`
+        : receipt.state === "pending"
+          ? `The message was accepted, but recipient inbox delivery is still pending. Do not resend it; inspect this message's delivery status before retrying.${recipientTask}`
+          : receipt.state === "uncertain"
+            ? `The existing recipient delivery outcome is uncertain. M9R did not create another task; inspect the recorded task before retrying.${recipientTask}${receipt.error ? ` ${receipt.error}` : ""}`
+            : receipt.state === "completed"
+              ? `This idempotent message already has a completed recipient task; no new provider turn was created.${recipientTask}`
+              : receipt.state === "held-no-progress"
+                ? `M9R recorded this message in the active run but did not queue another provider turn because the same progress witness repeated. ${receipt.error ?? "Record new progress or ask for clarification before continuing."}`
+                : receipt.state === "not-configured"
+                  ? `The A2A message was recorded, but this owner broker has no confirmed recipient inbox delivery path. Do not report it as delivered.${receipt.error ? ` ${receipt.error}` : ""}`
+                  : `The A2A message was recorded, but recipient inbox delivery failed. Do not report it as delivered; retrying the same idempotent message is safe after the broker issue is fixed.${receipt.error ? ` ${receipt.error}` : ""}`;
+      return { content: [{ type: "text", text: `${result.duplicate ? "M9R recognized this as the same idempotent teammate message. " : ""}${status} Message ID: ${result.message.messageId}. Conversation: ${result.message.conversationId ?? "run-level"}.` }] };
+    },
+  );
+
+  server.registerTool(
+    "m9r_task_state",
+    {
+      description: "Read the authoritative shared state for a task before taking a work slice: active ownership claims, latest progress witness, task state, and plan revision. This is one read, not a polling endpoint. Use m9r_claim_work before starting a discrete independent slice so another agent can see that it is owned.",
+      inputSchema: {
+        ...AUTH_FIELD,
+        taskId: z.string().min(1).max(128).describe("The exact shared taskId from the teammate conversation."),
+      },
+    },
+    async ({ token, taskId }) => {
+      const { token: authToken } = await authenticate(token);
+      if (!deps.web?.getMultiplayerTaskContext) throw new Error("The owner broker's shared task-state service is unavailable.");
+      const result = await deps.web.getMultiplayerTaskContext(authToken, taskId);
+      if (!result.ok || !result.context) throw new Error(result.error ?? "M9R could not read shared task state.");
+      const context = result.context;
+      const compact = {
+        taskId: context.taskId,
+        conversationId: context.conversationId,
+        state: context.state,
+        planRevision: context.planRevision,
+        participants: context.participants,
+        assignments: context.assignments.slice(-32),
+        latestProgress: context.progress.lastWitness ?? null,
+        noProgressStreak: context.progress.noProgressStreak,
+        observations: context.observations.slice(-8),
+        artifacts: context.artifacts.slice(-16),
+        pendingDecisions: context.pendingDecisions.filter((decision) => !decision.resolved).slice(-8),
+      };
+      return { content: [{ type: "text", text: JSON.stringify(compact) }] };
+    },
+  );
+
+  server.registerTool(
+    "m9r_claim_work",
+    {
+      description: "Atomically claim one discrete workKey for this agent in the shared task. Read m9r_task_state first; do not claim work already owned by a teammate. Reusing the same assignmentId is a safe retry; a different agent cannot claim the same active workKey.",
+      inputSchema: {
+        ...AUTH_FIELD,
+        taskId: z.string().min(1).max(128),
+        assignmentId: z.string().min(1).max(128).describe("Stable retry key for this work claim."),
+        workKey: z.string().min(1).max(128).describe("Stable short name for the work slice, e.g. source-research."),
+        summary: z.string().min(1).max(280).describe("What this agent owns and the intended completion condition."),
+      },
+    },
+    async ({ token, taskId, assignmentId, workKey, summary }) => {
+      const { token: authToken } = await authenticate(token);
+      if (!deps.web?.claimMultiplayerWork) throw new Error("The owner broker's shared work-claim service is unavailable.");
+      const result = await deps.web.claimMultiplayerWork(authToken, { taskId, assignmentId, workKey, summary });
+      if (!result.ok || !result.context) throw new Error(result.error ?? `M9R could not claim ${workKey}; inspect m9r_task_state before choosing another slice.`);
+      return { content: [{ type: "text", text: `${result.duplicate ? "This exact claim was already recorded." : `Claimed ${workKey}.`} Assignment ${assignmentId} is ${result.context.assignments.find((assignment) => assignment.assignmentId === assignmentId)?.status ?? "recorded"}. Shared state is durable; check it again only when ownership or task progress changes.` }] };
+    },
+  );
+
+  server.registerTool(
+    "m9r_complete_work",
+    {
+      description: "Mark one assignment owned by this agent complete after its stated done-condition is verified. This releases the workKey for future reassignment only as completed work, and is idempotent for the same assignmentId.",
+      inputSchema: {
+        ...AUTH_FIELD,
+        taskId: z.string().min(1).max(128),
+        assignmentId: z.string().min(1).max(128),
+      },
+    },
+    async ({ token, taskId, assignmentId }) => {
+      const { token: authToken } = await authenticate(token);
+      if (!deps.web?.completeMultiplayerWork) throw new Error("The owner broker's shared work-completion service is unavailable.");
+      const result = await deps.web.completeMultiplayerWork(authToken, taskId, assignmentId);
+      if (!result.ok || !result.context) throw new Error(result.error ?? "M9R could not complete this shared-work assignment.");
+      return { content: [{ type: "text", text: `${result.duplicate ? "Assignment was already completed." : "Assignment completed."} Shared task ${taskId} remains ${result.context.state}.` }] };
+    },
+  );
+
+  server.registerTool(
+    "m9r_release_work",
+    {
+      description: "Release one active assignment owned by this agent when it cannot complete it, so another teammate can claim the workKey. Do not release completed work; use m9r_complete_work after verification.",
+      inputSchema: {
+        ...AUTH_FIELD,
+        taskId: z.string().min(1).max(128),
+        assignmentId: z.string().min(1).max(128),
+      },
+    },
+    async ({ token, taskId, assignmentId }) => {
+      const { token: authToken } = await authenticate(token);
+      if (!deps.web?.releaseMultiplayerWork) throw new Error("The owner broker's shared work-release service is unavailable.");
+      const result = await deps.web.releaseMultiplayerWork(authToken, taskId, assignmentId);
+      if (!result.ok || !result.context) throw new Error(result.error ?? "M9R could not release this shared-work assignment.");
+      return { content: [{ type: "text", text: `${result.duplicate ? "Assignment was already released." : "Assignment released."} Another teammate may now claim its workKey.` }] };
     },
   );
 
@@ -972,14 +1082,31 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     "m9r_inbox",
     {
       description:
-        "Manual recovery only: inspect new teammate messages when M9R reports a delivery gap or the user explicitly asks. Normal authorized work is delivered automatically into the provider turn; do not poll this tool in a loop or as part of ordinary work. Each call shows only messages not yet seen and marks them seen. For a web-room agent, teammate answers are pushed automatically as the next message; for a native/terminal session, waitSeconds (up to 30) performs one bounded recovery wait.",
+        "Recovery and reply-wait tool: inspect new teammate messages when M9R reports a delivery gap, wait once for a specific m9r_send reply, or retrieve a stored A2A conversation by conversationId when earlier context is missing. Normal authorized work is delivered automatically into the provider turn; do not poll in a loop or use this for ordinary work. Conversation lookup returns only messages sent by this exact session or addressed to this agent, and does not change inbox cursors. Web-room replies are pushed automatically. A native/terminal reply wait can last up to 30 seconds and reports pending, received, or failed status.",
       inputSchema: {
         ...AUTH_FIELD,
-        waitSeconds: z.number().int().min(0).max(30).default(0).describe("How long to wait for a new message before giving up. 0 checks once."),
+        taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Optional exact teammate task ID returned by m9r_send. Native/terminal sessions use it to wait only for that task's reply or status; web-room replies are pushed automatically."),
+        conversationId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/).optional().describe("Optional exact structured A2A conversation ID from a teammate task. Retrieves the visible conversation context once; it is not an inbox poll."),
+        waitSeconds: z.number().int().min(0).max(30).default(0).describe("How long a native/terminal session waits for a teammate message or requested reply. 0 checks once."),
       },
     },
-    async ({ token, waitSeconds }) => {
+    async ({ token, taskId: requestedTaskId, conversationId: requestedConversationId, waitSeconds }) => {
       const { identity, token: authToken } = await authenticate(token);
+      if (requestedTaskId && requestedConversationId) throw new Error("Choose either one exact outgoing task reply or one A2A conversation lookup, not both.");
+      if (requestedConversationId) {
+        const ownHandle = roomHandle(identity, identity.handle);
+        const rendered = renderA2AConversation(deps.store.snapshot().tasks, requestedConversationId, { handle: ownHandle, sessionId: identity.sessionId });
+        return { content: [{ type: "text" as const, text: rendered.text }] };
+      }
+      if (requestedTaskId) {
+        if (inRoom(identity)) throw new Error("Web-room teammate replies are pushed automatically; wait for the reply in the current conversation.");
+        const requested = deps.store.getTask(requestedTaskId);
+        if (!requested || requested.origin !== "agent_initiated"
+          || normalizeHandle(requested.from) !== normalizeHandle(identity.handle)
+          || requested.fromSession !== identity.sessionId) {
+          throw new Error(`Task ${requestedTaskId} is not a teammate message sent by this exact session.`);
+        }
+      }
       // A web-room agent has one durable room inbox even when its provider process/session is restarted; using a
       // cursor keyed by that session ID would replay its ENTIRE delivered history after recovery, including old
       // "stop all work" messages. The cursor belongs to the stable room handle, never to a process or provider session.
@@ -988,7 +1115,43 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const handle = roomHandle(identity, identity.handle);
       const deadline = Date.now() + (waitSeconds ?? 0) * 1000;
       const refusedRoomTaskIds = new Set<string>();
+      const outgoingTasks = (): Task[] => inRoom(identity) ? [] : deps.store.tasksFrom(identity.handle)
+        .filter((task) => task.origin === "agent_initiated"
+          && task.fromSession === identity.sessionId
+          && (!requestedTaskId || task.id === requestedTaskId)
+          && taskIsFreshForIdentity(identity, task)
+          && !task.dismissedAt);
+      const markOutgoingResultsShown = async (taskIds: readonly string[]): Promise<void> => {
+        if (taskIds.length === 0) return;
+        if (deps.web?.markAgentResultsShown) {
+          const saved = await deps.web.markAgentResultsShown(authToken, taskIds);
+          if (!saved.ok) throw new Error(saved.error ?? "The owner broker could not record which teammate replies were shown.");
+        } else {
+          deps.store.markResultShown(taskIds);
+        }
+      };
+      const outgoingWaitStatus = (tasks: readonly Task[]): string => {
+        const pendingSends = tasks.filter((task) => !task.resultSummary
+          && !(task.completion?.status === "incomplete" && task.completion.summary));
+        if (pendingSends.length === 0) return "Inbox is empty.";
+        const lines = pendingSends.slice(0, 10).map((task) => {
+          const state = task.delivery?.state;
+          if (state === "failed" || task.receipt?.state === "failed") {
+            return `- ${task.id} to @${task.to}: failed — ${task.delivery?.error ?? task.receipt?.error ?? "provider delivery failed"}`;
+          }
+          if (state === "uncertain" || task.receipt?.state === "uncertain") {
+            return `- ${task.id} to @${task.to}: delivery is unconfirmed — ${task.delivery?.error ?? task.receipt?.error ?? "inspect status before retrying"}`;
+          }
+          if (task.approval === "pending") return `- ${task.id} to @${task.to}: waiting for owner approval`;
+          if (state === "sending") return `- ${task.id} to @${task.to}: provider dispatch is in progress`;
+          if (task.deliveredAt) return `- ${task.id} to @${task.to}: received; awaiting the teammate's reply`;
+          return `- ${task.id} to @${task.to}: queued; recipient receipt is not confirmed yet`;
+        });
+        return `No new teammate reply arrived during this wait. Current outgoing teammate status:\n${lines.join("\n")}`;
+      };
       for (;;) {
+        const outgoing = outgoingTasks();
+        const results = renderResultsInjection(outgoing, identity.handle, { includeTaskIds: true });
         const cursor = deps.store.cursorFor(handle, cursorSession);
         const queuedTasks = (inRoom(identity)
           ? deps.store.tasksFor(handle)
@@ -1008,7 +1171,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       // silently returning only the first item, and retain ids so a provider
       // can report the exact work item. Freshness/retirement/delivery fences
       // still prevent historical task records from leaking back in.
-      const injection = renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
+        const injection = requestedTaskId
+          ? { text: "", includedIds: [] as string[], newCursor: cursor, omitted: 0 }
+          : renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
           let delivered = injection;
           if (!inRoom(identity)) {
@@ -1024,7 +1189,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
             const claimedTasks = authorizedTasks.filter((task) => claimedSet.has(task.id));
             delivered = renderInboxInjection(claimedTasks, -1, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
             if (!delivered.text) {
-              if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
+              if (Date.now() >= deadline) {
+                if (results.text) {
+                  await markOutgoingResultsShown(results.ids);
+                  return { content: [{ type: "text" as const, text: results.text }] };
+                }
+                return { content: [{ type: "text" as const, text: outgoingWaitStatus(outgoing) }] };
+              }
               continue;
             }
           }
@@ -1039,9 +1210,15 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
               deps.store.setCursor(handle, cursorSession, delivered.newCursor);
             }
           }
-          return { content: [{ type: "text" as const, text: delivered.text + (stageNotice ? `\n\n${stageNotice}` : "") }] };
+          await markOutgoingResultsShown(results.ids);
+          const teammateResults = results.text ? `\n\n${results.text}` : "";
+          return { content: [{ type: "text" as const, text: delivered.text + teammateResults + (stageNotice ? `\n\n${stageNotice}` : "") }] };
         }
-        if (!inRoom(identity)) {
+        if (results.text) {
+          await markOutgoingResultsShown(results.ids);
+          return { content: [{ type: "text" as const, text: results.text }] };
+        }
+        if (!inRoom(identity) && !requestedTaskId) {
           const uncertain = queuedTasks.filter((task) => !task.resultSummary
             && (task.receipt?.state === "uncertain" || task.delivery?.state === "uncertain")
             && (!task.targetSession || task.targetSession === identity.sessionId)
@@ -1069,7 +1246,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
             return { content: [{ type: "text" as const, text: `Inbox is empty for new messages. This session already has open work that was presented earlier; do not claim there is no task. Report the current outcome with m9r_result:\n${lines.join("\n")}` }] };
           }
         }
-        if (Date.now() >= deadline) return { content: [{ type: "text" as const, text: "Inbox is empty." }] };
+        if (Date.now() >= deadline) {
+          return { content: [{ type: "text" as const, text: outgoingWaitStatus(outgoing) }] };
+        }
         // Tightened from 300ms: this loop only re-reads the local store (cheap,
         // bounded arrays), so a shorter interval lowers delivered-task latency
         // without adding meaningful load. True push delivery (no poll at all)
@@ -1125,8 +1304,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
       }
       return { content: [{ type: "text", text: report.status === "incomplete"
-        ? "Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed."
-        : "Recorded result. Result recorded and delivered to the sender's M9R conversation." }] };
+        ? inRoom(identity)
+          ? "Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed."
+          : "Recorded incomplete outcome and preserved remaining work for an M9R continuation. The sender can retrieve the blocker with m9r_inbox. The task is not marked completed."
+        : inRoom(identity)
+          ? "Recorded result. M9R will deliver it to the sender's room."
+          : "Recorded result. The sending session can retrieve it with m9r_inbox." }] };
     },
   );
 

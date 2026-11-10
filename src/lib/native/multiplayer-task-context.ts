@@ -183,6 +183,9 @@ export interface TaskContextStore {
   claimAssignment(assignment: TaskAssignment):
     | { readonly ok: true; readonly context: TaskContext; readonly duplicate: boolean }
     | { readonly ok: false; readonly code: "invalid" | "conflict" | "terminal"; readonly error: string; readonly context: TaskContext };
+  completeAssignment(assignmentId: string, at?: number):
+    | { readonly ok: true; readonly context: TaskContext; readonly duplicate: boolean }
+    | { readonly ok: false; readonly code: "missing" | "terminal"; readonly error: string; readonly context: TaskContext };
   releaseAssignment(assignmentId: string, at?: number): TaskContext;
 }
 
@@ -194,6 +197,8 @@ export interface CreateTaskContextInput {
   readonly allowAdvance?: boolean;
   readonly allowSubmit?: boolean;
   readonly participants: readonly TaskParticipant[];
+  /** Previously persisted state; correlation must match the creation inputs exactly. */
+  readonly initial?: TaskContext;
   readonly now?: number;
 }
 
@@ -216,24 +221,29 @@ function update(context: TaskContext, patch: Partial<TaskContext>, at: number): 
  */
 export function createTaskContext(input: CreateTaskContextInput): TaskContextStore {
   const at = input.now ?? Date.now();
-  let context = parseContext({
-    taskId: input.taskId,
-    conversationId: input.conversationId,
-    runId: input.runId,
-    state: "active",
-    intentMode: input.intentMode ?? "prepare",
-    allowAdvance: input.allowAdvance ?? false,
-    allowSubmit: input.allowSubmit ?? false,
-    planRevision: 0,
-    participants: input.participants,
-    assignments: [],
-    observations: [],
-    artifacts: [],
-    pendingDecisions: [],
-    progress: { noProgressStreak: 0 },
-    createdAt: at,
-    updatedAt: at,
-  });
+  let context = input.initial ? parseContext(input.initial) : parseContext({
+      taskId: input.taskId,
+      conversationId: input.conversationId,
+      runId: input.runId,
+      state: "active",
+      intentMode: input.intentMode ?? "prepare",
+      allowAdvance: input.allowAdvance ?? false,
+      allowSubmit: input.allowSubmit ?? false,
+      planRevision: 0,
+      participants: input.participants,
+      assignments: [],
+      observations: [],
+      artifacts: [],
+      pendingDecisions: [],
+      progress: { noProgressStreak: 0 },
+      createdAt: at,
+      updatedAt: at,
+    });
+  if (context.taskId !== input.taskId || context.conversationId !== input.conversationId || context.runId !== input.runId
+    || JSON.stringify([...context.participants].sort((left, right) => left.agentId.localeCompare(right.agentId)))
+      !== JSON.stringify([...input.participants].sort((left, right) => left.agentId.localeCompare(right.agentId)))) {
+    throw new Error("Persisted M9R task state does not match this task, conversation, run, or participant roster.");
+  }
 
   const terminal = () => context.state === "completed" || context.state === "canceled";
   const transition = (state: TaskState, timestamp: number, patch: Partial<TaskContext> = {}) => {
@@ -310,7 +320,10 @@ export function createTaskContext(input: CreateTaskContextInput): TaskContextSto
       }
       if (terminal()) return { ok: false, code: "terminal", error: "A terminal task cannot record progress.", context: clone(context) };
       const prior = context.progress.lastWitness;
-      const duplicate = prior?.stateFingerprint === witness.stateFingerprint && prior.kind === witness.kind;
+      // The fingerprint represents observed task state. A caller changing the
+      // descriptive kind must not reset a no-progress streak without a state
+      // change.
+      const duplicate = prior?.stateFingerprint === witness.stateFingerprint;
       const streak = duplicate ? context.progress.noProgressStreak + 1 : 0;
       const waiting = streak >= 3;
       context = update(context, {
@@ -342,16 +355,34 @@ export function createTaskContext(input: CreateTaskContextInput): TaskContextSto
       }
       const existing = context.assignments.find((item) => item.assignmentId === assignment.assignmentId);
       if (existing) {
-        const same = JSON.stringify(existing) === JSON.stringify(assignment);
+        const same = existing.assignmentId === assignment.assignmentId
+          && existing.workKey === assignment.workKey
+          && existing.agentId === assignment.agentId
+          && existing.planRevision === assignment.planRevision
+          && existing.status === assignment.status
+          && existing.summary === assignment.summary;
         return same
           ? { ok: true, context: clone(context), duplicate: true }
           : { ok: false, code: "conflict", error: "Assignment ID is already bound to different work.", context: clone(context) };
       }
       const activeSameWork = context.assignments.find((item) => item.workKey === assignment.workKey && ["proposed", "claimed"].includes(item.status));
-      if (activeSameWork && activeSameWork.agentId !== assignment.agentId) {
-        return { ok: false, code: "conflict", error: `Work ${assignment.workKey} is already claimed by ${activeSameWork.agentId}.`, context: clone(context) };
+      if (activeSameWork) {
+        return { ok: false, code: "conflict", error: `Work ${assignment.workKey} is already claimed by ${activeSameWork.agentId} as ${activeSameWork.assignmentId}.`, context: clone(context) };
       }
       context = update(context, { assignments: [...context.assignments, assignment].slice(-128) }, assignment.updatedAt);
+      return { ok: true, context: clone(context), duplicate: false };
+    },
+
+    completeAssignment(assignmentId, timestamp = Date.now()) {
+      if (terminal()) return { ok: false, code: "terminal", error: "A terminal task cannot complete another assignment.", context: clone(context) };
+      const existing = context.assignments.find((item) => item.assignmentId === assignmentId);
+      if (!existing) return { ok: false, code: "missing", error: "No shared-work assignment matches this ID.", context: clone(context) };
+      if (existing.status === "completed") return { ok: true, context: clone(context), duplicate: true };
+      if (existing.status !== "claimed") return { ok: false, code: "missing", error: "Only a claimed shared-work assignment can be completed.", context: clone(context) };
+      const assignments = context.assignments.map((item) => item.assignmentId === assignmentId
+        ? { ...item, status: "completed" as const, updatedAt: Math.max(item.updatedAt, timestamp) }
+        : item);
+      context = update(context, { assignments }, timestamp);
       return { ok: true, context: clone(context), duplicate: false };
     },
 

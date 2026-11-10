@@ -878,7 +878,9 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       if (candidate.approval === "pending") deps.store.setApproval?.(candidate.id, "approved");
       const fromContext = candidate.fromSession ? [...contexts.values()].find((context) => context.sessionId === candidate.fromSession) : undefined;
       if (!fromContext) continue;
-      const prompt = `@${fromContext.profile.handle} messaged you (${candidate.id}): ${candidate.goal}\n\nAnswer with m9r_result for ${candidate.id}, in a sentence or two, so @${fromContext.profile.handle} sees it right away.`;
+      const prompt = candidate.a2a
+        ? `@${fromContext.profile.handle} sent one message in M9R conversation ${candidate.a2a.conversationId} (${candidate.id}; message ${candidate.a2a.messageId}${candidate.a2a.replyToMessageId ? `, replying to ${candidate.a2a.replyToMessageId}` : ""}): ${candidate.goal}\n\nTreat this as one peer turn, not an invitation to keep a chat loop running. If it asks for work or a decision, do the requested part and answer once with m9r_result for ${candidate.id}. Do not poll or send a second message just to acknowledge. If continuing the shared task truly needs another peer turn, send one concise m9r_team_message with the same taskId and conversationId, replyToMessageId set to ${candidate.a2a.messageId}, and a progress witness showing what changed; otherwise continue your own work.`
+        : `@${fromContext.profile.handle} messaged you (${candidate.id}): ${candidate.goal}\n\nAnswer with m9r_result for ${candidate.id}, in a sentence or two, so @${fromContext.profile.handle} sees it right away. Do not poll or send a follow-up just to acknowledge.`;
       deliver(profile.handle, prompt, candidate.id);
     }
   }
