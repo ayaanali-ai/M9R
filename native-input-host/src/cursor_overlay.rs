@@ -20,7 +20,10 @@ use std::time::{Duration, Instant};
 
 pub const MARKER_SIZE: f32 = 30.0;
 const CHIP_OFFSET_SCALE: f32 = MARKER_SIZE / 46.0;
-const MOVE_ANIM_MS: f32 = 140.0;
+const MOVE_MIN_MS: f32 = 140.0;
+const MOVE_MAX_MS: f32 = 420.0;
+const MOVE_MS_PER_PIXEL: f32 = 0.20;
+const MOVE_CURVE_MAX_PX: f32 = 32.0;
 const EYE_BLINK_MIN_MS: u64 = 2000;
 const EYE_BLINK_MAX_MS: u64 = 5000;
 const BUBBLE_FADE_IN_MS: f32 = 220.0;
@@ -47,6 +50,9 @@ pub struct AgentState {
     pub target_y: f32,
     pub anim_from_x: f32,
     pub anim_from_y: f32,
+    pub anim_control_x: f32,
+    pub anim_control_y: f32,
+    pub anim_duration_ms: f32,
     pub anim_start: Instant,
     pub color: Rgb,
     pub dark: Rgb,
@@ -63,13 +69,48 @@ pub fn animated_position(agent: &AgentState, now: Instant) -> (f32, f32) {
         .saturating_duration_since(agent.anim_start)
         .as_secs_f32()
         * 1000.0;
-    if elapsed_ms >= MOVE_ANIM_MS {
+    if elapsed_ms >= agent.anim_duration_ms || agent.anim_duration_ms <= 0.0 {
         return (agent.target_x, agent.target_y);
     }
-    let t = ease_out_cubic((elapsed_ms / MOVE_ANIM_MS).clamp(0.0, 1.0));
+    let t = ease_out_cubic((elapsed_ms / agent.anim_duration_ms).clamp(0.0, 1.0));
+    let inverse = 1.0 - t;
     (
-        agent.anim_from_x + (agent.target_x - agent.anim_from_x) * t,
-        agent.anim_from_y + (agent.target_y - agent.anim_from_y) * t,
+        inverse * inverse * agent.anim_from_x
+            + 2.0 * inverse * t * agent.anim_control_x
+            + t * t * agent.target_x,
+        inverse * inverse * agent.anim_from_y
+            + 2.0 * inverse * t * agent.anim_control_y
+            + t * t * agent.target_y,
+    )
+}
+
+fn movement_profile(from_x: f32, from_y: f32, to_x: f32, to_y: f32) -> (f32, f32, f32) {
+    let dx = to_x - from_x;
+    let dy = to_y - from_y;
+    let distance = dx.hypot(dy);
+    let duration_ms =
+        (MOVE_MIN_MS + distance * MOVE_MS_PER_PIXEL).clamp(MOVE_MIN_MS, MOVE_MAX_MS);
+    if distance < 1.0 {
+        return ((from_x + to_x) * 0.5, (from_y + to_y) * 0.5, duration_ms);
+    }
+
+    // A shallow, deterministic quadratic arc keeps long moves from reading as
+    // a straight-line teleport while preserving the exact target endpoint.
+    // Choose the side from the target pair so repeat runs remain reproducible.
+    let side = if (to_x.round() as i32 ^ to_y.round() as i32) & 1 == 0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let curve = (distance * 0.055).min(MOVE_CURVE_MAX_PX) * side;
+    let midpoint_x = (from_x + to_x) * 0.5;
+    let midpoint_y = (from_y + to_y) * 0.5;
+    let perpendicular_x = -dy / distance;
+    let perpendicular_y = dx / distance;
+    (
+        midpoint_x + perpendicular_x * curve,
+        midpoint_y + perpendicular_y * curve,
+        duration_ms,
     )
 }
 
@@ -131,10 +172,15 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                 .entry(id)
                 .and_modify(|a| {
                     let (current_x, current_y) = animated_position(a, now);
+                    let (control_x, control_y, duration_ms) =
+                        movement_profile(current_x, current_y, x, y);
                     a.x = current_x;
                     a.y = current_y;
                     a.anim_from_x = current_x;
                     a.anim_from_y = current_y;
+                    a.anim_control_x = control_x;
+                    a.anim_control_y = control_y;
+                    a.anim_duration_ms = duration_ms;
                     a.target_x = x;
                     a.target_y = y;
                     a.anim_start = now;
@@ -149,6 +195,9 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                     target_y: y,
                     anim_from_x: x,
                     anim_from_y: y,
+                    anim_control_x: x,
+                    anim_control_y: y,
+                    anim_duration_ms: 0.0,
                     anim_start: now,
                     color,
                     dark,
@@ -1062,11 +1111,8 @@ pub mod win {
 
             let dib = create_dib(w, h);
             let mut renderer = Renderer::new().ok();
-            // 33ms (~30fps) under-sampled the 140ms ease-out-cubic move
-            // animation (MOVE_ANIM_MS) -- only ~4 redraws across its whole
-            // duration, visibly steppy rather than smooth. 16ms (~60fps)
-            // matches standard display refresh and the sampling rate the
-            // tween curve was designed to be seen at.
+            // 33ms (~30fps) under-sampled the eased move animation. 16ms
+            // (~60fps) keeps both short and distance-scaled paths smooth.
             SetTimer(Some(hwnd), 1, 16, None);
 
             // The reader owns only the presentation command pipe. EOF means
@@ -1212,6 +1258,7 @@ pub mod win {
                 x: 60.0, y: 40.0,
                 target_x: 60.0, target_y: 40.0,
                 anim_from_x: 60.0, anim_from_y: 40.0, anim_start: now,
+                anim_control_x: 60.0, anim_control_y: 40.0, anim_duration_ms: 0.0,
                 color: claude, dark: darken(claude, 0.62),
                 label: "Claude Code".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: None,
@@ -1224,6 +1271,7 @@ pub mod win {
                 x: 360.0, y: 50.0,
                 target_x: 360.0, target_y: 50.0,
                 anim_from_x: 360.0, anim_from_y: 50.0, anim_start: now,
+                anim_control_x: 360.0, anim_control_y: 50.0, anim_duration_ms: 0.0,
                 color: codex, dark: darken(codex, 0.62),
                 label: "Codex".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: None,
@@ -1241,6 +1289,7 @@ pub mod win {
                 x: 150.0, y: 220.0,
                 target_x: 150.0, target_y: 220.0,
                 anim_from_x: 150.0, anim_from_y: 220.0, anim_start: now,
+                anim_control_x: 150.0, anim_control_y: 220.0, anim_duration_ms: 0.0,
                 color: open, dark: darken(open, 0.62),
                 label: "OpenCode".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: Some(now + Duration::from_secs(5)),
@@ -1328,16 +1377,48 @@ mod movement_tests {
         let t1 = t0 + Duration::from_millis(10);
         upsert(&state, "a", 100.0, 0.0, t1);
 
-        let mid = t1 + Duration::from_millis((MOVE_ANIM_MS / 2.0) as u64);
+        let mid = t1 + Duration::from_millis(80);
         let guard = state.lock().unwrap();
         let (x, y) = animated_position(&guard["a"], mid);
         assert!(
             x > 0.0 && x < 100.0,
             "expected an in-flight x position, got {x}"
         );
-        assert_eq!(y, 0.0);
-        let (x, y) = animated_position(&guard["a"], t1 + Duration::from_millis(141));
+        assert!(y.abs() > 0.0 && y.abs() < 5.5, "expected a shallow in-flight arc, got {y}");
+        let (x, y) = animated_position(&guard["a"], t1 + Duration::from_millis(161));
         assert_eq!((x, y), (100.0, 0.0));
+    }
+
+    #[test]
+    fn long_moves_get_a_longer_curved_path_and_still_land_on_target() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let t0 = Instant::now();
+        upsert(&state, "a", 0.0, 0.0, t0);
+        let t1 = t0 + Duration::from_millis(1);
+        upsert(&state, "a", 1000.0, 0.0, t1);
+
+        let guard = state.lock().unwrap();
+        let agent = &guard["a"];
+        assert_eq!(agent.anim_duration_ms, 340.0);
+        assert!(
+            agent.anim_control_y.abs() > 1.0,
+            "long movement should use a shallow arc"
+        );
+        let middle = animated_position(agent, t1 + Duration::from_millis(170));
+        assert!(middle.0 > 0.0 && middle.0 < 1000.0);
+        assert!(
+            middle.1.abs() > 0.0,
+            "movement should follow an eased arc instead of teleporting"
+        );
+        assert_eq!(animated_position(agent, t1 + Duration::from_millis(341)), (1000.0, 0.0));
+    }
+
+    #[test]
+    fn distance_scales_duration_without_exceeding_the_safety_cap() {
+        let short = movement_profile(0.0, 0.0, 20.0, 0.0).2;
+        let long = movement_profile(0.0, 0.0, 10_000.0, 0.0).2;
+        assert!(short > MOVE_MIN_MS && short < MOVE_MIN_MS + 10.0);
+        assert_eq!(long, MOVE_MAX_MS);
     }
 
     #[test]
