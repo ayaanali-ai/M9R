@@ -73,6 +73,8 @@ function nativeHost(state: { popups: Array<{ pid: number; windowId: string }>; f
         return { ok: true, control: { label: hit.label, pid: POPUP.pid, windowPid: POPUP.pid, windowId: POPUP.windowId, rect: hit.rect,
           invoked: request.op === "invokePointControl", confirmed: request.op === "invokePointControl" } };
       }
+      case "postClickToWindow":
+        return { ok: true, dispatchState: "dispatched", route: "PostMessageW", target: "exact-window" };
       case "bringToForeground": case "sendClick": case "sendKeyCombo": case "sendText": case "sendScroll": case "sendDrag":
         return { ok: true };
       default:
@@ -142,7 +144,7 @@ test("a popup click on an app-bound owner-preview stage reaches the app's owned 
   assert.ok(manager.list().find((stage) => stage.name === stageName)?.anchor, "precondition: the stage is bound to the app window");
   const result = await act({ kind: "click", view: "popup", x: saveLocal.x, y: saveLocal.y }) as { outcome?: { status?: string } };
   assert.ok(result, "the popup click resolved instead of throwing the 'bound to an app window' refusal");
-  const clicks = calls.filter((call) => call.op === "sendClick");
+  const clicks = calls.filter((call) => call.op === "postClickToWindow");
   assert.equal(clicks.length, 1, "exactly one click was dispatched");
   assert.equal(String(clicks[0]!.windowId), POPUP.windowId, "the click went to the owned popup HWND, not the parent app window");
   assert.deepEqual({ x: clicks[0]!.x, y: clicks[0]!.y }, { x: SAVE_BUTTON.rect.x + 40, y: SAVE_BUTTON.rect.y + 14 },
@@ -164,7 +166,7 @@ test("a popup click after a desktop observation re-binds the selected app and re
   assert.equal(manager.list().find((stage) => stage.name === stageName)?.anchor, null, "precondition: the desktop observation detached the app binding");
   await act({ kind: "click", view: "popup", x: saveLocal.x, y: saveLocal.y });
   assert.ok(manager.list().find((stage) => stage.name === stageName)?.anchor, "the selected app was re-bound for popup input");
-  const clicks = calls.filter((call) => call.op === "sendClick");
+  const clicks = calls.filter((call) => call.op === "postClickToWindow");
   assert.equal(clicks.length, 1);
   assert.equal(String(clicks[0]!.windowId), POPUP.windowId);
 }));
