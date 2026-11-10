@@ -897,62 +897,6 @@ function stageCapture(capture: { dataUrl: string; width: number; height: number;
     capturedAt: "capturedAt" in capture && typeof capture.capturedAt === "string" ? capture.capturedAt : now().toISOString() };
 }
 
-function cursorScreenPoint(x: number, y: number, frame: CuaStageWindowFrame): { x: number; y: number } {
-  const bounds = frame.windowBounds;
-  if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
-    || bounds.width <= 0 || bounds.height <= 0 || frame.width <= 0 || frame.height <= 0) {
-    throw new Error("Cua Driver did not provide valid screen bounds for this stage window.");
-  }
-  // Stage coordinates are pixels in the native window screenshot. Expose the
-  // corresponding screen location separately for evidence; the Cua cursor API
-  // itself receives coordinates in Cua's own window screenshot space.
-  return {
-    x: bounds.x + x * bounds.width / frame.width,
-    y: bounds.y + y * bounds.height / frame.height,
-  };
-}
-
-interface CuaWindowCursorTarget {
-  x: number;
-  y: number;
-  screenX: number;
-  screenY: number;
-  width: number;
-  height: number;
-}
-
-function cursorPointInCuaWindow(screenPoint: { x: number; y: number }, state: Awaited<ReturnType<CuaDriverLike["getWindowState"]>>,
-  image: { width: number; height: number }): CuaWindowCursorTarget {
-  const bounds = state.windowBounds;
-  if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
-    || bounds.width <= 0 || bounds.height <= 0) {
-    throw new Error("Cua Driver did not return valid bounds for its window screenshot; cursor alignment is unknown.");
-  }
-  const x = Math.floor((screenPoint.x - bounds.x + 0.5) * image.width / bounds.width);
-  const y = Math.floor((screenPoint.y - bounds.y + 0.5) * image.height / bounds.height);
-  if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0 || x >= image.width || y >= image.height) {
-    throw new Error("The native target point is outside Cua Driver's current window screenshot; cursor alignment is unknown.");
-  }
-  return { x, y, screenX: screenPoint.x, screenY: screenPoint.y, width: image.width, height: image.height };
-}
-
-function cursorStateFromResult(result: { isError: boolean; structuredJson?: string; rawJson?: string }): { enabled: boolean; x?: number; y?: number } {
-  resultError(result, "Cua Driver could not read the stage cursor state.");
-  const encoded = result.structuredJson ?? result.rawJson;
-  if (!encoded) throw new Error("Cua Driver returned no stage cursor state.");
-  let parsed: unknown;
-  try { parsed = JSON.parse(encoded); } catch { throw new Error("Cua Driver returned malformed stage cursor state."); }
-  if (!parsed || typeof parsed !== "object") throw new Error("Cua Driver returned malformed stage cursor state.");
-  const value = parsed as { enabled?: unknown; position?: { x?: unknown; y?: unknown } | null };
-  const x = value.position?.x;
-  const y = value.position?.y;
-  return {
-    enabled: value.enabled === true,
-    ...(typeof x === "number" && Number.isFinite(x) ? { x } : {}),
-    ...(typeof y === "number" && Number.isFinite(y) ? { y } : {}),
-  };
-}
-
 function findDesktopCaptureId(value: unknown): string | undefined {
   const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
   let visited = 0;
@@ -1004,9 +948,9 @@ function desktopTargetAt(result: ToolResult, x: number, y: number): CuaStageTarg
 export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const manager = deps.manager ?? createWindowsDesktopStageManager(deps.stage);
   const timingContext = new AsyncLocalStorage<{ stageName: string; afterDispatch: boolean }>();
-  // The Cua package is only the visual cursor overlay. Perception and input
-  // belong to M9R's native Windows stage host; there is no compatibility route
-  // that can silently switch to a second engine after a native failure.
+  // M9R's Direct2D host is the only visible agent cursor. The Cua package
+  // remains an action/perception adapter; its separate cursor is never started
+  // or moved, and a native failure never switches to a second cursor engine.
 
   /**
    * Build one native sender for a registered stage. Semantic UIA operations
@@ -1788,7 +1732,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return presentation.outcome.status === "completed";
   }
 
-  async function moveOwnerCursor(_runtime: CuaRuntime | undefined, session: AgentCursorSession, point: ResolvedDesktopPoint,
+  async function moveOwnerCursor(session: AgentCursorSession, point: ResolvedDesktopPoint,
     requireProof = false): Promise<CuaStageCursorProof> {
     const screenPoint = await desktopPointToCurrentScreen(point);
     const visible = await presentM9rCursor(session, session.key, screenPoint, requireProof, "scope=owner-desktop");
@@ -1796,7 +1740,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       enabled: visible, visible };
   }
 
-  async function moveAndVerifyCursor(input: { driver?: CuaDriverLike; sdk?: CuaSdk; session: string; pid: number; windowId: bigint },
+  async function moveAndVerifyCursor(input: { session: string; pid: number; windowId: bigint },
     x: number, y: number, frame: CuaStageWindowFrame, requireProof = false): Promise<CuaStageCursorProof> {
     if (![x, y, frame.width, frame.height].every(Number.isFinite) || frame.width < 1 || frame.height < 1
       || x < 0 || y < 0 || x >= frame.width || y >= frame.height) {
@@ -2135,7 +2079,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
       const captured = await captureWindow();
       if (x >= captured.width || y >= captured.height) throw new Error("Cursor coordinates must fall inside the current stage window snapshot.");
-      const cursor = await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, captured, true);
+      const cursor = await moveAndVerifyCursor({ session, pid, windowId }, x, y, captured, true);
       return {
         capture: stageCapture(captured, now),
         cursor,
@@ -2319,7 +2263,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       await inspectOwnerDesktop(name, identity);
       // The overlay is presentation only. A missing/late cursor must not
       // prevent a correctly resolved native click from being dispatched.
-      const cursor = await moveOwnerCursor(runtime, session, point, true);
+      const cursor = await moveOwnerCursor(session, point, true);
       await inspectOwnerDesktop(name, identity);
       return { capture: stageCapture(capture, now), cursor };
     });
@@ -2334,7 +2278,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       forgetDesktopInputTarget(name, identity);
       const point = await resolveOwnerDesktopPoint(runtime, session, x, y, capture, undefined, false);
       await inspectOwnerDesktop(name, identity);
-      await moveOwnerCursor(runtime, session, point);
+      await moveOwnerCursor(session, point);
       await inspectOwnerDesktop(name, identity);
       if (point.shellControl) {
         if (options.button === "right" || options.button === "middle" || (options.count ?? 1) !== 1) throw new DesktopInputNotDispatchedError("This shell control supports accessibility activation, not a synthetic non-left click.");
@@ -2436,7 +2380,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           throw new DesktopInputNotDispatchedError("The field at the given point could not be confirmed as the same one you observed; no text was sent.");
         }
         await inspectOwnerDesktop(name, identity);
-        await moveOwnerCursor(runtime, session, point);
+        await moveOwnerCursor(session, point);
         await inspectOwnerDesktop(name, identity);
         forgetDesktopInputTarget(name, identity);
         return nativeReplaceTextAtScreenPoint(point.target.pid, point.target.windowId, point.screenPoint.x, point.screenPoint.y, text,
@@ -2456,7 +2400,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
             throw new DesktopInputNotDispatchedError("The selected text field moved to another application window; no keyboard input was sent.");
           }
           await inspectOwnerDesktop(name, identity);
-          await moveOwnerCursor(runtime, session, {
+          await moveOwnerCursor(session, {
             ...point,
             desktopPoint: { x: selected.field.x, y: selected.field.y },
             screenPoint: { x: selected.field.x, y: selected.field.y },
@@ -2483,7 +2427,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       forgetDesktopInputTarget(name, identity);
       const point = await resolveOwnerDesktopPoint(undefined, session, x, y, capture);
       await inspectOwnerDesktop(name, identity);
-      await moveOwnerCursor(runtime, session, point);
+      await moveOwnerCursor(session, point);
       await inspectOwnerDesktop(name, identity);
       const amount = Math.min(50, Math.max(1, Math.round(options.amount ?? 3)));
       const outcome = await driverInputAction("scroll", {
@@ -2512,7 +2456,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       forgetDesktopInputTarget(name, identity);
       const point = await resolveOwnerDesktopPoint(undefined, session, x, y, capture);
       await inspectOwnerDesktop(name, identity);
-      await moveOwnerCursor(runtime, session, point);
+      await moveOwnerCursor(session, point);
       await inspectOwnerDesktop(name, identity);
       const scrollScreenPoint = point.screenPoint;
       const scrollAmount = (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount;
@@ -2542,7 +2486,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const start = await resolveOwnerDesktopPoint(undefined, session, fromX, fromY, capture);
       const end = await resolveOwnerDesktopPoint(undefined, session, toX, toY, capture);
       await inspectOwnerDesktop(name, identity);
-      await moveOwnerCursor(runtime, session, start);
+      await moveOwnerCursor(session, start);
       await inspectOwnerDesktop(name, identity);
       const outcome = await driverInputAction("drag", {
         pid: start.target.pid, window_id: Number(start.target.windowId),
@@ -2558,7 +2502,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           }),
       });
       await inspectOwnerDesktop(name, identity);
-      await moveOwnerCursor(runtime, session, end);
+      await moveOwnerCursor(session, end);
       return outcome;
     });
     invalidateDesktopCaptures();
@@ -2704,7 +2648,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
       const before = await captureFrame();
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the current stage window snapshot.");
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
+      if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, x, y, before);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
       // A coordinate click means the observed point, not the smallest
       // accessibility rectangle that overlaps it. Overlapping UIA siblings
@@ -2781,7 +2725,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         : undefined;
       if (cursorIdentity && selected?.field) {
         const point = desktopPointInWindow(selected.field, before);
-        await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, before);
+        await moveAndVerifyCursor({ session, pid, windowId }, point.x, point.y, before);
       }
       const outcome = await driverInputAction("press_key", {
         pid, window_id: Number(windowId), key, session,
@@ -2804,7 +2748,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         : undefined;
       if (cursorIdentity && selected?.field) {
         const point = desktopPointInWindow(selected.field, before);
-        await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, before);
+        await moveAndVerifyCursor({ session, pid, windowId }, point.x, point.y, before);
       }
       const outcome = await driverInputAction("hotkey", {
         pid, window_id: Number(windowId), keys, session,
@@ -3417,7 +3361,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           || (options.expectedLabel !== undefined && element.label !== options.expectedLabel)) {
           throw new DesktopInputNotDispatchedError("The field at the given point could not be confirmed as the same one you observed; no text was sent.");
         }
-        if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, options.x, options.y, before);
+        if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, options.x, options.y, before);
         const selected = await elementByToken(element.elementToken, { role: element.role, label: element.label });
         if (!selected?.nativeElement) {
           throw new DesktopInputNotDispatchedError("The observed text field changed before replacement; no text was sent. Re-observe the field and retry.", "target-identity");
@@ -3454,7 +3398,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         : undefined;
       if (cursorIdentity && selected?.field) {
         const point = desktopPointInWindow(selected.field, before);
-        await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, point.x, point.y, before);
+        await moveAndVerifyCursor({ session, pid, windowId }, point.x, point.y, before);
       }
       const outcome = await deliverTextToExactWindow({ session, pid, windowId,
         text, selected, allowForegroundEscalation: options.allowForegroundEscalation,
@@ -3475,7 +3419,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const y = yInput ?? Math.floor(before.height / 2);
       const amount = Math.min(50, Math.max(1, Math.round(options.amount ?? 3)));
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
+      if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, x, y, before);
       const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
       const outcome = await driverInputAction("scroll", {
         pid, window_id: Number(windowId), x, y,
@@ -3497,7 +3441,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       if (!validPoint(fromX, fromY, before) || !validPoint(toX, toY, before)) {
         throw new DesktopInputNotDispatchedError("Both drag points must fall inside the current stage window snapshot.");
       }
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, fromX, fromY, before);
+      if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, fromX, fromY, before);
       const outcome = await driverInputAction("drag", {
         pid, window_id: Number(windowId), from_x: fromX, from_y: fromY, to_x: toX, to_y: toY,
         duration_ms: options.durationMs ?? 500, steps: 10, session,
@@ -3512,7 +3456,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // The native pointer ends at the drop point. Keep the presentation cursor
       // there as well so a successful drag does not leave the agent marker at
       // its old start position after the owner's physical pointer is restored.
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, toX, toY, before);
+      if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, toX, toY, before);
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -3733,7 +3677,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const x = xInput ?? Math.floor(before.width / 2);
       const y = yInput ?? Math.floor(before.height / 2);
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Scroll coordinates must fall inside the current stage window snapshot.");
-      if (cursorIdentity) await moveAndVerifyCursor({ driver, sdk, session, pid, windowId }, x, y, before);
+      if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, x, y, before);
       const screen = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
       const signedAmount = (scroll.direction === "up" || scroll.direction === "right") ? scroll.amount : -scroll.amount;
       const axis = (scroll.direction === "left" || scroll.direction === "right") ? "horizontal" : "vertical";
