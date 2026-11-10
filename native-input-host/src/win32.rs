@@ -212,6 +212,50 @@ pub enum KeySpec {
     Unicode(u16),
 }
 
+const VK_RETURN: u16 = 0x0D;
+
+/// Treat all conventional newline spellings as one logical line break. The
+/// foreground path turns that break into an actual Return key; the WM_CHAR
+/// path maps it to the carriage return expected by classic multiline EDIT
+/// controls. Keeping this normalization at the native text boundary makes
+/// callers provider- and application-neutral.
+fn normalize_text_line_endings(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                normalized.push('\n');
+            }
+            '\n' => normalized.push('\n'),
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+fn foreground_text_key(unit: u16) -> KeySpec {
+    if unit == b'\n' as u16 {
+        KeySpec::Virtual {
+            vk: VK_RETURN,
+            extended: false,
+        }
+    } else {
+        KeySpec::Unicode(unit)
+    }
+}
+
+fn background_text_char(unit: u16) -> u16 {
+    if unit == b'\n' as u16 {
+        b'\r' as u16
+    } else {
+        unit
+    }
+}
+
 /// Maps a key name as used throughout M9R's task/action layer to a virtual-key
 /// code and whether it is one of the "extended" keys (the navigation cluster,
 /// not their numpad counterparts) `SendInput` needs flagged. Single
@@ -567,15 +611,12 @@ pub fn send_key_combo(keys: &[KeySpec]) -> Result<(), InputDispatchError> {
 /// for any character the target control can render, not just what the
 /// system's active keyboard layout can produce.
 pub fn send_unicode_text(text: &str) -> Result<(), InputDispatchError> {
-    let units = text.encode_utf16().collect::<Vec<_>>();
+    let normalized = normalize_text_line_endings(text);
+    let units = normalized.encode_utf16().collect::<Vec<_>>();
     if units.is_empty() { return Ok(()); }
     let mut inputs = Vec::with_capacity(units.len().saturating_mul(2));
     for unit in units {
-        let key = if unit == b'\n' as u16 {
-            KeySpec::Virtual { vk: 0x0D, extended: false }
-        } else {
-            KeySpec::Unicode(unit)
-        };
+        let key = foreground_text_key(unit);
         inputs.push(keyboard_input(key, false));
         inputs.push(keyboard_input(key, true));
     }
@@ -622,12 +663,9 @@ pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatc
         ));
     }
     let mut input_sent = false;
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalize_text_line_endings(text);
     for unit in normalized.encode_utf16() {
-        // Standard Win32 text controls represent Enter as carriage return;
-        // normalize platform line endings before queueing so LF-only task text
-        // becomes a real multiline edit instead of a literal line-feed event.
-        let unit = if unit == b'\n' as u16 { b'\r' as u16 } else { unit };
+        let unit = background_text_char(unit);
         if unsafe { PostMessageW(window, WM_CHAR, unit as usize, 0) } == 0 {
             return Err(dispatch_error(
                 "Windows declined to queue a WM_CHAR message for the target window",
@@ -637,6 +675,48 @@ pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatc
         input_sent = true;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod text_input_tests {
+    use super::{
+        background_text_char, foreground_text_key, normalize_text_line_endings, KeySpec, VK_RETURN,
+    };
+
+    #[test]
+    fn normalizes_crlf_cr_and_lf_to_one_line_break_each() {
+        assert_eq!(
+            normalize_text_line_endings("one\r\ntwo\rthree\nfour"),
+            "one\ntwo\nthree\nfour"
+        );
+    }
+
+    #[test]
+    fn foreground_text_uses_return_for_a_line_break() {
+        assert!(matches!(
+            foreground_text_key(b'\n' as u16),
+            KeySpec::Virtual {
+                vk: VK_RETURN,
+                extended: false
+            }
+        ));
+        assert!(matches!(
+            foreground_text_key(b'x' as u16),
+            KeySpec::Unicode(unit) if unit == b'x' as u16
+        ));
+    }
+
+    #[test]
+    fn background_edit_text_uses_carriage_return_for_a_line_break() {
+        assert_eq!(
+            background_text_char(b'\n' as u16),
+            b'\r' as u16
+        );
+        assert_eq!(
+            background_text_char(b'x' as u16),
+            b'x' as u16
+        );
+    }
 }
 
 /// Resolves the first descendant window, in enumeration order, whose real

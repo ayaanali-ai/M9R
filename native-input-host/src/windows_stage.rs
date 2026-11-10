@@ -17,6 +17,14 @@ fn is_m9r_cursor_overlay_class(class_name: &str) -> bool {
     class_name.eq_ignore_ascii_case("M9RCursorOverlay")
 }
 
+fn valid_input_text(text: &str) -> bool {
+    !text.is_empty()
+        && text.chars().count() <= 5_000
+        && !text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+}
+
 /// The real pointer position and explicit restore primitive used by the broker
 /// when a task elects to return the user's pointer after native input.
 #[cfg(windows)]
@@ -1921,23 +1929,20 @@ mod platform {
     /// confirming the target is the real foreground window.
     pub(super) fn send_text(value: &serde_json::Value) -> Result<(), crate::InputDispatchError> {
         let (pid, handle) = super::parse_window_identity(value)?;
-        require_real_foreground(pid, handle)?;
         let text = value
             .get("text")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| crate::InputDispatchError::not_dispatched("text must be a string"))?;
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        if normalized.is_empty()
-            || normalized.chars().count() > 5_000
-            || normalized
-                .chars()
-                .any(|c| c.is_control() && c != '\n' && c != '\t')
-        {
+        if !super::valid_input_text(text) {
             return Err(crate::InputDispatchError::not_dispatched(
                 "invalid input text",
             ));
         }
-        crate::win32::send_unicode_text(&normalized)
+        // Validate the whole payload before any foreground check or other
+        // window side effect, so malformed text cannot steal focus and then
+        // fail without dispatching input.
+        require_real_foreground(pid, handle)?;
+        crate::win32::send_unicode_text(text)
     }
 
     /// Types literal text into one specific window via `WM_CHAR` messages
@@ -1956,18 +1961,12 @@ mod platform {
             .get("text")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| crate::InputDispatchError::not_dispatched("text must be a string"))?;
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        if normalized.is_empty()
-            || normalized.chars().count() > 5_000
-            || normalized
-                .chars()
-                .any(|c| c.is_control() && c != '\n' && c != '\t')
-        {
+        if !super::valid_input_text(text) {
             return Err(crate::InputDispatchError::not_dispatched(
                 "invalid input text",
             ));
         }
-        crate::win32::post_text_to_window(window as usize, &normalized)
+        crate::win32::post_text_to_window(window as usize, text)
     }
 
     pub(super) fn post_close_window(
@@ -2022,6 +2021,13 @@ mod tests {
         assert!(super::is_m9r_cursor_overlay_class("M9RCursorOverlay"));
         assert!(super::is_m9r_cursor_overlay_class("m9rcursoroverlay"));
         assert!(!super::is_m9r_cursor_overlay_class("Notepad"));
+    }
+    #[test]
+    fn multiline_text_accepts_common_newline_forms_but_rejects_other_controls() {
+        assert!(super::valid_input_text("first\r\nsecond\rthird\nfourth\tcolumn"));
+        assert!(!super::valid_input_text("text\u{0001}control"));
+        assert!(!super::valid_input_text(""));
+        assert!(!super::valid_input_text(&"x".repeat(5_001)));
     }
     use super::handle_desktop_stage_request;
     use serde_json::json;
@@ -2398,6 +2404,65 @@ mod tests {
         assert_eq!(cursor_after.x, cursor_before.x);
         assert_eq!(cursor_after.y, cursor_before.y);
         unsafe { DestroyWindow(window) }.expect("destroying the hidden test window");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn send_text_to_window_preserves_lines_in_a_real_multiline_edit() {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, GetWindowTextW,
+            GetWindowThreadProcessId, PeekMessageW, TranslateMessage, ES_MULTILINE, MSG,
+            PM_REMOVE, WS_OVERLAPPED,
+        };
+
+        let window = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("Edit"),
+                PCWSTR::null(),
+                WS_OVERLAPPED
+                    | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(
+                        ES_MULTILINE as u32,
+                    ),
+                0,
+                0,
+                240,
+                120,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("creating a multiline EDIT control for the line-break test");
+        let handle = window.0 as usize;
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+
+        let response = handle_desktop_stage_request(&json!({
+            "op": "sendTextToWindow",
+            "pid": pid,
+            "windowId": format!("{handle}"),
+            "text": "line one\r\nline two\rline three\nline four",
+        }));
+        assert_eq!(response["ok"], true, "{response}");
+
+        let mut message = MSG::default();
+        while unsafe { PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE) }.as_bool() {
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+
+        let mut buffer = [0u16; 128];
+        let written = unsafe { GetWindowTextW(window, &mut buffer) };
+        let actual = String::from_utf16_lossy(&buffer[..written as usize]);
+        let normalized = actual.replace("\r\n", "\n");
+        unsafe { DestroyWindow(window) }.ok();
+
+        assert_eq!(normalized, "line one\nline two\nline three\nline four");
     }
 
     #[test]

@@ -3616,21 +3616,18 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementByToken }) => {
       assertNotAbortedBeforeInput(options.signal);
       const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
-      if (!selected?.element.elementToken || selected.element.enabled === false
-        || (!selected.nativeElement && !selected.element.actions?.includes("set_value"))) {
-        throw new DesktopInputNotDispatchedError("The accessibility element is stale, disabled, could not be confirmed as the same control, or does not support text replacement; no text was sent.");
-      }
-      const screenPoint = elementScreenPoint(selected.screenRect);
-      if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
-      if (selected.nativeElement && typeof manager.invokeWindowElement === "function") {
+      const identityUsable = Boolean(selected?.element.elementToken) && selected?.element.enabled !== false;
+      if (identityUsable && selected!.nativeElement && typeof manager.invokeWindowElement === "function") {
+        const screenPoint = elementScreenPoint(selected!.screenRect);
+        if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
         const semantic = await invokeWindowElementTimed(pid, windowId.toString(), {
-          path: selected.nativeElement.path,
+          path: selected!.nativeElement.path,
           action: "setValue",
-          expectedRole: selected.nativeElement.role,
-          expectedLabel: selected.nativeElement.label,
-          expectedClassName: selected.nativeElement.className,
-          expectedAutomationId: selected.nativeElement.automationId,
-          ...(selected.nativeElement.runtimeId?.length ? { expectedRuntimeId: selected.nativeElement.runtimeId } : {}),
+          expectedRole: selected!.nativeElement.role,
+          expectedLabel: selected!.nativeElement.label,
+          expectedClassName: selected!.nativeElement.className,
+          expectedAutomationId: selected!.nativeElement.automationId,
+          ...(selected!.nativeElement.runtimeId?.length ? { expectedRuntimeId: selected!.nativeElement.runtimeId } : {}),
           text,
         });
         if (semantic.dispatched) {
@@ -3640,6 +3637,39 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           };
         }
       }
+      // Some real controls (e.g. modern Notepad's RichEditD2DPT) do not
+      // actually honor UI Automation's ValuePattern even when the structural
+      // read reports it as available. Before refusing or escalating to a
+      // foreground fallback, try background WM_CHAR delivery straight to the
+      // window's real editable child surface -- foreground-independent and
+      // scoped to this exact registered window (confirmed working against
+      // both classic Edit controls and modern Notepad's child Edit window by
+      // the Phase 0 T3a/T3c proofs).
+      if (typeof manager.findEditChildWindow === "function" && typeof manager.sendTextToWindow === "function") {
+        const childWindowId = await manager.findEditChildWindow(pid, windowId.toString()).catch(() => undefined);
+        if (childWindowId) {
+          const receipt = await manager.sendTextToWindow(pid, childWindowId, text).catch(() => undefined);
+          if (receipt?.dispatchState === "dispatched") {
+            return {
+              capture: stageCapture(await captureWindow(), now),
+              outcome: {
+                status: "unverified",
+                summary: "Background WM_CHAR delivery reached the window's real editable child control; the refreshed window capture is the separate effect check.",
+                dispatch: {
+                  channel: "wm-char", state: "dispatched",
+                  ...(receipt.route ? { route: receipt.route } : {}),
+                  ...(receipt.targetMatches !== undefined ? { targetMatches: receipt.targetMatches } : {}),
+                },
+              },
+            };
+          }
+        }
+      }
+      if (!identityUsable) {
+        throw new DesktopInputNotDispatchedError("The accessibility element is stale, disabled, could not be confirmed as the same control, or does not support text replacement; no text was sent.");
+      }
+      const screenPoint = elementScreenPoint(selected!.screenRect);
+      if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
       if (options.semanticOnly) throw new DesktopInputNotDispatchedError(
         "The independently claimed control no longer supports direct UI Automation value replacement; no caret or foreground fallback was sent.", "background-unavailable");
       if (!screenPoint) throw new DesktopInputNotDispatchedError("The selected accessibility field has no usable screen point; no text was sent.", "target-identity");
