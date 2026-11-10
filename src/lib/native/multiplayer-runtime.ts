@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   createMultiplayerA2ARouter,
+  type A2AMessageReference,
   type MultiplayerA2ARouter,
 } from "./multiplayer-a2a";
 import {
@@ -12,6 +13,7 @@ import {
   type TaskContext,
   type TaskContextStore,
   type TaskControl,
+  type TaskAssignment,
   type TaskParticipant,
   type TaskProgressWitness,
 } from "./multiplayer-task-context";
@@ -24,9 +26,7 @@ import {
   type MultiplayerRoster,
 } from "./multiplayer-contract";
 import type { VerifiedIdentity } from "./identity-core";
-import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
-
-const DEFAULT_A2A_RETRY_WINDOW_MS = 30_000;
+import { redactSecrets } from "./inbox-core";
 
 /**
  * The owner-broker coordination boundary.  The contracts in the multiplayer
@@ -35,14 +35,19 @@ const DEFAULT_A2A_RETRY_WINDOW_MS = 30_000;
  * It never owns provider credentials or desktop input.
  */
 export interface MultiplayerDelivery {
-  (message: A2AMessage): Promise<{ ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string }> | { ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string };
+  (message: A2AMessage, context?: TaskContext): Promise<{ ok: boolean; taskId?: string; created?: boolean; state?: "queued" | "already-present" | "pending" | "uncertain" | "completed"; error?: string }> | { ok: boolean; taskId?: string; created?: boolean; state?: "queued" | "already-present" | "pending" | "uncertain" | "completed"; error?: string };
 }
 
-export interface MultiplayerDeliveryReceipt {
-  readonly state: "queued" | "pending" | "partial" | "failed";
-  readonly taskIds: readonly string[];
+type MultiplayerDeliveryOutcome = { ok: boolean; taskId?: string; created?: boolean; state?: "queued" | "already-present" | "pending" | "uncertain" | "completed"; error?: string };
+
+export type MultiplayerDeliveryReceipt = {
+  readonly state: "queued" | "already-present" | "pending" | "uncertain" | "completed" | "held-no-progress" | "not-configured" | "failed";
+  /** The actual durable recipient inbox task, when one was created. */
+  readonly taskId?: string;
+  /** False when an idempotent retry resolved to the existing durable task. */
+  readonly created?: boolean;
   readonly error?: string;
-}
+};
 
 export interface MultiplayerA2ASendInput {
   readonly to: string;
@@ -57,7 +62,16 @@ export interface MultiplayerA2ASendInput {
   readonly supersedesMessageId?: string;
   readonly progressFingerprint?: string;
   readonly progressKind?: A2AProgressKind;
-  readonly replyDepth?: number;
+}
+
+export interface MultiplayerA2APriorMessage {
+  readonly messageId: string;
+  readonly taskId?: string;
+  readonly conversationId?: string;
+  readonly progressFingerprint?: string;
+  readonly progressKind?: A2AProgressKind;
+  readonly summary: string;
+  readonly createdAt: number;
 }
 
 export interface MultiplayerRuntimeSnapshot {
@@ -68,7 +82,7 @@ export interface MultiplayerRuntimeSnapshot {
 }
 
 export type MultiplayerSendResult =
-  | { readonly ok: true; readonly duplicate: boolean; readonly message: A2AMessage; readonly recipientAgentIds: readonly string[]; readonly delivery?: MultiplayerDeliveryReceipt }
+  | { readonly ok: true; readonly duplicate: boolean; readonly message: A2AMessage; readonly recipientAgentIds: readonly string[]; readonly delivery: MultiplayerDeliveryReceipt }
   | { readonly ok: false; readonly error: string };
 
 export interface MultiplayerRuntime {
@@ -78,6 +92,10 @@ export interface MultiplayerRuntime {
   sendFromHandle(senderHandle: string, senderProvider: string, input: MultiplayerA2ASendInput): MultiplayerSendResult;
   applyControl(control: TaskControl): { ok: boolean; error?: string; context?: TaskContext };
   recordProgress(taskId: string, witness: TaskProgressWitness): { ok: boolean; error?: string; context?: TaskContext };
+  readTaskContext(identity: VerifiedIdentity, taskId: string): { ok: boolean; error?: string; context?: TaskContext };
+  claimWork(identity: VerifiedIdentity, input: { taskId: string; assignmentId: string; workKey: string; summary: string }): { ok: boolean; error?: string; duplicate?: boolean; context?: TaskContext };
+  completeWork(identity: VerifiedIdentity, taskId: string, assignmentId: string): { ok: boolean; error?: string; duplicate?: boolean; context?: TaskContext };
+  releaseWork(identity: VerifiedIdentity, taskId: string, assignmentId: string): { ok: boolean; error?: string; duplicate?: boolean; context?: TaskContext };
   snapshot(): MultiplayerRuntimeSnapshot;
   subscribe(listener: (message: A2AMessage) => void): () => void;
   setDelivery(delivery: MultiplayerDelivery | undefined): void;
@@ -91,115 +109,188 @@ function safeId(prefix: string, value: string): string {
   return `${prefix}-${createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
 }
 
+function storedProgressFingerprint(value: string): string {
+  // Pre-hashing builds stored caller-supplied fingerprints directly. Preserve
+  // already-hashed values while migrating those older values on read.
+  return /^progress-[0-9a-f]{24}$/i.test(value) ? value : safeId("progress", value);
+}
+
 function participants(roster: MultiplayerRoster): TaskParticipant[] {
   return roster.agents.map((agent) => ({ agentId: agent.agentId, branchId: agent.branchId, provider: agent.provider }));
 }
 
 function normalizeDetails(details: MultiplayerA2ASendInput["details"]): MultiplayerA2ASendInput["details"] | undefined {
   if (!details) return undefined;
-  const entries = Object.entries(details).slice(0, 32).map(([key, value]) => [key.slice(0, 128), value] as const);
-  return Object.fromEntries(entries);
+  const entries = Object.entries(details).slice(0, 32).map(([key, value]) => [
+    key.slice(0, 128),
+    typeof value === "string" ? redactSecrets(value).slice(0, 2_000) : value,
+  ] as const);
+  const normalized = Object.fromEntries(entries);
+  if (JSON.stringify(normalized).length > 4_000) throw new Error("Structured teammate details exceed the 4000-character durable-message limit.");
+  return normalized;
 }
 
 export function createMultiplayerRuntime(input: {
   roster: MultiplayerRoster;
   now?: () => number;
   delivery?: MultiplayerDelivery;
+  knownMessageIds?: readonly string[];
+  knownMessages?: readonly A2AMessage[];
+  knownMessageReferences?: readonly A2AMessageReference[];
+  priorMessages?: readonly MultiplayerA2APriorMessage[];
+  initialTaskContexts?: readonly TaskContext[];
+  persistTaskContext?: (context: TaskContext) => void;
 }): MultiplayerRuntime {
   const now = input.now ?? Date.now;
   const roster = input.roster;
   const byHandle = new Map(roster.agents.map((agent) => [safeHandle(agent.handle ?? agent.agentId), agent]));
-  const router: MultiplayerA2ARouter = createMultiplayerA2ARouter(roster, { now });
+  const router: MultiplayerA2ARouter = createMultiplayerA2ARouter(roster, {
+    now,
+    knownMessageIds: input.knownMessageIds,
+    knownMessages: input.knownMessages,
+    knownMessageReferences: input.knownMessageReferences,
+  });
   const coordinator = createMultiplayerRunCoordinator(roster, { now });
   const contexts = new Map<string, TaskContextStore>();
   const subscribers = new Set<(message: A2AMessage) => void>();
-  const deliveryReceipts = new Map<string, MultiplayerDeliveryReceipt>();
+  const deliveries = new Map<string, MultiplayerDeliveryReceipt>();
+  const initialContexts = new Map((input.initialTaskContexts ?? []).map((context) => [context.taskId, context]));
+  const contextPersistenceErrors = new Map<string, string>();
   let delivery = input.delivery;
-
-  const rememberDelivery = (messageId: string, result: { ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string }): MultiplayerDeliveryReceipt => {
-    const taskIds = [...new Set([...(result.taskIds ?? []), ...(result.taskId ? [result.taskId] : [])])].slice(0, 16);
-    const receipt: MultiplayerDeliveryReceipt = result.ok && taskIds.length > 0
-      ? { state: "queued", taskIds }
-      : !result.ok && taskIds.length > 0
-        ? { state: "partial", taskIds, ...(result.error ? { error: result.error.slice(0, 300) } : {}) }
-        : { state: "failed", taskIds: [], error: (result.error || "The delivery adapter did not confirm a durable task ID.").slice(0, 300) };
-    deliveryReceipts.set(messageId, receipt);
-    while (deliveryReceipts.size > 4096) {
-      const oldest = deliveryReceipts.keys().next().value;
-      if (!oldest) break;
-      deliveryReceipts.delete(oldest);
-    }
-    return receipt;
-  };
 
   const contextFor = (taskId: string, conversationId: string): TaskContextStore => {
     const existing = contexts.get(taskId);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.snapshot().conversationId !== conversationId) throw new Error("The shared task is already bound to a different conversation.");
+      return existing;
+    }
+    const initial = initialContexts.get(taskId);
+    const initialProgress = initial?.progress.lastWitness;
+    const normalizedInitial = initial && initialProgress
+      ? {
+          ...initial,
+          progress: {
+            ...initial.progress,
+            lastWitness: {
+              ...initialProgress,
+              stateFingerprint: storedProgressFingerprint(initialProgress.stateFingerprint),
+            },
+          },
+        }
+      : initial;
     const created = createTaskContext({
       taskId,
       conversationId,
       runId: roster.runId,
       participants: participants(roster),
+      ...(normalizedInitial ? { initial: normalizedInitial } : {}),
       now: now(),
     });
     contexts.set(taskId, created);
     return created;
   };
 
-  const attemptDelivery = (message: A2AMessage): void => {
-    if (!delivery) return;
+  const persistContext = (taskId: string, context: TaskContextStore): boolean => {
+    if (!input.persistTaskContext) return true;
     try {
-      const result = delivery(message);
-      if (result && typeof result === "object" && "then" in result && typeof result.then === "function") {
-        deliveryReceipts.set(message.messageId, { state: "pending", taskIds: [] });
-        void Promise.resolve(result).then((settled) => {
-          const receipt = rememberDelivery(message.messageId, settled);
-          if (receipt.state === "failed" || receipt.state === "partial") {
-            process.stderr.write(`[multiplayer-runtime] ${receipt.state} delivery of message ${message.messageId}: ${receipt.error ?? "no durable task"}\n`);
-          }
-        }).catch((error) => {
-          const receipt = rememberDelivery(message.messageId, { ok: false, error: error instanceof Error ? error.message : String(error) });
-          process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${receipt.error}\n`);
-        });
-      } else {
-        const receipt = rememberDelivery(message.messageId, result as { ok: boolean; taskId?: string; taskIds?: readonly string[]; error?: string });
-        if (receipt.state === "failed" || receipt.state === "partial") {
-          process.stderr.write(`[multiplayer-runtime] ${receipt.state} delivery of message ${message.messageId}: ${receipt.error ?? "no durable task"}\n`);
-        }
-      }
+      input.persistTaskContext(context.snapshot());
+      contextPersistenceErrors.delete(taskId);
+      return true;
     } catch (error) {
-      const receipt = rememberDelivery(message.messageId, { ok: false, error: error instanceof Error ? error.message : String(error) });
-      process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${receipt.error}\n`);
+      const detail = error instanceof Error ? error.message : String(error);
+      contextPersistenceErrors.set(taskId, detail);
+      return false;
     }
   };
 
+  const contextPersistenceError = (taskId: string): string =>
+    `M9R could not durably save shared task state for ${taskId}; no new provider turn was queued. ${contextPersistenceErrors.get(taskId) ?? "Retry the same operation after resolving the local store error."}`;
+
+  for (const initial of initialContexts.values()) contextFor(initial.taskId, initial.conversationId);
+
+  // Rebuild only the compact progress witnesses needed for loop convergence.
+  // Full prose remains in the durable inbox task, while references survive a
+  // broker restart so a provider can reply in the same conversation.
+  for (const prior of input.priorMessages ?? []) {
+    if (!prior.taskId || !prior.progressFingerprint || !prior.progressKind || !Number.isFinite(prior.createdAt)) continue;
+    if (initialContexts.has(prior.taskId)) continue;
+    const conversationId = prior.conversationId ?? safeId("conversation", prior.taskId);
+    contextFor(prior.taskId, conversationId).recordProgress({
+      witnessId: prior.messageId,
+      kind: prior.progressKind,
+      stateFingerprint: storedProgressFingerprint(prior.progressFingerprint),
+      summary: prior.summary.slice(0, 280) || "Prior team progress witness.",
+      at: prior.createdAt,
+    });
+  }
   router.subscribe((event) => {
-    if (event.kind === "message-duplicate") {
-      const prior = deliveryReceipts.get(event.message.messageId);
-      if (prior?.state === "failed" || prior?.state === "partial") attemptDelivery(event.message);
-      return;
-    }
     if (event.kind !== "message-accepted") return;
     const message = event.message;
     if (message.taskId) {
       const task = contextFor(message.taskId, message.conversationId ?? safeId("conversation", message.taskId));
       if (message.progressFingerprint && message.progressKind) {
-        task.recordProgress({
+        const result = task.recordProgress({
           witnessId: message.messageId,
           kind: message.progressKind,
           stateFingerprint: message.progressFingerprint,
           summary: message.summary,
           at: message.createdAt,
         });
+        if (!result.ok) {
+          contextPersistenceErrors.set(message.taskId, result.error);
+          return;
+        }
       }
+      if (!persistContext(message.taskId, task)) return;
     }
     for (const listener of subscribers) {
       try { listener(message); } catch { /* observers never own delivery */ }
     }
-    // Acceptance and provider delivery are separate. A duplicate retry may
-    // resume a failed/partial durable handoff, but never a pending or queued one.
-    attemptDelivery(message);
   });
+
+  const enqueueForRecipient = (message: A2AMessage): MultiplayerDeliveryReceipt => {
+    const existing = deliveries.get(message.messageId);
+    if (existing && existing.state !== "failed") return existing;
+    if (!delivery) return { state: "not-configured" };
+
+    const context = message.taskId ? contexts.get(message.taskId)?.snapshot() : undefined;
+    if (context?.state === "waiting-agent" && message.kind !== "blocker" && message.kind !== "stop" && message.kind !== "supersede") {
+      const held = {
+        state: "held-no-progress" as const,
+        error: "No new task progress was recorded. The message remains in the conversation, but M9R did not wake another provider turn. Send a new progress witness or request clarification to continue.",
+      };
+      deliveries.set(message.messageId, held);
+      return held;
+    }
+
+    try {
+      const result = delivery(message, context);
+      if (result && typeof result === "object" && "then" in result && typeof (result as { then?: unknown }).then === "function") {
+        const pending = { state: "pending" as const };
+        deliveries.set(message.messageId, pending);
+        void Promise.resolve(result as PromiseLike<MultiplayerDeliveryOutcome>).then((resolved) => {
+          deliveries.set(message.messageId, resolved.ok
+            ? { state: resolved.state ?? "queued", ...(resolved.taskId ? { taskId: resolved.taskId } : {}), ...(resolved.created === undefined ? {} : { created: resolved.created }) }
+            : { state: "failed", ...(resolved.error ? { error: resolved.error } : { error: "The recipient inbox did not accept the message." }) });
+        }).catch((error: unknown) => {
+          deliveries.set(message.messageId, { state: "failed", error: error instanceof Error ? error.message : String(error) });
+          process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        });
+        return pending;
+      }
+      const resolved = result as MultiplayerDeliveryOutcome;
+      const receipt: MultiplayerDeliveryReceipt = resolved.ok
+        ? { state: resolved.state ?? "queued", ...(resolved.taskId ? { taskId: resolved.taskId } : {}), ...(resolved.created === undefined ? {} : { created: resolved.created }) }
+        : { state: resolved.state === "uncertain" ? "uncertain" : "failed", ...(resolved.error ? { error: resolved.error } : { error: "The recipient inbox did not accept the message." }) };
+      deliveries.set(message.messageId, receipt);
+      return receipt;
+    } catch (error) {
+      const receipt = { state: "failed" as const, error: error instanceof Error ? error.message : String(error) };
+      deliveries.set(message.messageId, receipt);
+      process.stderr.write(`[multiplayer-runtime] delivery of message ${message.messageId} failed: ${receipt.error}\n`);
+      return receipt;
+    }
+  };
 
   const resolveSender = (handle: string, provider: string): MultiplayerAgent | undefined => {
     const normalized = safeHandle(handle);
@@ -217,53 +308,84 @@ export function createMultiplayerRuntime(input: {
       ?? roster.agents.find((agent) => agent.agentId === inputValue.to);
     if (!recipient) return { ok: false, error: `@${safeHandle(inputValue.to)} is not part of the active M9R roster.` };
     if (recipient.agentId === sender.agentId) return { ok: false, error: "An agent cannot send a teammate message to itself." };
-    const replyParent = inputValue.replyToMessageId
-      ? router.history().find((message) => message.messageId === inputValue.replyToMessageId)
-      : undefined;
-    if (inputValue.replyToMessageId && !replyParent) return { ok: false, error: "A2A reply references an unknown message." };
-    if (replyParent) {
-      const parentRecipients = replyParent.recipient.kind === "agent" ? [replyParent.recipient.agentId] : replyParent.recipient.agentIds;
-      if (!parentRecipients.includes(sender.agentId) || replyParent.agentId !== recipient.agentId) {
-        return { ok: false, error: "A2A reply sender or recipient does not match the referenced teammate exchange." };
-      }
+    const parentReference = inputValue.replyToMessageId ? router.referenceFor(inputValue.replyToMessageId) : undefined;
+    const taskId = inputValue.taskId?.trim() || parentReference?.taskId;
+    // New conversations must be task-scoped. Continue a previously durable
+    // taskless thread only when the caller names its exact stored parent; the
+    // existing depth and message bounds still apply to those legacy replies.
+    if (!taskId && !parentReference) return { ok: false, error: "A structured teammate conversation must belong to a shared task. Use m9r_send for a separate delegated task." };
+    const kind = inputValue.kind ?? "delegate";
+    const actionableKinds = new Set<A2AMessageKind>(["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"]);
+    if (taskId && actionableKinds.has(kind) && (!inputValue.progressFingerprint || !inputValue.progressKind)) {
+      return { ok: false, error: "A task-bound teammate message needs a progressFingerprint and progressKind so repeated no-progress turns can be held safely." };
     }
-    const taskId = inputValue.taskId?.trim() || replyParent?.taskId;
-    const conversationId = inputValue.conversationId?.trim() || replyParent?.conversationId
-      || (taskId ? safeId("conversation", taskId) : safeId("conversation", `${sender.agentId}:${recipient.agentId}`));
-    const callerIdempotencyKey = inputValue.idempotencyKey?.trim();
-    const createdAt = now();
-    const idempotencyKey = callerIdempotencyKey
-      || safeId("a2a", `${sender.agentId}:${recipient.agentId}:${taskId ?? "room"}:${inputValue.summary}:${Math.floor(createdAt / DEFAULT_A2A_RETRY_WINDOW_MS)}`);
+    const summary = redactSecrets(inputValue.summary.trim()).slice(0, 280);
+    if (!summary) return { ok: false, error: "A structured teammate message needs non-empty text after secret redaction." };
+    let details: MultiplayerA2ASendInput["details"];
+    try { details = normalizeDetails(inputValue.details); }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Structured teammate details are invalid." }; }
+    const conversationId = inputValue.conversationId?.trim()
+      || parentReference?.conversationId
+      || (taskId ? safeId("conversation", taskId) : undefined);
+    const replyDepth = parentReference ? parentReference.replyDepth + 1 : 0;
+    const progressFingerprint = inputValue.progressFingerprint ? storedProgressFingerprint(inputValue.progressFingerprint) : undefined;
+    const canonicalDetails = details
+      ? Object.fromEntries(Object.keys(details).sort().map((key) => [key, details![key]]))
+      : undefined;
+    const retryIdentity = inputValue.idempotencyKey?.trim() || JSON.stringify({
+      senderAgentId: sender.agentId,
+      recipientAgentId: recipient.agentId,
+      taskId,
+      conversationId,
+      kind,
+      priority: inputValue.priority ?? "normal",
+      summary,
+      details: canonicalDetails,
+      replyToMessageId: inputValue.replyToMessageId,
+      supersedesMessageId: inputValue.supersedesMessageId,
+      progressFingerprint,
+      progressKind: inputValue.progressKind,
+    });
+    const idempotencyKey = safeId("a2a", `${sender.agentId}:${retryIdentity}`);
     const raw = {
       schemaVersion: 1 as const,
       runId: roster.runId,
       branchId: sender.branchId,
       agentId: sender.agentId,
       ...(taskId ? { taskId } : {}),
-      conversationId,
-      // The retry key (caller-provided, or a short content/time-bucket fallback)
-      // reproduces the message ID. The fallback expires into a new identity so
-      // repeated wording remains usable for a later deliberate handoff.
+      ...(conversationId ? { conversationId } : {}),
+      // Every send has a stable message ID, including sends whose tool call
+      // omitted an explicit idempotency key. That lets a retry after a lost
+      // broker response resolve to the original durable peer-inbox task.
       messageId: safeId("message", `${sender.agentId}:${idempotencyKey}`),
       recipient: { kind: "agent" as const, agentId: recipient.agentId },
-      kind: inputValue.kind ?? "delegate" as const,
+      kind,
       priority: inputValue.priority ?? "normal" as const,
       idempotencyKey,
-      createdAt,
-      summary: inputValue.summary,
-      ...(normalizeDetails(inputValue.details) ? { details: normalizeDetails(inputValue.details) } : {}),
+      createdAt: now(),
+      summary,
+      ...(details ? { details } : {}),
       ...(inputValue.replyToMessageId ? { replyToMessageId: inputValue.replyToMessageId } : {}),
       ...(inputValue.supersedesMessageId ? { supersedesMessageId: inputValue.supersedesMessageId } : {}),
-      ...(inputValue.progressFingerprint && inputValue.progressKind ? { progressFingerprint: inputValue.progressFingerprint, progressKind: inputValue.progressKind } : {}),
-      replyDepth: inputValue.replyDepth ?? 0,
+      ...(progressFingerprint && inputValue.progressKind ? { progressFingerprint, progressKind: inputValue.progressKind } : {}),
+      replyDepth,
     };
-    const replyDepth = Math.max(inputValue.replyDepth ?? 0, replyParent ? replyParent.replyDepth + 1 : 0);
-    if (replyDepth > MAX_AGENT_REPLY_DEPTH) return { ok: false, error: `A2A exchange reached M9R's bounded reply depth (${MAX_AGENT_REPLY_DEPTH}).` };
-    const result = router.send(parseA2AMessage({ ...raw, replyDepth }));
+    let contextStore: TaskContextStore | undefined;
+    if (taskId) {
+      try {
+        contextStore = contextFor(taskId, conversationId ?? safeId("conversation", taskId));
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : "M9R could not restore the shared task state." };
+      }
+    }
+    if (contextStore && ["completed", "canceled"].includes(contextStore.snapshot().state) && kind !== "stop" && kind !== "supersede") {
+      return { ok: false, error: "This shared task is already terminal; start a new owner task instead of waking another provider turn." };
+    }
+    const result = router.send(parseA2AMessage(raw));
     if (!result.ok) return result;
-    if (taskId) contextFor(taskId, conversationId);
-    const receipt = deliveryReceipts.get(result.message.messageId);
-    return { ...result, ...(receipt ? { delivery: receipt } : {}) };
+    if (taskId && contextStore && !persistContext(taskId, contextStore)) return { ok: false, error: contextPersistenceError(taskId) };
+    const receipt = enqueueForRecipient(result.message);
+    return { ...result, delivery: receipt };
   };
 
   return {
@@ -277,13 +399,78 @@ export function createMultiplayerRuntime(input: {
       const context = contexts.get(control.taskId);
       if (!context) return { ok: false, error: `No active multiplayer task context exists for ${control.taskId}.` };
       const result = context.applyControl(control);
-      return result.ok ? { ok: true, context: result.context } : { ok: false, error: result.error, context: result.context };
+      if (!result.ok) return { ok: false, error: result.error, context: result.context };
+      if (!persistContext(control.taskId, context)) return { ok: false, error: contextPersistenceError(control.taskId), context: result.context };
+      return { ok: true, context: result.context };
     },
     recordProgress(taskId, witness) {
       const context = contexts.get(taskId);
       if (!context) return { ok: false, error: "No active multiplayer task context matches this progress witness." };
       const result = context.recordProgress(witness);
-      return result.ok ? { ok: true, context: result.context } : { ok: false, error: result.error, context: result.context };
+      if (!result.ok) return { ok: false, error: result.error, context: result.context };
+      if (!persistContext(taskId, context)) return { ok: false, error: contextPersistenceError(taskId), context: result.context };
+      return { ok: true, context: result.context };
+    },
+    readTaskContext(identity, taskId) {
+      const sender = resolveSender(identity.handle, identity.provider);
+      const context = contexts.get(taskId);
+      if (!sender || !context || !context.snapshot().participants.some((participant) => participant.agentId === sender.agentId)) {
+        return { ok: false, error: `No shared task state is available to this agent for ${taskId}.` };
+      }
+      return { ok: true, context: context.snapshot() };
+    },
+    claimWork(identity, request) {
+      const sender = resolveSender(identity.handle, identity.provider);
+      const context = contexts.get(request.taskId);
+      if (!sender || !context || !context.snapshot().participants.some((participant) => participant.agentId === sender.agentId)) {
+        return { ok: false, error: `No shared task state is available to this agent for ${request.taskId}.` };
+      }
+      const snapshot = context.snapshot();
+      if (snapshot.state !== "active") return { ok: false, error: `Shared task ${request.taskId} is ${snapshot.state}; no new work can be claimed until it becomes active.` };
+      const assignment: TaskAssignment = {
+        assignmentId: request.assignmentId,
+        workKey: request.workKey,
+        agentId: sender.agentId,
+        planRevision: snapshot.planRevision,
+        status: "claimed",
+        summary: redactSecrets(request.summary.trim()).slice(0, 280),
+        updatedAt: Math.max(snapshot.updatedAt, now()),
+      };
+      const result = context.claimAssignment(assignment);
+      if (!result.ok) return { ok: false, error: result.error, context: result.context };
+      if (!persistContext(request.taskId, context)) return { ok: false, error: contextPersistenceError(request.taskId), context: result.context };
+      return { ok: true, duplicate: result.duplicate, context: result.context };
+    },
+    completeWork(identity, taskId, assignmentId) {
+      const sender = resolveSender(identity.handle, identity.provider);
+      const context = contexts.get(taskId);
+      const assignment = context?.snapshot().assignments.find((item) => item.assignmentId === assignmentId);
+      if (!sender || !context || !assignment || assignment.agentId !== sender.agentId) {
+        return { ok: false, error: "This shared-work assignment is not owned by this agent." };
+      }
+      if (["completed", "canceled"].includes(context.snapshot().state) && assignment.status !== "completed") {
+        return { ok: false, error: "A terminal shared task cannot complete an unfinished assignment." };
+      }
+      const result = context.completeAssignment(assignmentId, now());
+      if (!result.ok) return { ok: false, error: result.error, context: result.context };
+      if (!persistContext(taskId, context)) return { ok: false, error: contextPersistenceError(taskId), context: result.context };
+      return { ok: true, duplicate: result.duplicate, context: result.context };
+    },
+    releaseWork(identity, taskId, assignmentId) {
+      const sender = resolveSender(identity.handle, identity.provider);
+      const context = contexts.get(taskId);
+      const assignment = context?.snapshot().assignments.find((item) => item.assignmentId === assignmentId);
+      if (!sender || !context || !assignment || assignment.agentId !== sender.agentId) {
+        return { ok: false, error: "This shared-work assignment is not owned by this agent." };
+      }
+      if (assignment.status === "completed") return { ok: false, error: "Completed shared work cannot be released." };
+      if (["completed", "canceled"].includes(context.snapshot().state) && assignment.status !== "released") {
+        return { ok: false, error: "A terminal shared task cannot release an active assignment." };
+      }
+      const prior = assignment.status;
+      const snapshot = context.releaseAssignment(assignmentId, now());
+      if (!persistContext(taskId, context)) return { ok: false, error: contextPersistenceError(taskId), context: snapshot };
+      return { ok: true, duplicate: prior === "released", context: snapshot };
     },
     snapshot() {
       return { roster, a2a: router.history(), tasks: [...contexts.values()].map((context) => context.snapshot()), run: coordinator.snapshot() };

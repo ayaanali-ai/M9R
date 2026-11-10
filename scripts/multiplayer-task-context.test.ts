@@ -33,6 +33,23 @@ test("duplicate progress enters waiting-agent instead of looping forever", () =>
   assert.equal(task.snapshot().progress.noProgressStreak, 0);
 });
 
+test("changing the progress label cannot reset an unchanged-state streak", () => {
+  const task = createTaskContext({ taskId: "task-progress-kind", conversationId: "conversation-progress-kind", runId: "run-progress-kind", participants, now: 100 });
+  const kinds = ["observation", "blocker", "operation-completed", "postcondition-verified"] as const;
+  for (let index = 0; index < kinds.length; index += 1) {
+    const result = task.recordProgress({
+      witnessId: `kind-witness-${index}`,
+      kind: kinds[index]!,
+      stateFingerprint: "same-observed-state",
+      summary: "The observed task state has not changed.",
+      at: 110 + index,
+    });
+    assert.equal(result.ok, true);
+  }
+  assert.equal(task.snapshot().state, "waiting-agent");
+  assert.equal(task.snapshot().progress.noProgressStreak, 3);
+});
+
 test("dynamic assignments are idempotent and prevent silent double ownership", () => {
   const task = createTaskContext({ taskId: "task-3", conversationId: "conversation-3", runId: "run-3", participants, now: 100 });
   const first = task.claimAssignment({ assignmentId: "assignment-1", workKey: "research", agentId: "agent-1", planRevision: 0, status: "claimed", summary: "Research the source", updatedAt: 101 });
@@ -40,9 +57,16 @@ test("dynamic assignments are idempotent and prevent silent double ownership", (
   const duplicate = task.claimAssignment({ assignmentId: "assignment-1", workKey: "research", agentId: "agent-1", planRevision: 0, status: "claimed", summary: "Research the source", updatedAt: 101 });
   assert.equal(duplicate.ok, true);
   if (duplicate.ok) assert.equal(duplicate.duplicate, true);
+  const retryWithFreshClock = task.claimAssignment({ assignmentId: "assignment-1", workKey: "research", agentId: "agent-1", planRevision: 0, status: "claimed", summary: "Research the source", updatedAt: 999 });
+  assert.equal(retryWithFreshClock.ok, true);
+  if (retryWithFreshClock.ok) assert.equal(retryWithFreshClock.duplicate, true);
   const conflict = task.claimAssignment({ assignmentId: "assignment-2", workKey: "research", agentId: "agent-2", planRevision: 0, status: "claimed", summary: "Research the source too", updatedAt: 102 });
   assert.equal(conflict.ok, false);
   assert.equal(task.snapshot().assignments.length, 1);
+  const completed = task.completeAssignment("assignment-1", 1_000);
+  assert.equal(completed.ok, true);
+  if (completed.ok) assert.equal(completed.context.assignments[0]?.status, "completed");
+  assert.equal(task.completeAssignment("assignment-1", 1_001).ok, true);
 });
 
 test("owner redirection releases one assignment without resetting unaffected work", () => {

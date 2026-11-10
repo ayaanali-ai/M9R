@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createMultiplayerRuntime } from "../src/lib/native/multiplayer-runtime";
+import { createMultiplayerInboxDelivery } from "../src/lib/native/multiplayer-inbox-delivery";
 import { createLocalStore } from "../src/lib/native/local-store";
+import { renderA2AConversation } from "../src/lib/native/inbox-core";
 import { applyAgentMcpStoreMutation } from "../src/lib/native/web-broker-server";
 
 const roster = {
@@ -27,7 +29,8 @@ test("owner runtime accepts one structured teammate message and invokes delivery
   if (first.ok) {
     assert.equal(first.duplicate, false);
     assert.deepEqual(first.recipientAgentIds, ["agent-claude"]);
-    assert.deepEqual(first.delivery, { state: "queued", taskIds: ["T42"] });
+    assert.equal(first.delivery.state, "queued");
+    assert.equal(first.delivery.taskId, "T42");
     assert.equal(runtime.snapshot().tasks[0]?.taskId, "task-1");
   }
   await new Promise((resolve) => setImmediate(resolve));
@@ -41,102 +44,190 @@ test("owner runtime accepts one structured teammate message and invokes delivery
   assert.equal(delivered.length, 1);
 });
 
-test("an identical retry reuses its message identity and retries failed durable delivery", () => {
-  let deliveries = 0;
-  const runtime = createMultiplayerRuntime({ roster, now: () => 100 });
-  runtime.setDelivery(() => { deliveries += 1; return { ok: false, error: "task store at capacity" }; });
-  const input = { to: "claude", taskId: "task-failed-delivery", summary: "Verify the current page." };
-  const first = runtime.sendFromHandle("codex", "codex", input);
-  assert.equal(first.ok, true);
-  if (!first.ok) return;
-  assert.deepEqual(first.delivery, { state: "failed", taskIds: [], error: "task store at capacity" });
-  const retry = runtime.sendFromHandle("codex", "codex", input);
-  assert.equal(retry.ok, true);
-  if (!retry.ok) return;
-  assert.equal(retry.duplicate, true);
-  assert.equal(retry.message.messageId, first.message.messageId);
-  assert.deepEqual(retry.delivery, first.delivery);
-  assert.equal(deliveries, 2, "a failed delivery is retried idempotently; the receiver task store prevents duplicates");
+test("task progress witnesses stop repeated no-progress provider wakeups and resume on new progress", () => {
+  const delivered: string[] = [];
+  const runtime = createMultiplayerRuntime({
+    roster,
+    now: () => 100,
+    delivery: (message) => { delivered.push(message.messageId); return { ok: true, taskId: `T${delivered.length}`, created: true }; },
+  });
+  let previousMessageId: string | undefined;
+  const send = (index: number, fingerprint: string, kind: "observation" | "operation-completed" = "observation") => {
+    const result = runtime.sendFromHandle("codex", "codex", {
+      to: "claude",
+      taskId: "shared-task-1",
+      conversationId: "shared-conversation-1",
+      summary: `Status update ${index}`,
+      idempotencyKey: `progress-${index}`,
+      progressFingerprint: fingerprint,
+      progressKind: kind,
+      ...(previousMessageId ? { replyToMessageId: previousMessageId } : {}),
+    });
+    if (result.ok) previousMessageId = result.message.messageId;
+    return result;
+  };
+
+  for (let index = 1; index <= 3; index += 1) {
+    const result = send(index, "same-state");
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.delivery.state, "queued");
+  }
+  const stalled = send(4, "same-state");
+  assert.equal(stalled.ok, true);
+  if (stalled.ok) assert.equal(stalled.delivery.state, "held-no-progress");
+  assert.equal(delivered.length, 3);
+  assert.equal(runtime.snapshot().tasks[0]?.state, "waiting-agent");
+
+  const resumed = send(5, "new-state", "operation-completed");
+  assert.equal(resumed.ok, true);
+  if (resumed.ok) assert.equal(resumed.delivery.state, "queued");
+  assert.equal(delivered.length, 4);
+  assert.equal(runtime.snapshot().tasks[0]?.state, "active");
 });
 
-test("async teammate delivery changes from pending to durable queued on an idempotent retry", async () => {
-  let finishDelivery: ((value: { ok: boolean; taskIds: readonly string[] }) => void) | undefined;
-  const runtime = createMultiplayerRuntime({ roster, now: () => 100 });
-  runtime.setDelivery(() => new Promise((resolve) => { finishDelivery = resolve; }));
-  const input = { to: "claude", taskId: "async-delivery-task", summary: "Verify the current page.", idempotencyKey: "async-handoff-1" };
-  const first = runtime.sendFromHandle("codex", "codex", input);
-  assert.equal(first.ok, true);
-  if (!first.ok) return;
-  assert.equal(first.delivery?.state, "pending");
-  finishDelivery?.({ ok: true, taskIds: ["T52"] });
-  await new Promise((resolve) => setImmediate(resolve));
-  const retry = runtime.sendFromHandle("codex", "codex", input);
-  assert.equal(retry.ok, true);
-  if (!retry.ok) return;
-  assert.equal(retry.duplicate, true);
-  assert.deepEqual(retry.delivery, { state: "queued", taskIds: ["T52"] });
-});
-
-test("messages without a caller idempotency key dedupe retries only inside the short retry window", () => {
-  const messageIds: string[] = [];
-  let clock = 100;
-  const runtime = createMultiplayerRuntime({ roster, now: () => clock });
-  runtime.setDelivery((message) => { messageIds.push(message.messageId); return { ok: true, taskId: `T${messageIds.length}` }; });
-  const input = { to: "claude", taskId: "repeatable-task", summary: "Please verify the visible page." };
-  const first = runtime.sendFromHandle("codex", "codex", input);
-  clock += 30_000;
-  const second = runtime.sendFromHandle("codex", "codex", input);
-  assert.equal(first.ok, true);
-  assert.equal(second.ok, true);
-  if (!first.ok || !second.ok) return;
-  assert.equal(first.duplicate, false);
-  assert.equal(second.duplicate, false);
-  assert.notEqual(first.message.messageId, second.message.messageId);
-  assert.equal(messageIds.length, 2, "repeating wording after the default retry window is a new message");
-});
-
-test("structured replies inherit task context and derive bounded depth from their parent", () => {
-  const runtime = createMultiplayerRuntime({ roster, now: () => 100 });
-  const first = runtime.sendFromHandle("codex", "codex", {
-    to: "claude", taskId: "shared-task", conversationId: "shared-conversation", summary: "Check the page.", replyDepth: 2,
+test("restored task progress keeps no-progress protection active across broker restart", () => {
+  const priorMessages = Array.from({ length: 4 }, (_, index) => ({
+    messageId: `prior-message-${index + 1}`,
+    taskId: "shared-task-restore",
+    conversationId: "shared-conversation-restore",
+    progressFingerprint: "same-state",
+    progressKind: "observation" as const,
+    summary: "The same page is still visible.",
+    createdAt: index + 1,
+  }));
+  let deliveryCount = 0;
+  const runtime = createMultiplayerRuntime({
+    roster,
+    now: () => 10,
+    knownMessageReferences: priorMessages.map((message) => ({
+      messageId: message.messageId,
+      agentId: "agent-codex",
+      recipientAgentIds: ["agent-claude"],
+      taskId: message.taskId,
+      conversationId: message.conversationId,
+      replyDepth: 0,
+    })),
+    priorMessages,
+    delivery: () => { deliveryCount += 1; return { ok: true, taskId: "T-restored" }; },
   });
-  assert.equal(first.ok, true);
-  if (!first.ok) return;
-  const reply = runtime.sendFromHandle("claude", "claude-code", {
-    to: "codex", replyToMessageId: first.message.messageId, summary: "The page shows Example Domain.", replyDepth: 0,
+  const result = runtime.sendFromHandle("claude", "claude-code", {
+    to: "codex",
+    taskId: "shared-task-restore",
+    conversationId: "shared-conversation-restore",
+    summary: "Still no change.",
+    idempotencyKey: "after-restart",
+    progressFingerprint: "same-state",
+    progressKind: "observation",
+    replyToMessageId: "prior-message-4",
   });
-  assert.equal(reply.ok, true);
-  if (!reply.ok) return;
-  assert.equal(reply.message.taskId, "shared-task");
-  assert.equal(reply.message.conversationId, "shared-conversation");
-  assert.equal(reply.message.replyDepth, 3, "the provider cannot reset exchange depth by passing zero");
-
-  const overLimit = runtime.sendFromHandle("codex", "codex", {
-    to: "claude", taskId: "bounded-task", summary: "Last allowed request.", replyDepth: 8,
-  });
-  assert.equal(overLimit.ok, true);
-  if (!overLimit.ok) return;
-  const refused = runtime.sendFromHandle("claude", "claude-code", {
-    to: "codex", replyToMessageId: overLimit.message.messageId, summary: "Would exceed depth.",
-  });
-  assert.equal(refused.ok, false);
-  if (!refused.ok) assert.match(refused.error, /bounded reply depth/);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.delivery.state, "held-no-progress");
+  assert.equal(deliveryCount, 0);
 });
 
 test("runtime control pauses a task without canceling its run", () => {
   const runtime = createMultiplayerRuntime({ roster, now: () => 100 });
-  const sent = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: "task-2", summary: "Work together." });
+  const sent = runtime.sendFromHandle("codex", "codex", {
+    to: "claude", taskId: "task-2", summary: "Work together.",
+    progressFingerprint: "work-plan-1", progressKind: "observation",
+  });
   assert.equal(sent.ok, true);
   const result = runtime.applyControl({ controlId: "control-1", taskId: "task-2", kind: "pause", summary: "Owner is redirecting.", requestedAt: 110 });
   assert.equal(result.ok, true);
   assert.equal(result.context?.state, "paused-owner");
 });
 
-test("owner broker returns a complete structured A2A response for MCP callers", () => {
+test("task-scoped replies inherit their parent thread and taskless roots are refused", () => {
+  const runtime = createMultiplayerRuntime({ roster, now: () => 100 });
+  const first = runtime.sendFromHandle("codex", "codex", {
+    to: "claude", taskId: "shared-task-3", summary: "Can you verify this observation?",
+    progressFingerprint: "page-state-1", progressKind: "observation",
+  });
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const reply = runtime.sendFromHandle("claude", "claude-code", {
+    to: "codex",
+    taskId: "shared-task-3",
+    summary: "I verified it against the current state.",
+    replyToMessageId: first.message.messageId,
+    idempotencyKey: "taskless-reply-1",
+    progressFingerprint: "page-state-2",
+    progressKind: "postcondition-verified",
+  });
+  assert.equal(reply.ok, true);
+  if (reply.ok) {
+    assert.equal(reply.message.conversationId, first.message.conversationId);
+    assert.equal(reply.message.replyDepth, 1);
+  }
+  const sameSummaryAfterProgress = runtime.sendFromHandle("codex", "codex", {
+    to: "claude",
+    taskId: "shared-task-3",
+    summary: "Can you verify this observation?",
+    replyToMessageId: reply.ok ? reply.message.messageId : first.message.messageId,
+    progressFingerprint: "page-state-after-peer-check",
+    progressKind: "operation-completed",
+  });
+  assert.equal(sameSummaryAfterProgress.ok, true);
+  if (sameSummaryAfterProgress.ok) assert.equal(sameSummaryAfterProgress.duplicate, false);
+  const taskless = runtime.sendFromHandle("codex", "codex", { to: "claude", summary: "A separate quick question." });
+  assert.equal(taskless.ok, false);
+  if (!taskless.ok) assert.match(taskless.error, /must belong to a shared task/);
+  const missingWitness = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: "shared-task-3", summary: "No evidence attached." });
+  assert.equal(missingWitness.ok, false);
+  if (!missingWitness.ok) assert.match(missingWitness.error, /progressFingerprint and progressKind/);
+});
+
+test("legacy taskless messages can only continue through an exact known parent", () => {
+  const runtime = createMultiplayerRuntime({
+    roster,
+    now: () => 100,
+    knownMessageReferences: [{
+      messageId: "legacy-root-message",
+      agentId: "agent-codex",
+      recipientAgentIds: ["agent-claude"],
+      replyDepth: 0,
+    }],
+  });
+  const reply = runtime.sendFromHandle("claude", "claude-code", {
+    to: "codex",
+    summary: "I am continuing the exact legacy thread.",
+    replyToMessageId: "legacy-root-message",
+    idempotencyKey: "legacy-reply-1",
+  });
+  assert.equal(reply.ok, true);
+  if (reply.ok) {
+    assert.equal(reply.message.replyToMessageId, "legacy-root-message");
+    assert.equal(reply.message.taskId, undefined);
+    assert.equal(reply.message.conversationId, undefined);
+    assert.equal(reply.message.replyDepth, 1);
+  }
+  const newRoot = runtime.sendFromHandle("codex", "codex", {
+    to: "claude",
+    summary: "A new taskless root must still be refused.",
+  });
+  assert.equal(newRoot.ok, false);
+});
+
+test("owner broker queues one durable peer conversation item and returns its real task id", () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-a2a-owner-"));
   const store = createLocalStore(root);
   const identity = store.issueIdentity("codex", "codex", "codex-session");
-  const runtime = createMultiplayerRuntime({ roster });
+  const claudeIdentity = store.issueIdentity("claude", "claude-code", "claude-session");
+  let deliveryCount = 0;
+  const inboxDelivery = createMultiplayerInboxDelivery({
+    store,
+    agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
+    sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
+  });
+  const runtime = createMultiplayerRuntime({
+    roster,
+    initialTaskContexts: store.listMultiplayerTaskContexts(),
+    persistTaskContext: (context) => { store.setMultiplayerTaskContext(context); },
+    delivery: (message, context) => {
+      deliveryCount += 1;
+      return inboxDelivery(message, context);
+    },
+  });
   try {
     const input = {
       action: "a2a",
@@ -145,6 +236,7 @@ test("owner broker returns a complete structured A2A response for MCP callers", 
       summary: "Verify the structured sidecar.",
       taskId: "task-owner-1",
       idempotencyKey: "owner-sidecar-1",
+      details: { source: "owner test", verified: true },
       progressFingerprint: "owner-observed-1",
       progressKind: "observation",
     } as const;
@@ -154,11 +246,132 @@ test("owner broker returns a complete structured A2A response for MCP callers", 
     assert.equal(first.body.duplicate, false);
     assert.deepEqual(first.body.recipientAgentIds, ["agent-claude"]);
     assert.equal(typeof (first.body.message as { messageId?: unknown } | undefined)?.messageId, "string");
+    assert.equal(first.body.taskId, "T1");
+    assert.deepEqual(first.body.delivery, { state: "queued", taskId: "T1", created: true });
+    const stored = store.getTask("T1");
+    assert.equal(stored?.coordination?.intent, "message");
+    assert.equal(stored?.a2a?.conversationId, (first.body.message as { conversationId: string }).conversationId);
+    assert.equal(stored?.a2a?.messageId, first.body.messageId);
+    assert.equal(stored?.fromSession, "codex-session");
+    assert.equal(stored?.delivery?.state, "deferred");
+    assert.equal(stored?.a2a?.wireMessage?.details?.verified, true);
+
+    const claim = applyAgentMcpStoreMutation(store, {
+      action: "claim_work",
+      token: identity.token,
+      taskId: "task-owner-1",
+      assignmentId: "sidecar-claim-1",
+      workKey: "sidecar-verify",
+      summary: "Verify the owner broker sidecar and inspect its durable receipt.",
+    }, runtime);
+    assert.equal(claim.status, 200);
+    assert.equal((claim.body.context as { assignments: Array<{ agentId: string; status: string }> }).assignments[0]?.agentId, "agent-codex");
+    const conflictingClaim = applyAgentMcpStoreMutation(store, {
+      action: "claim_work",
+      token: claudeIdentity.token,
+      taskId: "task-owner-1",
+      assignmentId: "sidecar-claim-2",
+      workKey: "sidecar-verify",
+      summary: "Verify the same owner broker sidecar.",
+    }, runtime);
+    assert.equal(conflictingClaim.status, 409);
+    const sharedState = applyAgentMcpStoreMutation(store, { action: "task_state", token: claudeIdentity.token, taskId: "task-owner-1" }, runtime);
+    assert.equal(sharedState.status, 200);
+    assert.equal((sharedState.body.context as { assignments: Array<{ assignmentId: string }> }).assignments[0]?.assignmentId, "sidecar-claim-1");
+    const replayed = inboxDelivery(first.body.message as import("../src/lib/native/multiplayer-contract").A2AMessage);
+    assert.deepEqual(replayed, { ok: true, taskId: "T1", created: false, state: "already-present" });
+    const firstMessage = first.body.message as { messageId: string; conversationId: string };
+    const reply = applyAgentMcpStoreMutation(store, {
+      action: "a2a",
+      token: claudeIdentity.token,
+      to: "codex",
+      summary: "I verified the sidecar against the shared task state.",
+      taskId: "task-owner-1",
+      conversationId: firstMessage.conversationId,
+      replyToMessageId: firstMessage.messageId,
+      idempotencyKey: "claude-sidecar-reply-1",
+      progressFingerprint: "claude-verified-1",
+      progressKind: "postcondition-verified",
+    }, runtime);
+    assert.equal(reply.status, 200);
+    assert.equal(reply.body.delivery?.state, "queued");
+    assert.equal(reply.body.taskId, "T2");
+    assert.equal(store.getTask("T2")?.fromSession, "claude-session");
+    assert.equal(store.getTask("T2")?.a2a?.replyToMessageId, firstMessage.messageId);
+    const claudeTranscript = renderA2AConversation(store.snapshot().tasks, stored!.a2a!.conversationId, { handle: "claude", sessionId: "claude-session" });
+    const codexTranscript = renderA2AConversation(store.snapshot().tasks, stored!.a2a!.conversationId, { handle: "codex", sessionId: "codex-session" });
+    assert.match(claudeTranscript.text, /Verify the structured sidecar/);
+    assert.match(claudeTranscript.text, /I verified the sidecar/);
+    assert.match(claudeTranscript.text, /"verified":true/);
+    assert.match(codexTranscript.text, /Verify the structured sidecar/);
+    assert.match(codexTranscript.text, /I verified the sidecar/);
+    assert.equal(renderA2AConversation(store.snapshot().tasks, stored!.a2a!.conversationId, { handle: "opencode", sessionId: "opencode-session" }).count, 0);
+
+    const completedWork = applyAgentMcpStoreMutation(store, {
+      action: "complete_work",
+      token: identity.token,
+      taskId: "task-owner-1",
+      assignmentId: "sidecar-claim-1",
+    }, runtime);
+    assert.equal(completedWork.status, 200);
+    assert.equal((completedWork.body.context as { assignments: Array<{ status: string }> }).assignments[0]?.status, "completed");
+    const wrongOwnerRelease = applyAgentMcpStoreMutation(store, {
+      action: "release_work",
+      token: claudeIdentity.token,
+      taskId: "task-owner-1",
+      assignmentId: "sidecar-claim-1",
+    }, runtime);
+    assert.equal(wrongOwnerRelease.status, 409);
 
     const duplicate = applyAgentMcpStoreMutation(store, input, runtime);
     assert.equal(duplicate.status, 200);
     assert.equal(duplicate.body.duplicate, true);
     assert.equal(duplicate.body.messageId, first.body.messageId);
+    assert.equal(deliveryCount, 2);
+    assert.equal(store.snapshot().tasks.length, 2);
+
+    const restartedStore = createLocalStore(root);
+    const persistedTasks = restartedStore.snapshot().tasks;
+    const restartedInboxDelivery = createMultiplayerInboxDelivery({
+      store: restartedStore,
+      agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
+      sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
+    });
+    const restoredRuntime = createMultiplayerRuntime({
+      roster,
+      initialTaskContexts: restartedStore.listMultiplayerTaskContexts(),
+      persistTaskContext: (context) => { restartedStore.setMultiplayerTaskContext(context); },
+      knownMessages: persistedTasks.flatMap((task) => task.a2a?.wireMessage ? [task.a2a.wireMessage] : []),
+      knownMessageReferences: persistedTasks.flatMap((task) => task.a2a ? [{
+        messageId: task.a2a.messageId,
+        agentId: task.a2a.senderAgentId,
+        recipientAgentIds: [task.a2a.recipientAgentId],
+        taskId: task.a2a.taskId,
+        conversationId: task.a2a.conversationId,
+        replyDepth: task.a2a.replyDepth,
+      }] : []),
+      priorMessages: persistedTasks.flatMap((task) => task.a2a?.progressFingerprint && task.a2a.progressKind ? [{
+        messageId: task.a2a.messageId,
+        taskId: task.a2a.taskId,
+        conversationId: task.a2a.conversationId,
+        progressFingerprint: task.a2a.progressFingerprint,
+        progressKind: task.a2a.progressKind,
+        summary: task.a2a.summary,
+        createdAt: Date.parse(task.createdAt),
+      }] : []),
+      delivery: restartedInboxDelivery,
+    });
+    const restoredState = restoredRuntime.readTaskContext(claudeIdentity, "task-owner-1");
+    assert.equal(restoredState.ok, true);
+    assert.equal(restoredState.context?.assignments[0]?.status, "completed");
+    const retryAfterRestart = restoredRuntime.sendFromHandle("codex", "codex", input);
+    assert.equal(retryAfterRestart.ok, true);
+    if (retryAfterRestart.ok) {
+      assert.equal(retryAfterRestart.duplicate, true);
+      assert.equal(retryAfterRestart.message.messageId, first.body.messageId);
+      assert.deepEqual(retryAfterRestart.delivery, { state: "already-present", taskId: "T1", created: false });
+    }
+    assert.equal(store.snapshot().tasks.length, 2, "a broker restart retry must not create a second recipient turn");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

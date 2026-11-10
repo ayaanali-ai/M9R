@@ -142,11 +142,11 @@ for (const scenario of SCENARIOS) {
       const { manager, service, cleanup } = realService(root, store, page.url);
       const identity = store.issueIdentity("codex", "codex", "session-falsify-chrome");
       const task = store.addTask({ from: "you", to: "codex", goal: "falsifying test chrome", origin: "human_typed", idempotencyKey: `falsify-chrome-${scenario.name}`, targetSession: "session-falsify-chrome" }).task;
-      let anchor: { pid: number; windowId: string } | undefined;
+      let anchor: { pid: number; windowId: string; processGeneration?: string } | undefined;
       try {
         const launched = await service.launch(identity.token, task.id, "test-window", "background");
         assert.ok(launched.name, "launch returned a real stage name");
-        anchor = manager.list().find((stage) => stage.name === launched.name)?.anchor;
+        anchor = manager.list().find((stage) => stage.name === launched.name)?.anchor ?? undefined;
 
         // Chrome's own launch-settle takes real time (it is not finished the
         // moment the OS reports a window exists).

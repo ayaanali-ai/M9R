@@ -16,6 +16,7 @@ import { canQueue, normCwd } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, PROVIDER_SESSION_RECOVERY_TTL_MS, PROVIDER_TURN_TTL_MS, newConnectionId, sameConnectionCwd, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
 import { createInitialProviderUpdateState, normalizeProviderUpdateState, type ProviderUpdateState } from "./provider-update-lifecycle-core";
+import { taskContextSchema, type TaskContext } from "./multiplayer-task-context";
 
 /**
  * Findings I/AD: this is the one place a native cursor/feed color is chosen for an agent handle.
@@ -59,7 +60,9 @@ function taskActivityLabel(task: Task, phase: "created" | "completed" | "failed"
     return `${task.id} provider execution failed`;
   }
   const route = `@${task.from} → @${task.to}`;
-  if (phase === "created") return `${task.id} teammate request queued (${route}, depth ${task.replyDepth ?? 0})`;
+  if (phase === "created") return task.coordination?.intent === "message"
+    ? `${task.id} teammate message queued (${route}${task.a2a?.conversationId ? `, conversation ${task.a2a.conversationId}` : ""})`
+    : `${task.id} teammate request queued (${route}, depth ${task.replyDepth ?? 0})`;
   if (phase === "completed") return `${task.id} teammate result received (${route})`;
   return `${task.id} teammate request failed (${route})`;
 }
@@ -117,6 +120,8 @@ const MAX_STAGE_TIMING_DETAIL_CHARS = 240;
 const MAX_COMPUTER_OPERATION_RECEIPTS = 10_000;
 /** Keep broker-owned multiplayer mutation receipts bounded; fail closed rather than evicting a terminal lease. */
 const MAX_MUTATION_RECEIPTS = 10_000;
+/** Shared task coordination remains durable across owner-broker restarts. */
+const MAX_MULTIPLAYER_TASK_CONTEXTS = 512;
 /** Hard ceiling for the complete local snapshot, including extensible cursor and rule maps. */
 export const MAX_LOCAL_STATE_BYTES = 16 * 1024 * 1024;
 /** Keep each rewritten local state file within a predictable task count when user work can be retired safely. */
@@ -242,6 +247,8 @@ interface StoreState {
   computerOperations: ComputerOperationRecord[];
   /** Durable claimed/terminal receipts for broker-owned multiplayer mutation leases. */
   mutationReceipts: MutationReceiptRecord[];
+  /** Durable shared work ownership, progress and turn-taking state, keyed by task ID. */
+  multiplayerTaskContexts: Record<string, TaskContext>;
   /** Private provider-to-MCP claims; never rendered in provider prompts or tool arguments. */
   connectionClaims: ConnectionClaim[];
   /** Durable MCP bindings; a worker restart may reuse one while the provider identity is active. */
@@ -280,7 +287,7 @@ export interface SessionLink {
   updatedAt: string;
 }
 
-const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], mutationReceipts: [], connectionClaims: [], connectionBindings: [], activeProviderTurns: [], providerUpdates: createInitialProviderUpdateState().providers, cursorColors: {} });
+const emptyState = (): StoreState => ({ version: 1, nextTaskNo: 1, nextSeq: {}, tasks: [], cursors: {}, endpoints: {}, events: [], rules: [], nextRuleNo: 1, sessions: [], links: [], nextLinkNo: 1, identities: [], stageOperations: [], computerOperations: [], mutationReceipts: [], multiplayerTaskContexts: {}, connectionClaims: [], connectionBindings: [], activeProviderTurns: [], providerUpdates: createInitialProviderUpdateState().providers, cursorColors: {} });
 
 const stageOperationKey = (input: StageOperationInput): string => createHash("sha256")
   .update(JSON.stringify([normalizeHandle(input.handle), input.sessionId, input.taskId, input.operationId]))
@@ -1993,6 +2000,30 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     snapshot(): { endpoints: EndpointRecord[]; sessions: SessionRecord[]; tasks: Task[]; events: EventRecord[]; cursors: Record<string, number> } {
       const s = readState();
       return { endpoints: Object.values(s.endpoints), sessions: s.sessions, tasks: s.tasks, events: s.events, cursors: s.cursors };
+    },
+
+    /** Read one validated shared-work state without exposing the entire local store snapshot. */
+    getMultiplayerTaskContext(taskId: string): TaskContext | undefined {
+      const value = readState().multiplayerTaskContexts[taskId];
+      return value ? taskContextSchema.parse(JSON.parse(JSON.stringify(value))) : undefined;
+    },
+
+    /** Read the bounded set needed to restore task-scoped coordination after a broker restart. */
+    listMultiplayerTaskContexts(): TaskContext[] {
+      return Object.values(readState().multiplayerTaskContexts).map((value) => taskContextSchema.parse(JSON.parse(JSON.stringify(value))));
+    },
+
+    /** Persist one validated task context atomically; never evict active coordination state silently. */
+    setMultiplayerTaskContext(value: unknown): TaskContext {
+      const context = taskContextSchema.parse(value);
+      return update((s) => {
+        if (!Object.hasOwn(s.multiplayerTaskContexts, context.taskId)
+          && Object.keys(s.multiplayerTaskContexts).length >= MAX_MULTIPLAYER_TASK_CONTEXTS) {
+          throw new Error(`M9R shared task state reached its safe capacity (${MAX_MULTIPLAYER_TASK_CONTEXTS}); no coordination state was evicted.`);
+        }
+        s.multiplayerTaskContexts[context.taskId] = context;
+        return taskContextSchema.parse(JSON.parse(JSON.stringify(context)));
+      });
     },
 
     getTask(id: string): Task | undefined {

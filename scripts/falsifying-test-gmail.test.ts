@@ -77,12 +77,12 @@ test(
     const { manager, service, cleanup } = realService(root, store);
     const identity = store.issueIdentity("codex", "codex", "session-falsify-gmail");
     const task = store.addTask({ from: "you", to: "codex", goal: "falsifying test gmail", origin: "human_typed", idempotencyKey: "falsify-gmail", targetSession: "session-falsify-gmail" }).task;
-    let anchor: { pid: number; windowId: string } | undefined;
+    let anchor: { pid: number; windowId: string; processGeneration?: string } | undefined;
     try {
       const launched = await service.launch(identity.token, task.id, "test-window", "background");
       assert.ok(launched.name, "launch returned a real stage name");
       const stageName = launched.name!;
-      anchor = manager.list().find((stage) => stage.name === stageName)?.anchor;
+      anchor = manager.list().find((stage) => stage.name === stageName)?.anchor ?? undefined;
 
       // Gmail is a heavy real app over a real network -- give it real time
       // to finish loading and rendering compose, polling rather than

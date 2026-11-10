@@ -75,7 +75,7 @@ test(
     const task = store.addTask({ from: "you", to: "codex", goal: "falsifying test office", origin: "human_typed", idempotencyKey: "falsify-office", targetSession: "session-falsify-office" }).task;
     const workDir = mkdtempSync(join(tmpdir(), "m9r-falsify-office-save-"));
     const savePath = join(workDir, "falsify-office.docx");
-    let anchor: { pid: number; windowId: string } | undefined;
+    let anchor: { pid: number; windowId: string; processGeneration?: string } | undefined;
     try {
       // Word's own splash-window-to-real-document-window handoff is slower
       // and less uniform than Chrome's or Notepad's -- the native host's own
@@ -103,7 +103,7 @@ test(
       if (!launched) throw launchError instanceof Error ? launchError : new Error("Word's launch never produced a presentable window after 5 attempts");
       assert.ok(launched.name, "launch returned a real stage name");
       const stageName = launched.name!;
-      anchor = manager.list().find((stage) => stage.name === stageName)?.anchor;
+      anchor = manager.list().find((stage) => stage.name === stageName)?.anchor ?? undefined;
       assert.ok(anchor, "Word's real anchor is registered");
 
       // Word is a heavy real app with its own splash/load sequence -- give

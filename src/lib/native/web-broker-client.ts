@@ -6,6 +6,7 @@ import type { TaskCompletionReport } from "./task-completion-contract";
 import type { TaskStageMode } from "./task-desktop-stage";
 import type { MultiplayerA2ASendInput, MultiplayerDeliveryReceipt, MultiplayerSendResult } from "./multiplayer-runtime";
 import { parseA2AMessage, type A2AMessage } from "./multiplayer-contract";
+import { taskContextSchema, type TaskContext } from "./multiplayer-task-context";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
 const CURSOR_PRIME_TIMEOUT_MS = 5_000;
@@ -31,6 +32,11 @@ export interface WebBrokerClient {
   submitAgentTask?(token: string, to: string, goal: string): Promise<{ ok: boolean; taskId?: string; created?: boolean; error?: string }>;
   /** Structured provider-neutral teammate message. Kept separate from legacy task delivery. */
   sendA2A?(token: string, input: MultiplayerA2ASendInput): Promise<MultiplayerSendResult>;
+  /** Shared task state and conflict-safe work ownership for A2A coordination. */
+  getMultiplayerTaskContext?(token: string, taskId: string): Promise<{ ok: boolean; context?: TaskContext; error?: string }>;
+  claimMultiplayerWork?(token: string, input: { taskId: string; assignmentId: string; workKey: string; summary: string }): Promise<{ ok: boolean; duplicate?: boolean; context?: TaskContext; error?: string }>;
+  completeMultiplayerWork?(token: string, taskId: string, assignmentId: string): Promise<{ ok: boolean; duplicate?: boolean; context?: TaskContext; error?: string }>;
+  releaseMultiplayerWork?(token: string, taskId: string, assignmentId: string): Promise<{ ok: boolean; duplicate?: boolean; context?: TaskContext; error?: string }>;
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
   /** Acknowledge only completed teammate replies addressed to the authenticated sending session. */
   markAgentResultsShown?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; error?: string }>;
@@ -70,8 +76,23 @@ type StructuredA2AStoreResponse = {
   duplicate?: boolean;
   message?: unknown;
   recipientAgentIds?: unknown;
+  taskId?: unknown;
   delivery?: unknown;
 };
+
+type SharedTaskStateResponse = { ok: boolean; context?: unknown; duplicate?: boolean; error?: string };
+
+function parseSharedTaskStateResponse(result: SharedTaskStateResponse, error: string):
+  | { ok: true; context: TaskContext; duplicate?: boolean }
+  | { ok: false; error: string } {
+  if (!result.ok) return { ok: false, error: result.error ?? error };
+  try {
+    const context = taskContextSchema.parse(result.context);
+    return { ok: true, context, ...(result.duplicate === undefined ? {} : { duplicate: result.duplicate }) };
+  } catch {
+    return { ok: false, error: "The owner broker returned invalid shared task state." };
+  }
+}
 
 function stageTransportFailure(error: unknown): string {
   if (error && typeof error === "object") {
@@ -193,30 +214,52 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
       } catch {
         return { ok: false, error: "The owner broker returned an invalid structured teammate message." };
       }
-      let delivery: MultiplayerDeliveryReceipt | undefined;
-      if (result.delivery !== undefined) {
-        if (!result.delivery || typeof result.delivery !== "object" || Array.isArray(result.delivery)) {
-          return { ok: false, error: "The owner broker returned invalid teammate delivery evidence." };
+      const rawDelivery = result.delivery && typeof result.delivery === "object" ? result.delivery as Record<string, unknown> : undefined;
+      const states = ["queued", "already-present", "pending", "uncertain", "completed", "held-no-progress", "not-configured", "failed"] as const;
+      const deliveryState = rawDelivery?.state;
+      const delivery = rawDelivery && states.some((state) => state === deliveryState)
+        ? {
+          state: deliveryState as typeof states[number],
+          ...(typeof rawDelivery.taskId === "string" ? { taskId: rawDelivery.taskId } : {}),
+          ...(typeof rawDelivery.created === "boolean" ? { created: rawDelivery.created } : {}),
+          ...(typeof rawDelivery.error === "string" ? { error: rawDelivery.error } : {}),
         }
-        const value = result.delivery as Record<string, unknown>;
-        if (!["queued", "pending", "partial", "failed"].includes(String(value.state))
-          || !Array.isArray(value.taskIds) || value.taskIds.some((id) => typeof id !== "string")
-          || (value.error !== undefined && typeof value.error !== "string")) {
-          return { ok: false, error: "The owner broker returned invalid teammate delivery evidence." };
-        }
-        delivery = {
-          state: value.state as MultiplayerDeliveryReceipt["state"],
-          taskIds: value.taskIds as string[],
-          ...(typeof value.error === "string" ? { error: value.error } : {}),
-        };
-      }
+        : { state: "not-configured" as const, error: "The owner broker did not return a recipient-inbox delivery receipt." };
       return {
         ok: true,
         duplicate: result.duplicate === true,
         message,
         recipientAgentIds: result.recipientAgentIds as string[],
-        ...(delivery ? { delivery } : {}),
+        delivery,
       };
+    },
+    async getMultiplayerTaskContext(token, taskId) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "task_state", token, taskId },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not read shared task state.");
+    },
+    async claimMultiplayerWork(token, input) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "claim_work", token, ...input },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not claim shared work.");
+    },
+    async completeMultiplayerWork(token, taskId, assignmentId) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "complete_work", token, taskId, assignmentId },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not complete shared work.");
+    },
+    async releaseMultiplayerWork(token, taskId, assignmentId) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "release_work", token, taskId, assignmentId },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not release shared work.");
     },
     async claimAgentInbox(token, taskIds) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "claim_inbox", token, taskIds } });

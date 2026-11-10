@@ -10,7 +10,6 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
-import { createManagedA2ADelivery } from "@/lib/native/managed-a2a-delivery";
 import { createTaskDesktopStageService } from "@/lib/native/task-desktop-stage";
 import { readOwnerWorkMode, setOwnerWorkMode } from "@/lib/native/owner-work-mode";
 import { writeWebActivity } from "@/lib/native/feed-writer";
@@ -27,6 +26,7 @@ import type { StageApprovalRequest } from "@/lib/native/web-broker-core";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
+import { createMultiplayerInboxDelivery } from "@/lib/native/multiplayer-inbox-delivery";
 import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
 import { subscribeA2ACursorChatter } from "@/lib/native/multiplayer-cursor-chatter";
 import type { MultiplayerRoster } from "@/lib/native/multiplayer-contract";
@@ -102,11 +102,34 @@ async function main(): Promise<void> {
       provider: agent.provider,
       handle: agent.handle,
     })),
-  };
-  const multiplayer = createMultiplayerRuntime({ roster: multiplayerRoster });
-  multiplayer.setDelivery(createManagedA2ADelivery({
-    agents: config.agents,
+  } as const;
+  const priorA2AMessages = store.snapshot().tasks.flatMap((task) => task.a2a ? [{
+    messageId: task.a2a.messageId,
+    taskId: task.a2a.taskId,
+    conversationId: task.a2a.conversationId,
+    progressFingerprint: task.a2a.progressFingerprint,
+    progressKind: task.a2a.progressKind,
+    summary: task.a2a.summary,
+    createdAt: Date.parse(task.createdAt),
+  }] : []);
+  const multiplayer = createMultiplayerRuntime({
+    roster: multiplayerRoster,
+    knownMessages: store.snapshot().tasks.flatMap((task) => task.a2a?.wireMessage ? [task.a2a.wireMessage] : []),
+    initialTaskContexts: store.listMultiplayerTaskContexts(),
+    persistTaskContext: (context) => { store.setMultiplayerTaskContext(context); },
+    knownMessageReferences: store.snapshot().tasks.flatMap((task) => task.a2a ? [{
+      messageId: task.a2a.messageId,
+      agentId: task.a2a.senderAgentId,
+      recipientAgentIds: [task.a2a.recipientAgentId],
+      taskId: task.a2a.taskId,
+      conversationId: task.a2a.conversationId,
+      replyDepth: task.a2a.replyDepth,
+    }] : []),
+    priorMessages: priorA2AMessages,
+  });
+  multiplayer.setDelivery(createMultiplayerInboxDelivery({
     store,
+    agents: config.agents.map((agent) => ({ handle: agent.handle, agentId: `agent-${agent.handle}` })),
     sessionIdOf: (handle) => sessionOwner.current?.sessionIdOf(handle),
   }));
   // One broker-owned mutation fence is shared by the browser route and the
