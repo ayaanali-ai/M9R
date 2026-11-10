@@ -170,6 +170,28 @@ test("task completion removes the persistent cursor but preserves the agent-sess
   } finally { await f.service.close(); f.cleanup(); }
 });
 
+test("a follow-up task re-shows its cursor after the prior task cleaned it up", async () => {
+  const f = fixture(true);
+  const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 2_100));
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+
+    f.store.markDelivered([f.task.id], f.identity.sessionId);
+    assert.equal(f.store.recordTaskResult(f.identity.token, f.task.id, "Done", { status: "completed", remainingWork: [] }).ok, true);
+    await waitForReaperTick();
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"]);
+
+    const next = f.store.addTask({ from: "you", to: "codex", goal: "Next task", origin: "human_typed",
+      idempotencyKey: "cursor-follow-up", targetSession: "session-one" }).task;
+    await f.service.prepare(f.identity.token, next.id, "owner-preview");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one", "show:session-one"],
+      "the next task is not suppressed by the previous task's presentation cache");
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("task timing persists native subphase labels, operation correlation, and fractional duration", () => {
   const f = fixture();
   try {
@@ -196,6 +218,22 @@ test("task timing persists native subphase labels, operation correlation, and fr
       cached: true,
       detail: "route=native",
     });
+  } finally { f.cleanup(); }
+});
+
+test("task timing persists cursor overlay host timings", () => {
+  const f = fixture();
+  try {
+    assert.equal(f.store.recordStageTiming(f.task.id, {
+      phase: "cursor-overlay",
+      startedAt: "2026-11-09T12:00:00.000Z",
+      endedAt: "2026-11-09T12:00:00.012Z",
+      durationMs: 12,
+      status: "ok",
+      detail: "renderer=m9r;screenPoint=verified;visible=true",
+    }), true);
+    assert.equal(f.store.getTask(f.task.id)?.stageTiming?.at(-1)?.phase, "cursor-overlay");
+    assert.equal(f.store.getTask(f.task.id)?.stageTimingSummary?.["cursor-overlay"]?.totalDurationMs, 12);
   } finally { f.cleanup(); }
 });
 

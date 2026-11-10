@@ -1051,7 +1051,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
      */
     recordStageTiming(taskId: string, event: StageTimingEvent): boolean {
       if (!/^T[0-9]{1,12}$/.test(taskId)
-        || !["queue_wait", "prepare", "launch", "launch-preflight", "launch-discovery", "stage-recovery", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "foreground-lease", "background-dispatch", "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation", "provider-acceptance", "first-visible-action", "completion"].includes(event.phase)
+        || !["queue_wait", "prepare", "launch", "launch-preflight", "launch-discovery", "stage-recovery", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "cursor-overlay", "foreground-lease", "background-dispatch", "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation", "provider-acceptance", "first-visible-action", "completion"].includes(event.phase)
         || !["ok", "error"].includes(event.status)
         || !Number.isFinite(event.durationMs) || event.durationMs < 0
         || Number.isNaN(Date.parse(event.startedAt)) || Number.isNaN(Date.parse(event.endedAt))) return false;

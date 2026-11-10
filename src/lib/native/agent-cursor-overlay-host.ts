@@ -13,6 +13,8 @@ export interface AgentCursorOverlayPoint {
 }
 
 export interface AgentCursorOverlayHost {
+  /** Start the transparent renderer before the first task, without showing a marker. */
+  warm?(): Promise<boolean>;
   upsert(point: AgentCursorOverlayPoint): Promise<boolean>;
   say(input: { id: string; to: string; toColor: Rgb; text: string }): Promise<boolean>;
   hide(id: string): Promise<void>;
@@ -151,6 +153,9 @@ export function createAgentCursorOverlayHost(input: {
   }
 
   return {
+    async warm() {
+      return ensureStarted();
+    },
     async upsert(point) {
       if (!point.id || point.id.length > 72 || !point.label || point.label.length > 28
         || !Number.isFinite(point.x) || !Number.isFinite(point.y)

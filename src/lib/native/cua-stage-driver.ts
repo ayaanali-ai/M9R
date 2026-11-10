@@ -1082,6 +1082,9 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const cursorOverlayHost = deps.cursorOverlayHost
     ?? (process.platform === "win32" && existsSync(cursorOverlayExecutable)
       ? createAgentCursorOverlayHost({ executablePath: cursorOverlayExecutable }) : undefined);
+  // The renderer is transparent and non-activating before it receives a
+  // marker. Warm it during broker startup so the first task avoids cold spawn.
+  void cursorOverlayHost?.warm?.().catch(() => undefined);
   const agentSessions = new Map<string, AgentCursorSession>();
   const cursorSessionNames = new Map<string, string>();
   const cursorOverlayPresentations = new Map<string, { id: string; label: string; color: readonly [number, number, number] }>();

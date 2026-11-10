@@ -59,6 +59,23 @@ test("serializes acknowledged cursor frames and closes the renderer process on s
   assert.equal(child?.killed, false, "normal shutdown does not require process termination");
 });
 
+test("warming starts the transparent renderer once before the first task marker", async () => {
+  const launched: FakeOverlayChild[] = [];
+  const spawnProcess = ((..._args: unknown[]) => {
+    const child = new FakeOverlayChild();
+    launched.push(child);
+    return child;
+  }) as never;
+  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess });
+
+  assert.equal(await host.warm?.(), true);
+  assert.equal(launched.length, 1);
+  assert.deepEqual(launched[0]?.commands, [], "warming does not make a marker visible");
+  assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: 25, y: 35 }), true);
+  assert.equal(launched.length, 1, "the first task reuses the warmed process");
+  await host.close();
+});
+
 test("A2A bubbles require an acknowledged visible sender and sanitize bounded text", async () => {
   const launched: FakeOverlayChild[] = [];
   const spawnProcess = ((..._args: unknown[]) => {

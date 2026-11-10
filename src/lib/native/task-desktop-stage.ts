@@ -488,6 +488,8 @@ export function createTaskDesktopStageService(input: {
   const ownedApps = new Map<string, OwnedStageApp>();
   const observedRegionRevisions = new Map<string, { surfaceId: string; surfaceRevision: number; regions: Map<string, number> }>();
   const activeAgentCursors = new Map<string, { identity: CuaAgentCursorIdentity; taskId: string }>();
+  const cursorPresentationPending = new Set<string>();
+  const cursorPresentationTask = new Map<string, string>();
   // A single failed identity/policy lookup is far more likely to be a transient
   // token-refresh or policy-reload race than a genuinely revoked session. Only
   // tear the cursor down after several consecutive failed ticks.
@@ -572,29 +574,32 @@ export function createTaskDesktopStageService(input: {
   async function primeResolvedCursor(target: CursorTarget): Promise<AgentCursorPrimeResult> {
     const key = cursorIdentityKey(target.identity);
     activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId });
-    const run = async (): Promise<AgentCursorPrimeResult> => {
-      const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
-        showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
-      }).showAgentCursor;
-      if (typeof showAgentCursor !== "function") {
-        activeAgentCursors.delete(key);
-        return { shown: false, reason: "The installed Cua runtime has no cursor presentation capability." };
-      }
-      try {
-        await showAgentCursor(target.stageName, target.identity);
-        return { shown: true, agent: target.identity.handle };
-      } catch {
-        // A visual prime is intentionally best-effort.  It must never turn a
-        // durable task send into a failed task or strand a half-created cursor.
-        activeAgentCursors.delete(key);
-        return { shown: false, reason: "The local cursor surface could not be shown." };
-      }
-    };
-    try {
-      return await enqueueStage(target.stageName, run);
-    } catch {
+    if (cursorPresentationTask.get(key) === target.taskId) return { shown: true, agent: target.identity.handle };
+    if (cursorPresentationPending.has(key)) return { shown: false, reason: "The local cursor surface is already starting." };
+    const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
+      showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
+    }).showAgentCursor;
+    if (typeof showAgentCursor !== "function") {
       activeAgentCursors.delete(key);
+      return { shown: false, reason: "The installed desktop runtime has no cursor presentation capability." };
+    }
+    cursorPresentationPending.add(key);
+    try {
+      // Cursor rendering has its own compositor queue and does not mutate the
+      // desktop. Keep it out of the per-stage action queue so it can appear at
+      // delivery time instead of waiting for app discovery or a long action.
+      const result = await showAgentCursor(target.stageName, target.identity);
+      if (result && typeof result === "object" && "visible" in result && result.visible !== true) {
+        if (activeAgentCursors.get(key)?.taskId === target.taskId) activeAgentCursors.delete(key);
+        return { shown: false, reason: "The local cursor surface did not confirm its first frame." };
+      }
+      cursorPresentationTask.set(key, target.taskId);
+      return { shown: true, agent: target.identity.handle };
+    } catch {
+      if (activeAgentCursors.get(key)?.taskId === target.taskId) activeAgentCursors.delete(key);
       return { shown: false, reason: "The local cursor surface could not be shown." };
+    } finally {
+      cursorPresentationPending.delete(key);
     }
   }
 
@@ -615,9 +620,7 @@ export function createTaskDesktopStageService(input: {
     catch { return false; }
   }
 
-  const cursorPresentationPending = new Set<string>();
-  const cursorPresentationAt = new Map<string, number>();
-  async function ensureCursorPrimed(stageName: string, identity: CuaAgentCursorIdentity): Promise<void> {
+  async function ensureCursorPrimed(stageName: string, identity: CuaAgentCursorIdentity, taskId: string): Promise<void> {
     const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
       showAgentCursor?: (stageName: string, cursorIdentity: CuaAgentCursorIdentity) => Promise<unknown>;
     }).showAgentCursor;
@@ -626,15 +629,25 @@ export function createTaskDesktopStageService(input: {
     // stage contract without inventing a fake cursor result in tests.
     if (typeof showAgentCursor !== "function") return;
     const key = cursorIdentityKey(identity);
+    if (cursorPresentationTask.get(key) === taskId) return;
     if (cursorPresentationPending.has(key)) return;
-    const last = cursorPresentationAt.get(key);
-    if (last !== undefined && Date.now() >= last && Date.now() - last < 60_000) return;
-    cursorPresentationAt.set(key, Date.now());
     cursorPresentationPending.add(key);
     // The compositor is presentation only. Its latency or failure must not
     // delay an observation, launch, mutation fence, or target dispatch.
-    void Promise.resolve().then(() => showAgentCursor(stageName, identity)).catch(() => undefined)
-      .finally(() => cursorPresentationPending.delete(key));
+    void Promise.resolve().then(() => showAgentCursor(stageName, identity)).then((result) => {
+      if (result && typeof result === "object" && "visible" in result && result.visible !== true) return;
+      const active = activeAgentCursors.get(key);
+      if (active && taskActive(active.taskId)) cursorPresentationTask.set(key, active.taskId);
+    }).catch(() => undefined).finally(() => {
+      cursorPresentationPending.delete(key);
+      const active = activeAgentCursors.get(key);
+      // If a follow-up task arrived while the first frame was pending, reuse
+      // that visible marker for the new task instead of losing its arrival.
+      if (active && active.taskId !== taskId && taskActive(active.taskId)
+        && cursorPresentationTask.get(key) !== active.taskId) {
+        void ensureCursorPrimed(stageName, active.identity, active.taskId);
+      }
+    });
   }
 
   function authorize(token: string, taskId: string, mode: TaskStageMode) {
@@ -724,7 +737,7 @@ export function createTaskDesktopStageService(input: {
       // action. The native cursor is visual-only here: it does not focus a
       // window or move the owner's physical pointer. Test drivers may omit the
       // optional visual seam; the production driver always provides it.
-      await ensureCursorPrimed(name, identity);
+      await ensureCursorPrimed(name, identity, taskId);
       // Return opaque coordination IDs only, never desktop GUIDs or owner-window identifiers.
       return { name, mode, agent: normalizeHandle(identity.handle), taskId, hasAnchor: Boolean(assignedStage?.anchor),
         ...(mode === "background" && assignedStage ? { roomDesktopId: assignedStage.roomDesktopId } : {}),
@@ -756,7 +769,9 @@ export function createTaskDesktopStageService(input: {
       if (active?.taskId === taskId) active.controller.abort(new Error("Explicit desktop stop requested."));
       inputStreams.cancelTask(streamIdentity, taskId, new Error("Explicit desktop stop requested."));
       try { await driver.closeAgentCursor(streamIdentity); } catch { /* stop remains effective even if marker cleanup fails */ }
-      activeAgentCursors.delete(cursorIdentityKey(streamIdentity));
+      const cursorKey = cursorIdentityKey(streamIdentity);
+      activeAgentCursors.delete(cursorKey);
+      cursorPresentationTask.delete(cursorKey);
       const endedMs = Date.now();
       recordStageTiming(taskId, { phase: "stop", startedAt: new Date(startedMs).toISOString(), endedAt: new Date(endedMs).toISOString(),
         durationMs: endedMs - startedMs, status: "ok" });
@@ -776,7 +791,7 @@ export function createTaskDesktopStageService(input: {
       // verification failure. Re-prime immediately before the first real
       // desktop operation so cursor visibility is a current invariant, not a
       // stale promise from prepare().
-      await ensureCursorPrimed(name, identity);
+      await ensureCursorPrimed(name, identity, taskId);
       if (action.kind === "window_status") {
         const selected = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
         if (!selected) throw new Error("This session has no selected application window.");
@@ -1183,7 +1198,7 @@ export function createTaskDesktopStageService(input: {
       // m9r_stage_app is itself a desktop operation and may be the first tool
       // call in a task. Establish the provider's visible overlay before any
       // window discovery, launch, or focus-related work begins.
-      await ensureCursorPrimed(name, identity);
+      await ensureCursorPrimed(name, identity, taskId);
       const receiptInput = operationId ? {
         handle: identity.handle,
         sessionId: identity.sessionId,
@@ -1691,6 +1706,7 @@ export function createTaskDesktopStageService(input: {
             // agent-session-scoped and must survive a completed task so the
             // next task keeps the same independent stream identity/process.
             activeAgentCursors.delete(key);
+            cursorPresentationTask.delete(key);
             cursorAuthFailures.delete(key);
           } catch { /* retry terminal-task cleanup on the next tick */ }
           continue;
@@ -1715,6 +1731,7 @@ export function createTaskDesktopStageService(input: {
           await driver.closeAgentCursor(active.identity);
           manager.closeInputStream?.(agentInputStreamId(active.identity));
           activeAgentCursors.delete(key);
+          cursorPresentationTask.delete(key);
           cursorAuthFailures.delete(key);
         } catch { /* retry revocation on the next tick; Driver idle-hide is the fail-safe */ }
       }
@@ -1730,6 +1747,7 @@ export function createTaskDesktopStageService(input: {
     await inputStreams.close();
     await Promise.all([...stageQueues.values(), reaperPending]);
     activeAgentCursors.clear();
+    cursorPresentationTask.clear();
     observedRegionRevisions.clear();
     try {
       await driver.shutdown();
