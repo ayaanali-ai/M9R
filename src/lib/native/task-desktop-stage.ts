@@ -78,6 +78,17 @@ function stageCoordinationKey(goal: string): string {
 }
 
 /**
+ * Coalesce duplicate launches only when agents share both the same task intent
+ * and the same app. The intent key alone is not an execution lock: agents may
+ * launch independent apps for one multiplayer task at the same time.
+ */
+export function ownerPreviewLaunchQueueKey(goal: string, appId: string): string {
+  const coordinationKey = stageCoordinationKey(goal);
+  const appKey = createHash("sha256").update(appId.trim().toLowerCase()).digest("hex");
+  return `owner-preview-launch:${coordinationKey}:${appKey}`;
+}
+
+/**
  * `inspectStage`'s "anchor is unavailable" message is the one case where the native
  * helper actually could not find the window at all -- genuinely closed or crashed.
  * Every other inspectStage failure (a helper timeout or malformed response) means
@@ -1186,7 +1197,7 @@ export function createTaskDesktopStageService(input: {
     if (manager.list().find((stage) => stage.name === initial.name)?.fencedBinding && !input.mutationFence) {
       throw new DesktopInputNotDispatchedError("This app target requires the owner broker's mutation fence; no launch or focus action was sent.", "dispatch-gate");
     }
-    const queueName = mode === "owner-preview" ? stageCoordinationKey(initial.task.goal) : initial.name;
+    const queueName = mode === "owner-preview" ? ownerPreviewLaunchQueueKey(initial.task.goal, appId) : initial.name;
     const run = async () => {
       const { name, identity, task } = authorize(token, taskId, mode);
       const coordinationKey = mode === "owner-preview" ? stageCoordinationKey(task.goal) : undefined;

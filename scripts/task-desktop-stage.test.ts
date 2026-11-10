@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
-import { createTaskDesktopStageService, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
+import { createTaskDesktopStageService, ownerPreviewLaunchQueueKey, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
 import { createWindowsDesktopStageManager, type WindowsStageDependencies } from "../src/lib/native/windows-desktop-stage";
 import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
@@ -18,6 +18,16 @@ import { setOwnerWorkMode } from "../src/lib/native/owner-work-mode";
 
 type TestVisibleWindow = { pid: number; windowId: string; title: string; width: number; height: number;
   appName?: string; processName?: string | null; className?: string; zOrder?: number; processPath?: string | null; appUserModelId?: string | null };
+
+test("owner-preview launch queues coalesce same-app joins without blocking different apps", () => {
+  const goal = "Work together: Codex handles Calculator while Claude handles Edge";
+  assert.equal(ownerPreviewLaunchQueueKey(goal, "Calculator"), ownerPreviewLaunchQueueKey(goal, "calculator"),
+    "Windows app references are case-insensitive for duplicate-launch coordination");
+  assert.notEqual(ownerPreviewLaunchQueueKey(goal, "Calculator"), ownerPreviewLaunchQueueKey(goal, "Edge"),
+    "independent apps in one multiplayer task must have independent launch queues");
+  assert.notEqual(ownerPreviewLaunchQueueKey(goal, "Calculator"), ownerPreviewLaunchQueueKey(`${goal} follow-up`, "Calculator"),
+    "different task intents must not share a launch queue");
+});
 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
   readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>, fenced = false,
