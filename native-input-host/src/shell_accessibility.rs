@@ -8,16 +8,23 @@ use windows::Win32::{
         COINIT_MULTITHREADED,
     },
     UI::Accessibility::{
-        CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
-        IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
+        CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest,
+        IUIAutomationElement, IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
         IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
-        IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_ButtonControlTypeId,
-        UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_EditControlTypeId,
-        UIA_HyperlinkControlTypeId, UIA_InvokePatternId, UIA_LegacyIAccessiblePatternId,
-        UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuItemControlTypeId,
-        UIA_RadioButtonControlTypeId, UIA_ScrollPatternId, UIA_SelectionItemPatternId,
-        UIA_TabItemControlTypeId, UIA_TogglePatternId, UIA_TreeItemControlTypeId,
-        UIA_ValuePatternId,
+        IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_AutomationIdPropertyId,
+        UIA_BoundingRectanglePropertyId, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
+        UIA_ClassNamePropertyId, UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId,
+        UIA_EditControlTypeId, UIA_HasKeyboardFocusPropertyId, UIA_HyperlinkControlTypeId,
+        UIA_InvokePatternId, UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId,
+        UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId, UIA_LegacyIAccessibleDefaultActionPropertyId,
+        UIA_LegacyIAccessiblePatternId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+        UIA_LocalizedControlTypePropertyId, UIA_MenuItemControlTypeId, UIA_NamePropertyId,
+        UIA_RadioButtonControlTypeId, UIA_ScrollHorizontalScrollPercentPropertyId,
+        UIA_ScrollHorizontalViewSizePropertyId, UIA_ScrollHorizontallyScrollablePropertyId,
+        UIA_ScrollPatternId, UIA_ScrollVerticalScrollPercentPropertyId,
+        UIA_ScrollVerticalViewSizePropertyId, UIA_ScrollVerticallyScrollablePropertyId,
+        UIA_SelectionItemPatternId, UIA_TabItemControlTypeId, UIA_TogglePatternId,
+        UIA_TreeItemControlTypeId, UIA_ValueIsReadOnlyPropertyId, UIA_ValuePatternId,
     },
     UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -40,6 +47,59 @@ fn create_non_focusing_automation() -> windows::core::Result<IUIAutomation> {
         automation2.SetAutoSetFocus(false)?;
     }
     Ok(automation)
+}
+
+/// Every full-tree walk (`desktop_structure`/`window_structure`) previously read
+/// each element's properties one at a time through `Current*` getters, each a
+/// separate cross-process COM call to the target application -- roughly ten
+/// round trips per element, so a 4096-element window could cost ~45,000 of
+/// them. `IUIAutomationCacheRequest` lets UI Automation fetch every property
+/// (and pattern) listed here, for one element, in a single round trip; the
+/// walker then reads them back locally via the matching `Cached*` getters
+/// with no further cross-process calls. This changes nothing about which
+/// properties are read or how elements are filtered -- only how many network
+/// round trips it costs to read them.
+fn build_structure_cache_request(
+    automation: &IUIAutomation,
+) -> windows::core::Result<IUIAutomationCacheRequest> {
+    let request = unsafe { automation.CreateCacheRequest() }?;
+    for property in [
+        UIA_IsControlElementPropertyId,
+        UIA_IsOffscreenPropertyId,
+        UIA_BoundingRectanglePropertyId,
+        UIA_NamePropertyId,
+        UIA_ControlTypePropertyId,
+        UIA_LocalizedControlTypePropertyId,
+        UIA_ClassNamePropertyId,
+        UIA_AutomationIdPropertyId,
+        UIA_IsEnabledPropertyId,
+        UIA_HasKeyboardFocusPropertyId,
+        UIA_IsPasswordPropertyId,
+        UIA_ValueIsReadOnlyPropertyId,
+        UIA_LegacyIAccessibleDefaultActionPropertyId,
+        UIA_ScrollHorizontallyScrollablePropertyId,
+        UIA_ScrollVerticallyScrollablePropertyId,
+        UIA_ScrollHorizontalScrollPercentPropertyId,
+        UIA_ScrollVerticalScrollPercentPropertyId,
+        UIA_ScrollHorizontalViewSizePropertyId,
+        UIA_ScrollVerticalViewSizePropertyId,
+    ] {
+        unsafe { request.AddProperty(property) }?;
+    }
+    // Requesting these patterns here (not just their properties above) is what
+    // lets GetCachedPatternAs below avoid its own separate round trip just to
+    // check whether an element supports the pattern at all.
+    for pattern in [
+        UIA_InvokePatternId,
+        UIA_SelectionItemPatternId,
+        UIA_TogglePatternId,
+        UIA_LegacyIAccessiblePatternId,
+        UIA_ValuePatternId,
+        UIA_ScrollPatternId,
+    ] {
+        unsafe { request.AddPattern(pattern) }?;
+    }
+    Ok(request)
 }
 
 struct ComApartment;
@@ -306,6 +366,7 @@ pub fn desktop_structure(value: &Value) -> Result<Value, String> {
     let root = unsafe { automation.GetRootElement() }.map_err(|e| e.to_string())?;
     let walker: IUIAutomationTreeWalker =
         unsafe { automation.ControlViewWalker() }.map_err(|e| e.to_string())?;
+    let cache_request = build_structure_cache_request(&automation).map_err(|e| e.to_string())?;
 
     let origin_x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
     let origin_y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
@@ -318,10 +379,11 @@ pub fn desktop_structure(value: &Value) -> Result<Value, String> {
     let mut elements = Vec::with_capacity(max_elements);
     let mut truncated = false;
     let mut next_ref = 0usize;
-    let first = unsafe { walker.GetFirstChildElement(&root) };
+    let first = unsafe { walker.GetFirstChildElementBuildCache(&root, &cache_request) };
     if let Ok(child) = first {
         walk_desktop_elements(
             &walker,
+            &cache_request,
             &child,
             0,
             max_depth,
@@ -386,14 +448,17 @@ pub fn window_structure(value: &Value) -> Result<Value, String> {
         format!("UI Automation could not disable implicit target focus: {error}")
     })?;
     let hwnd = HWND(handle as *mut core::ffi::c_void);
-    let root = unsafe { automation.ElementFromHandle(hwnd) }.map_err(|e| e.to_string())?;
     let walker: IUIAutomationTreeWalker =
         unsafe { automation.ControlViewWalker() }.map_err(|e| e.to_string())?;
+    let cache_request = build_structure_cache_request(&automation).map_err(|e| e.to_string())?;
+    let root = unsafe { automation.ElementFromHandleBuildCache(hwnd, &cache_request) }
+        .map_err(|e| e.to_string())?;
     let mut elements = Vec::with_capacity(max_elements);
     let mut truncated = false;
     let mut next_ref = 0usize;
     walk_window_element(
         &walker,
+        &cache_request,
         &root,
         0,
         max_depth,
@@ -415,6 +480,7 @@ pub fn window_structure(value: &Value) -> Result<Value, String> {
 
 fn walk_window_element(
     walker: &IUIAutomationTreeWalker,
+    cache_request: &IUIAutomationCacheRequest,
     element: &IUIAutomationElement,
     depth: usize,
     max_depth: usize,
@@ -429,76 +495,71 @@ fn walk_window_element(
         *truncated = true;
         return;
     }
-    let control = unsafe { element.CurrentIsControlElement() }
+    let control = unsafe { element.CachedIsControlElement() }
         .map(|v| v.as_bool())
         .unwrap_or(false);
-    let offscreen = unsafe { element.CurrentIsOffscreen() }
+    let offscreen = unsafe { element.CachedIsOffscreen() }
         .map(|v| v.as_bool())
         .unwrap_or(true);
-    let rect = unsafe { element.CurrentBoundingRectangle() }.ok();
+    let rect = unsafe { element.CachedBoundingRectangle() }.ok();
     let visible = rect
         .as_ref()
         .is_some_and(|r| r.right > r.left && r.bottom > r.top);
-    let label = unsafe { element.CurrentName() }
+    let label = unsafe { element.CachedName() }
         .ok()
         .map(|v| v.to_string())
         .unwrap_or_default();
-    let role = unsafe { element.CurrentControlType() }
+    let role = unsafe { element.CachedControlType() }
         .ok()
         .and_then(canonical_control_type_name)
         .map(str::to_owned)
         .or_else(|| {
-            unsafe { element.CurrentLocalizedControlType() }
+            unsafe { element.CachedLocalizedControlType() }
                 .ok()
                 .map(|v| v.to_string())
         })
         .unwrap_or_default();
-    let class_name = unsafe { element.CurrentClassName() }
+    let class_name = unsafe { element.CachedClassName() }
         .ok()
         .map(|v| v.to_string())
         .unwrap_or_default();
-    let automation_id = unsafe { element.CurrentAutomationId() }
+    let automation_id = unsafe { element.CachedAutomationId() }
         .ok()
         .map(|v| v.to_string())
         .unwrap_or_default();
-    let enabled = unsafe { element.CurrentIsEnabled() }
+    let enabled = unsafe { element.CachedIsEnabled() }
         .map(|v| v.as_bool())
         .unwrap_or(false);
-    let focused = unsafe { element.CurrentHasKeyboardFocus() }
+    let focused = unsafe { element.CachedHasKeyboardFocus() }
         .map(|v| v.as_bool())
         .unwrap_or(false);
     if control && !offscreen && visible && (!label.trim().is_empty() || !role.trim().is_empty()) {
         *next_ref += 1;
         let bounds = rect.expect("visible UIA element must have bounds");
-        let supports_invoke = unsafe { element.GetCurrentPattern(UIA_InvokePatternId) }
-            .and_then(|p| p.cast::<IUIAutomationInvokePattern>())
+        let supports_invoke = unsafe { element.GetCachedPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
             .is_ok();
-        let supports_select = unsafe { element.GetCurrentPattern(UIA_SelectionItemPatternId) }
-            .and_then(|p| p.cast::<IUIAutomationSelectionItemPattern>())
+        let supports_select = unsafe { element.GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId) }
             .is_ok();
-        let supports_toggle = unsafe { element.GetCurrentPattern(UIA_TogglePatternId) }
-            .and_then(|p| p.cast::<IUIAutomationTogglePattern>())
+        let supports_toggle = unsafe { element.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }
             .is_ok();
-        let supports_legacy = unsafe { element.GetCurrentPattern(UIA_LegacyIAccessiblePatternId) }
-            .and_then(|p| p.cast::<IUIAutomationLegacyIAccessiblePattern>())
+        let supports_legacy = unsafe { element.GetCachedPatternAs::<IUIAutomationLegacyIAccessiblePattern>(UIA_LegacyIAccessiblePatternId) }
             .ok()
-            .and_then(|pattern| unsafe { pattern.CurrentDefaultAction() }.ok())
+            .and_then(|pattern| unsafe { pattern.CachedDefaultAction() }.ok())
             .is_some_and(|action| !action.to_string().trim().is_empty());
-        let value_pattern = unsafe { element.GetCurrentPattern(UIA_ValuePatternId) }
-            .and_then(|p| p.cast::<IUIAutomationValuePattern>())
+        let value_pattern = unsafe { element.GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
             .ok();
         let supports_value = value_pattern.as_ref().is_some_and(|pattern| {
-            unsafe { pattern.CurrentIsReadOnly() }
+            unsafe { pattern.CachedIsReadOnly() }
                 .map(|read_only| !read_only.as_bool())
                 .unwrap_or(false)
         });
         // Readability is advertised separately from editability. Password
         // controls are never exposed to the targeted read path.
         let supports_read_value = value_pattern.is_some()
-            && unsafe { element.CurrentIsPassword() }
+            && unsafe { element.CachedIsPassword() }
                 .map(|password| !password.as_bool())
                 .unwrap_or(false);
-        let scroll_state = current_scroll_state(element);
+        let scroll_state = cached_scroll_state(element);
         let supports_scroll = scroll_state.as_ref().is_some_and(|state| {
             state["horizontal"]["scrollable"].as_bool().unwrap_or(false)
                 || state["vertical"]["scrollable"].as_bool().unwrap_or(false)
@@ -523,7 +584,7 @@ fn walk_window_element(
         }
         return;
     }
-    let Ok(mut child) = (unsafe { walker.GetFirstChildElement(element) }) else {
+    let Ok(mut child) = (unsafe { walker.GetFirstChildElementBuildCache(element, cache_request) }) else {
         return;
     };
     let mut child_index = 0usize;
@@ -535,6 +596,7 @@ fn walk_window_element(
         path.push(child_index);
         walk_window_element(
             walker,
+            cache_request,
             &child,
             depth + 1,
             max_depth,
@@ -550,7 +612,7 @@ fn walk_window_element(
         if *truncated && elements.len() >= max_elements {
             return;
         }
-        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
+        let Ok(next) = (unsafe { walker.GetNextSiblingElementBuildCache(&child, cache_request) }) else {
             return;
         };
         child = next;
@@ -888,13 +950,32 @@ fn finite_scroll_percent(value: windows::core::Result<f64>) -> Option<f64> {
         .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
 }
 
-fn current_scroll_state(element: &IUIAutomationElement) -> Option<Value> {
-    let pattern: IUIAutomationScrollPattern =
-        unsafe { element.GetCurrentPattern(UIA_ScrollPatternId) }
-            .ok()?
-            .cast()
-            .ok()?;
-    Some(scroll_pattern_state(&pattern))
+/// Reads an element's scroll state from an `IUIAutomationCacheRequest`
+/// fetch, where the scroll pattern and its properties were already
+/// pre-fetched in the same round trip as the rest of the element. Used only
+/// by the bulk tree walk; `invoke_window_element`'s live Scroll()-and-verify
+/// path uses `scroll_pattern_state` directly on a freshly fetched pattern,
+/// since that read must reflect state immediately before/after a live action.
+fn cached_scroll_state(element: &IUIAutomationElement) -> Option<Value> {
+    let pattern = unsafe { element.GetCachedPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId) }.ok()?;
+    let horizontal_scrollable = unsafe { pattern.CachedHorizontallyScrollable() }
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    let vertical_scrollable = unsafe { pattern.CachedVerticallyScrollable() }
+        .map(|value| value.as_bool())
+        .unwrap_or(false);
+    Some(json!({
+        "horizontal": {
+            "scrollable": horizontal_scrollable,
+            "percent": finite_scroll_percent(unsafe { pattern.CachedHorizontalScrollPercent() }),
+            "viewSize": finite_scroll_percent(unsafe { pattern.CachedHorizontalViewSize() }),
+        },
+        "vertical": {
+            "scrollable": vertical_scrollable,
+            "percent": finite_scroll_percent(unsafe { pattern.CachedVerticalScrollPercent() }),
+            "viewSize": finite_scroll_percent(unsafe { pattern.CachedVerticalViewSize() }),
+        },
+    }))
 }
 
 fn scroll_pattern_state(pattern: &IUIAutomationScrollPattern) -> Value {
@@ -938,6 +1019,7 @@ fn scroll_position_changed(
 
 fn walk_desktop_elements(
     walker: &IUIAutomationTreeWalker,
+    cache_request: &IUIAutomationCacheRequest,
     element: &IUIAutomationElement,
     depth: usize,
     max_depth: usize,
@@ -951,45 +1033,45 @@ fn walk_desktop_elements(
         return;
     }
 
-    let control = unsafe { element.CurrentIsControlElement() }
+    let control = unsafe { element.CachedIsControlElement() }
         .map(|value| value.as_bool())
         .unwrap_or(false);
-    let offscreen = unsafe { element.CurrentIsOffscreen() }
+    let offscreen = unsafe { element.CachedIsOffscreen() }
         .map(|value| value.as_bool())
         .unwrap_or(true);
-    let rect = unsafe { element.CurrentBoundingRectangle() }.ok();
+    let rect = unsafe { element.CachedBoundingRectangle() }.ok();
     let rect_is_visible = rect
         .as_ref()
         .is_some_and(|value| value.right > value.left && value.bottom > value.top);
-    let label = unsafe { element.CurrentName() }
+    let label = unsafe { element.CachedName() }
         .ok()
         .map(|value| value.to_string())
         .unwrap_or_default();
-    // CurrentLocalizedControlType returns the OS display language's name
+    // CachedLocalizedControlType returns the OS display language's name
     // (e.g. French "bouton" instead of "button"), but role-based reasoning
     // elsewhere in the stack (role === "textbox", etc.) assumes English.
-    // CurrentControlType is a locale-independent numeric UIA constant; map
+    // CachedControlType is a locale-independent numeric UIA constant; map
     // the common ones to the same canonical English names so role matching
     // keeps working on a non-English Windows install. Fall back to the
     // localized string for the long tail of control types.
-    let role = unsafe { element.CurrentControlType() }
+    let role = unsafe { element.CachedControlType() }
         .ok()
         .and_then(canonical_control_type_name)
         .map(|value| value.to_string())
         .or_else(|| {
-            unsafe { element.CurrentLocalizedControlType() }
+            unsafe { element.CachedLocalizedControlType() }
                 .ok()
                 .map(|value| value.to_string())
         })
         .unwrap_or_default();
-    let class_name = unsafe { element.CurrentClassName() }
+    let class_name = unsafe { element.CachedClassName() }
         .ok()
         .map(|value| value.to_string())
         .unwrap_or_default();
-    let enabled = unsafe { element.CurrentIsEnabled() }
+    let enabled = unsafe { element.CachedIsEnabled() }
         .map(|value| value.as_bool())
         .unwrap_or(false);
-    let focused = unsafe { element.CurrentHasKeyboardFocus() }
+    let focused = unsafe { element.CachedHasKeyboardFocus() }
         .map(|value| value.as_bool())
         .unwrap_or(false);
 
@@ -1019,7 +1101,7 @@ fn walk_desktop_elements(
         return;
     }
 
-    let Ok(mut child) = (unsafe { walker.GetFirstChildElement(element) }) else {
+    let Ok(mut child) = (unsafe { walker.GetFirstChildElementBuildCache(element, cache_request) }) else {
         return;
     };
     loop {
@@ -1029,6 +1111,7 @@ fn walk_desktop_elements(
         }
         walk_desktop_elements(
             walker,
+            cache_request,
             &child,
             depth + 1,
             max_depth,
@@ -1040,7 +1123,7 @@ fn walk_desktop_elements(
         if *truncated && elements.len() >= max_elements {
             return;
         }
-        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&child) }) else {
+        let Ok(next) = (unsafe { walker.GetNextSiblingElementBuildCache(&child, cache_request) }) else {
             return;
         };
         child = next;
