@@ -85,6 +85,7 @@ extern "system" {
         lparam: isize,
     ) -> i32;
     fn GetClassNameW(window: Hwnd, buffer: *mut u16, max_count: i32) -> i32;
+    fn GetCursorPos(point: *mut Point) -> i32;
 }
 
 const WH_KEYBOARD_LL: i32 = 13;
@@ -963,6 +964,31 @@ pub fn post_scroll_to_window(window: usize, pid: u32, x: i32, y: i32, amount: i3
     post_mouse_message(target, message, delta << 16, point, &mut input_sent)
 }
 
+/// Retries a transient `send_mouse` failure a few times before giving up.
+/// `SendInput` can return 0 under momentary system load (e.g. another
+/// process also injecting input, or a brief UIPI/secure-desktop hiccup)
+/// without the gesture itself being invalid; one failed call should not by
+/// itself abort an in-progress drag.
+fn send_mouse_retrying(x: i32, y: i32, flags: u32) -> bool {
+    for attempt in 0..3 {
+        if send_mouse(x, y, flags) {
+            return true;
+        }
+        if attempt < 2 {
+            unsafe { Sleep(8) };
+        }
+    }
+    false
+}
+
+fn cursor_position() -> Option<(i32, i32)> {
+    let mut point = Point::default();
+    if unsafe { GetCursorPos(&mut point) } == 0 {
+        return None;
+    }
+    Some((point.x, point.y))
+}
+
 /// Presses and holds the left button at an absolute screen point without
 /// releasing it, moves to a second point, and releases -- a drag.
 pub fn send_drag(
@@ -972,35 +998,58 @@ pub fn send_drag(
     to_y: i32,
     duration_ms: u32,
 ) -> Result<(), InputDispatchError> {
-    if !send_mouse(from_x, from_y, MOUSEEVENTF_MOVE) {
+    if !send_mouse_retrying(from_x, from_y, MOUSEEVENTF_MOVE) {
         return Err(InputDispatchError::not_dispatched(
             "Windows declined trusted mouse movement",
         ));
     }
     unsafe { Sleep(16) };
-    if !send_mouse(from_x, from_y, MOUSEEVENTF_LEFTDOWN) {
+    if !send_mouse_retrying(from_x, from_y, MOUSEEVENTF_LEFTDOWN) {
         return Err(InputDispatchError::uncertain(
             "Windows declined the trusted mouse press after pointer movement was sent",
         ));
     }
+    // Tracks the last point the cursor actually, successfully moved to --
+    // not the gesture's final target. If a mid-drag move fails, the button
+    // must be released here, at the real last position, not warped straight
+    // to the target it never reached. Releasing at the unvisited target
+    // instead produced exactly the bug this fixes: a stray straight line
+    // from wherever the drag actually stopped to a distant release point,
+    // rather than the intended path ending early.
+    let mut last_x = from_x;
+    let mut last_y = from_y;
     let steps = ((duration_ms / 16).clamp(8, 40)) as i32;
     for step in 1..=steps {
         let t = step as f64 / steps as f64;
         let x = (from_x as f64 + (to_x - from_x) as f64 * t).round() as i32;
         let y = (from_y as f64 + (to_y - from_y) as f64 * t).round() as i32;
-        if !send_mouse(x, y, MOUSEEVENTF_MOVE) {
-            let _ = send_mouse(to_x, to_y, MOUSEEVENTF_LEFTUP);
+        if !send_mouse_retrying(x, y, MOUSEEVENTF_MOVE) {
+            let _ = send_mouse_retrying(last_x, last_y, MOUSEEVENTF_LEFTUP);
             return Err(InputDispatchError::uncertain(
                 "Windows declined trusted mouse movement during the drag after drag input was sent",
             ));
         }
+        last_x = x;
+        last_y = y;
         unsafe { Sleep((duration_ms / steps as u32).max(1)) };
     }
-    if !send_mouse(to_x, to_y, MOUSEEVENTF_LEFTUP) {
-        let _ = send_mouse(to_x, to_y, MOUSEEVENTF_LEFTUP);
+    if !send_mouse_retrying(to_x, to_y, MOUSEEVENTF_LEFTUP) {
         return Err(InputDispatchError::uncertain(
             "Windows declined the trusted mouse release after drag input was sent",
         ));
+    }
+    // Verify the release landed where requested instead of trusting
+    // SendInput's return value alone -- it can report success for a
+    // synthetic event the system silently redirected or dropped partway.
+    // A couple of pixels of tolerance absorbs the absolute-coordinate
+    // quantization in `absolute_axis` (screen position is encoded as a
+    // 0-65535 fraction of screen width/height, then decoded back).
+    if let Some((actual_x, actual_y)) = cursor_position() {
+        if (actual_x - to_x).abs() > 2 || (actual_y - to_y).abs() > 2 {
+            return Err(InputDispatchError::uncertain(
+                "The cursor did not end the drag at the requested release point",
+            ));
+        }
     }
     Ok(())
 }
