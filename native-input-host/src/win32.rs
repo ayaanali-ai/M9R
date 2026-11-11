@@ -614,14 +614,22 @@ pub fn send_unicode_text(text: &str) -> Result<(), InputDispatchError> {
     let normalized = normalize_text_line_endings(text);
     let units = normalized.encode_utf16().collect::<Vec<_>>();
     if units.is_empty() { return Ok(()); }
-    let mut inputs = Vec::with_capacity(units.len().saturating_mul(2));
+    // One monolithic SendInput for the whole string drops/corrupts characters
+    // whenever the target control can't keep up with an unthrottled burst
+    // (observed live: everything after the first line garbled). Dispatch one
+    // character's down/up pair per SendInput call, with the same inter-key
+    // pacing every other dispatch loop in this file already uses.
+    let mut total_inserted: u32 = 0;
+    let expected = (units.len() as u32).saturating_mul(2);
     for unit in units {
         let key = foreground_text_key(unit);
-        inputs.push(keyboard_input(key, false));
-        inputs.push(keyboard_input(key, true));
+        let pair = [keyboard_input(key, false), keyboard_input(key, true)];
+        let inserted = unsafe { SendInput(2, pair.as_ptr(), size_of::<Input>() as i32) };
+        total_inserted += inserted;
+        if inserted != 2 { break; }
+        unsafe { Sleep(8) };
     }
-    let expected = inputs.len() as u32;
-    let inserted = unsafe { SendInput(expected, inputs.as_ptr(), size_of::<Input>() as i32) };
+    let inserted = total_inserted;
     if inserted == expected { return Ok(()); }
     if inserted == 0 {
         return Err(InputDispatchError::not_dispatched("Windows declined the Unicode text input sequence"));

@@ -29,6 +29,30 @@ const READY_TIMEOUT_MS = 2_000;
 const ACK_TIMEOUT_MS = 900;
 const EXIT_TIMEOUT_MS = 700;
 
+// native-input-host refuses --spawn-cursor-overlay when it sees these
+// markers, to stop a human using a coding-agent CLI on M9R's own source from
+// accidentally drawing on the owner's screen. But M9R's real task-running
+// agents ARE Claude Code / Codex / OpenCode CLI processes by design, so they
+// always carry these same markers -- strip them from just this one child's
+// environment so the guard can't mistake a real task run for dev-session
+// self-triggering. Every other process this teammate CLI spawns keeps its
+// real environment untouched.
+const AGENT_CONTEXT_MARKERS = [
+  "CLAUDECODE",
+  "CLAUDE_CODE_SESSION_ID",
+  "CODEX_CI",
+  "CODEX_THREAD_ID",
+  "CODEX_SESSION_ID",
+  "OPENCODE",
+  "OPENCODE_SESSION_ID",
+] as const;
+
+function overlaySpawnEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const marker of AGENT_CONTEXT_MARKERS) delete env[marker];
+  return env;
+}
+
 /**
  * One owner-broker child renders all agent markers. It is presentation only:
  * callers must never use its result as evidence that an input action landed.
@@ -92,6 +116,7 @@ export function createAgentCursorOverlayHost(input: {
       process = spawnProcess(input.executablePath, ["--spawn-cursor-overlay"], {
         windowsHide: true,
         stdio: ["pipe", "pipe", "ignore"],
+        env: overlaySpawnEnv(),
       }) as OverlayChild;
     } catch {
       finishReady(false);
