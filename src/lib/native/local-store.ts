@@ -512,23 +512,25 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   let cachedStateFingerprint: string | undefined;
   let cachedState: StoreState | undefined;
 
+  // Read-only: the returned object is the live cache entry itself, not a
+  // copy. Every call site of readState() only reads fields off the result;
+  // the one call site that mutates (update(), below) clones explicitly
+  // before handing its callback a scratch copy to write into. Re-parsing and
+  // re-reconciling the whole file on every call -- or even just
+  // structuredClone()-ing a multi-MB result on every call -- was burning a
+  // full CPU core continuously, since some callers poll every 150ms; skip
+  // straight to the cached object when the file's mtime+size haven't moved.
   function readState(): StoreState {
     if (!existsSync(statePath)) return emptyState();
     const stat = statSync(statePath);
     const fileBytes = stat.size;
     if (fileBytes > maxStateBytes) throw new LocalStateCapacityError(fileBytes, maxStateBytes);
-    // Every caller gets an independent, mutable copy -- some (notably
-    // update()) mutate the returned object in place before writing it back.
-    // Re-parsing and re-reconciling the whole file on every call (some
-    // callers poll every 150ms) was burning a full CPU core continuously
-    // for no reason when nothing had changed; skip straight to a clone when
-    // the file's mtime+size match what's already cached.
     const fingerprint = `${stat.mtimeMs}:${fileBytes}`;
-    if (cachedState && cachedStateFingerprint === fingerprint) return structuredClone(cachedState);
+    if (cachedState && cachedStateFingerprint === fingerprint) return cachedState;
     const parsedState = parseAndReconcileState();
     cachedState = parsedState;
     cachedStateFingerprint = fingerprint;
-    return structuredClone(parsedState);
+    return parsedState;
   }
 
   function parseAndReconcileState(): StoreState {
@@ -588,7 +590,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   function update<T>(fn: (state: StoreState) => T): T {
     const ownerName = acquire();
     try {
-      const state = readState();
+      // readState() returns the shared cache entry; clone before mutating
+      // so concurrent read-only callers never see a partially-written state.
+      const state = structuredClone(readState());
       const out = fn(state);
       const serialized = JSON.stringify(state);
       const serializedBytes = Buffer.byteLength(serialized, "utf8");
