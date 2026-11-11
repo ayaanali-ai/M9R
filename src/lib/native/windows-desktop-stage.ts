@@ -742,6 +742,75 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return structure;
   }
 
+  // --- Item 6 of the latency plan: an event-driven UI-tree cache for windowStructure(). ---
+  //
+  // windowStructure() previously did a full real UIA tree walk on every single call, even when
+  // nothing about the window had changed since the last call a moment ago (e.g. re-reading the
+  // tree right after a click to confirm it landed, then reading it again for the next action).
+  //
+  // Invalidation is event-driven, not a blind poll: every dispatch function below that can
+  // plausibly change a window's UI (click, type, drag, scroll, key combo, close) calls
+  // invalidateWindowStructureCache(pid, windowId) right after it runs, win or lose -- a cache
+  // entry only survives between calls that provably didn't touch that window. A short TTL
+  // (UI_TREE_CACHE_TTL_MS) is kept as a safety net under that, in case some future mutation path
+  // forgets to invalidate; it bounds the blast radius of a missed invalidation to a brief window
+  // instead of an indefinitely stale tree.
+  //
+  // Shadow mode: caching a UI tree is exactly the kind of thing that must be proven before it's
+  // trusted (an agent silently clicking a stale coordinate would be a worse bug than any amount of
+  // latency). So by default (M9R_TRUST_UI_TREE_CACHE unset), this NEVER skips the real fetch --
+  // every call still does the genuine UIA walk. What the cache path adds in shadow mode is pure
+  // request coalescing (below) plus a running comparison against what a trusting caller would
+  // have been served, recorded in uiTreeCacheStats() for the owner to inspect before flipping the
+  // trust flag on. Only with M9R_TRUST_UI_TREE_CACHE=1 does a fresh cache hit actually skip the
+  // real native round trip.
+  const UI_TREE_CACHE_TTL_MS = 250;
+  const trustUiTreeCache = (deps.env ?? process.env).M9R_TRUST_UI_TREE_CACHE === "1";
+  const windowStructureCache = new Map<string, { structure: NativeWindowStructure; fetchedAtMs: number }>();
+  const windowStructureInflight = new Map<string, Promise<NativeWindowStructure>>();
+  const uiTreeCacheCounters = { hits: 0, coalesced: 0, misses: 0, shadowCompared: 0, shadowMismatches: 0 };
+
+  function windowStructureCacheKey(pid: number, windowId: string, maxElements: number, maxDepth: number): string {
+    return `${pid}:${windowId}:${maxElements}:${maxDepth}`;
+  }
+
+  /** A cheap but complete structural fingerprint: order, and every validated field except `ref`,
+   *  must match. `ref` is deliberately excluded -- it is snapshot-qualified by design (a fresh,
+   *  never-reused value on every real tree read, by the native host's own documented contract,
+   *  so an old provider ref can never silently resolve against a new element) and so differs
+   *  between two real fetches of the exact same, truly unchanged window. Including it would make
+   *  every shadow comparison report a false mismatch regardless of whether anything on screen
+   *  actually changed. `path` (the element's structural position) is the stable identity used
+   *  here instead, matching how invokeWindowElement itself re-validates a target (by path and
+   *  expected role/label/className/automationId/runtimeId, never by `ref`). */
+  function fingerprintWindowStructure(structure: NativeWindowStructure): string {
+    return JSON.stringify({
+      status: structure.status,
+      truncated: structure.truncated,
+      elements: structure.elements.map((element) => ({
+        label: element.label, role: element.role, className: element.className,
+        automationId: element.automationId, depth: element.depth, path: element.path,
+        enabled: element.enabled, focused: element.focused, rect: element.rect,
+        actions: element.actions, scroll: element.scroll,
+      })),
+    });
+  }
+
+  /** Invalidates every cached windowStructure() entry for one window, across every bounds variant
+   *  (maxElements/maxDepth) a caller may have requested. Called after any dispatch that could have
+   *  changed that window's UI, regardless of whether the dispatch itself reported success. */
+  function invalidateWindowStructureCache(pid: number, windowId: string): void {
+    const prefix = `${pid}:${windowId}:`;
+    for (const key of windowStructureCache.keys()) if (key.startsWith(prefix)) windowStructureCache.delete(key);
+  }
+
+  /** Shadow-mode and trust-mode counters: hits/misses/coalesced requests, and how often a cache
+   *  hit's content would have actually matched a fresh real read. Not reset between calls --
+   *  meant to be inspected over a session to decide whether to flip M9R_TRUST_UI_TREE_CACHE. */
+  function uiTreeCacheStats() {
+    return { ...uiTreeCacheCounters, trusted: trustUiTreeCache, cachedWindows: windowStructureCache.size };
+  }
+
   async function windowStructure(pid: number, windowId: string, options: { maxElements?: number; maxDepth?: number } = {}): Promise<NativeWindowStructure> {
     assertWindows();
     assertOwner();
@@ -752,6 +821,34 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 64) {
       throw new Error("Windows window structure bounds are invalid.");
     }
+    const key = windowStructureCacheKey(pid, windowId, maxElements, maxDepth);
+    const cached = windowStructureCache.get(key);
+    const cacheFresh = cached !== undefined && now().getTime() - cached.fetchedAtMs < UI_TREE_CACHE_TTL_MS;
+
+    if (trustUiTreeCache && cacheFresh) {
+      uiTreeCacheCounters.hits += 1;
+      return cached!.structure;
+    }
+
+    const inflight = windowStructureInflight.get(key);
+    if (inflight) { uiTreeCacheCounters.coalesced += 1; return inflight; }
+
+    const fetchPromise = (async () => {
+      const structure = await fetchWindowStructureUncached(pid, windowId, maxElements, maxDepth);
+      if (cached) {
+        uiTreeCacheCounters.shadowCompared += 1;
+        if (fingerprintWindowStructure(cached.structure) !== fingerprintWindowStructure(structure)) uiTreeCacheCounters.shadowMismatches += 1;
+      } else {
+        uiTreeCacheCounters.misses += 1;
+      }
+      windowStructureCache.set(key, { structure, fetchedAtMs: now().getTime() });
+      return structure;
+    })();
+    windowStructureInflight.set(key, fetchPromise);
+    try { return await fetchPromise; } finally { windowStructureInflight.delete(key); }
+  }
+
+  async function fetchWindowStructureUncached(pid: number, windowId: string, maxElements: number, maxDepth: number): Promise<NativeWindowStructure> {
     const snapshotId = randomUUID();
     const inspected = await invokeNative({ op: "inspect", pid, windowId });
     if (!inspected.ok) throw new Error(inspected.error ?? "Windows could not inspect the target window.");
@@ -856,6 +953,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     }
     // Native timing stays in the owner diagnostic channel, not provider tool context.
     const { nativeDispatch: _nativeDispatch, ...resultWithoutNativeTiming } = semanticAction;
+    // "readValue" cannot change the window's UI; every other action (activate/setValue/scroll)
+    // plausibly can, whether or not it reports success -- invalidate either way.
+    if (input.action !== "readValue") invalidateWindowStructureCache(pid, windowId);
     return resultWithoutNativeTiming;
   }
 
@@ -1380,6 +1480,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendClick", pid, windowId, x, y, ...options });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the click.");
   }
 
@@ -1389,6 +1490,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "postClickToWindow", pid, windowId, x, y, ...options });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the targeted click message.");
     if (result.dispatchState !== "dispatched" || result.route !== "PostMessageW" || result.target !== "exact-window") {
       throw new DesktopInputOutcomeUnknownError("The native helper did not prove that the targeted click was queued to the exact window.");
@@ -1400,6 +1502,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendDrag", pid, windowId, fromX, fromY, toX, toY, ...(durationMs !== undefined ? { durationMs } : {}) });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the drag.");
   }
 
@@ -1407,6 +1510,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendScroll", pid, windowId, x, y, amount, axis });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the scroll.");
   }
 
@@ -1416,6 +1520,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "postScrollToWindow", pid, windowId, x, y, amount, axis });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the targeted scroll message.");
     if (result.dispatchState !== "dispatched" || result.route !== "PostMessageW" || result.target !== "exact-window") {
       throw new DesktopInputOutcomeUnknownError("The native helper did not prove that the targeted scroll was queued to the exact window.");
@@ -1427,6 +1532,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendKeyCombo", pid, windowId, keys });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the key combination.");
   }
 
@@ -1434,6 +1540,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendText", pid, windowId, text });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the typed text.");
   }
 
@@ -1448,6 +1555,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "sendTextToWindow", pid, windowId, text });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the background-typed text.");
     if (result.dispatchState !== "dispatched") return {};
 
@@ -1479,6 +1587,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "postCloseWindow", pid, windowId });
+    invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the WM_CLOSE request.");
   }
 
@@ -1589,7 +1698,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, physicalInputEpoch, captureOwnerInputEpoch, releaseOwnerInputMonitor, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invalidateWindowStructureCache, uiTreeCacheStats, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, physicalInputEpoch, captureOwnerInputEpoch, releaseOwnerInputMonitor, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
     close: closeManager,
     withInputStream, closeInputStream, attachSharedWindow, withForegroundAuthorization,
     bringToForeground, sendClick, postClickToWindow, sendDrag, sendScroll, postScrollToWindow, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
