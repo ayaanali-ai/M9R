@@ -140,7 +140,10 @@ test("transient cursor policy reads do not close the agent overlay until three c
     if (policyUnavailable) throw new Error("transient policy read failure");
     return { handles: ["codex"] };
   });
-  const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 2_100));
+  // The cursor-hide reconcile loop runs on its own 250ms timer (split from the
+  // unrelated, slower reapRevokedGrants() timer), so one 300ms wait reliably
+  // spans exactly one reconcile tick here.
+  const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 300));
   try {
     f.store.registerEndpoint({ provider: "codex", sessionId: "session-one" });
     const shown = await f.service.primeCursor(f.identity.token, f.task.id);

@@ -158,10 +158,35 @@ export function setTaskStagePermission(root: string, handle: string, enabled: bo
   }
 }
 
+type TaskStagePolicy = { handles: string[]; controlHandles?: string[]; modes?: Record<string, TaskStageAccessMode> };
+// This is read synchronously on every single stage input action (click, type,
+// drag, scroll, ...), not just occasionally -- an uncached readFileSync +
+// JSON.parse on every action is the same class of bug as local-store.ts's
+// readState() before its mtime+size cache fix earlier this session. The
+// policy is owner-written and changes rarely, so cache it keyed by an
+// mtime+size fingerprint and only re-read/re-parse when the file actually
+// changed. The returned object is read-only everywhere it is used (property
+// reads and .includes() checks, never mutated), so it is safe to hand back
+// the same cached object on a hit.
+let cachedTaskStagePolicyRoot: string | undefined;
+let cachedTaskStagePolicyFingerprint: string | undefined;
+let cachedTaskStagePolicy: TaskStagePolicy | undefined;
+
 /** Owner-written policy. A task approval alone never grants computer access. */
-export function readTaskStagePolicy(root: string): { handles: string[]; controlHandles?: string[]; modes?: Record<string, TaskStageAccessMode> } {
+export function readTaskStagePolicy(root: string): TaskStagePolicy {
   const file = join(root, TASK_STAGE_POLICY_FILE);
-  if (!existsSync(file)) return { handles: [] };
+  let stat: ReturnType<typeof statSync>;
+  try { stat = statSync(file); }
+  catch {
+    cachedTaskStagePolicyRoot = undefined;
+    cachedTaskStagePolicyFingerprint = undefined;
+    cachedTaskStagePolicy = undefined;
+    return { handles: [] };
+  }
+  const fingerprint = `${stat.mtimeMs}:${stat.size}`;
+  if (cachedTaskStagePolicyRoot === root && cachedTaskStagePolicyFingerprint === fingerprint && cachedTaskStagePolicy) {
+    return cachedTaskStagePolicy;
+  }
   const raw = readFileSync(file, "utf8");
   if (Buffer.byteLength(raw) > 4096) throw new Error("Stage permission settings exceed their size limit.");
   const value: unknown = JSON.parse(raw);
@@ -1699,11 +1724,17 @@ export function createTaskDesktopStageService(input: {
     return inInputStream(streamIdentity, taskId, "close", () => enqueueTimedStage(queueName, taskId, "close", undefined, run, queueName));
   }
 
+  // Foreground approvals carry a native physical-input hook while they are
+  // valid. Reap paused/completed tasks and mode revisions even when no cursor
+  // happens to be registered (for example after an owner closes the pill).
+  // This does its own synchronous file read (readOwnerWorkPreference) every
+  // tick, so it keeps its own slower, independent cadence rather than sharing
+  // one with the cursor reconcile below -- tightening cursor-hide latency
+  // must not multiply this unrelated file-I/O cost.
+  const grantReaper = setInterval(() => { ownerWorkPolicy.reapRevokedGrants(); }, 2000);
+  grantReaper.unref();
+
   const cursorReaper = setInterval(() => {
-    // Foreground approvals carry a native physical-input hook while they are
-    // valid. Reap paused/completed tasks and mode revisions even when no cursor
-    // happens to be registered (for example after an owner closes the pill).
-    ownerWorkPolicy.reapRevokedGrants();
     if (activeAgentCursors.size === 0 || cursorReaperQueued) return;
     cursorReaperQueued = true;
     const reconcile = async () => {
@@ -1749,10 +1780,11 @@ export function createTaskDesktopStageService(input: {
     };
     const result = reaperPending.then(reconcile, reconcile);
     reaperPending = result.catch(() => undefined).finally(() => { cursorReaperQueued = false; });
-  }, 2000);
+  }, 250);
   cursorReaper.unref();
 
   async function close() {
+    clearInterval(grantReaper);
     clearInterval(cursorReaper);
     for (const active of activeInputs.values()) active.controller.abort(new Error("Stage service closing."));
     await inputStreams.close();
