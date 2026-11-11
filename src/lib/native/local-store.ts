@@ -411,10 +411,18 @@ export interface LocalStoreDeps {
   isProcessAlive?: (pid: number) => boolean;
   /** Tests and embedded callers may choose a lower limit; the production maximum cannot be raised. */
   maxStateBytes?: number;
+  /**
+   * How long `acquire()` may block this process's own event loop waiting for a contested lock, in ms.
+   * Defaults to LOCK_WAIT_MS. The resident broker passes a much smaller bound here: it answers /health
+   * and every other request from the same single thread, so a long synchronous wait there stalls everyone
+   * connected, not just the one write. One-shot callers (hooks, CLI commands) keep the generous default.
+   */
+  lockWaitMs?: number;
 }
 
 export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   const now = deps.now ?? (() => new Date());
+  const lockWaitMs = Math.max(0, Math.floor(deps.lockWaitMs ?? LOCK_WAIT_MS));
   const isProcessAlive = deps.isProcessAlive ?? ((pid: number): boolean => {
     try {
       process.kill(pid, 0);
@@ -433,7 +441,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
   function acquire(): string {
     mkdirSync(root, { recursive: true });
-    const deadline = Date.now() + LOCK_WAIT_MS;
+    const deadline = Date.now() + lockWaitMs;
     const nonce = randomUUID();
     const ownerName = `owner-${nonce}.json`;
     const pending = `${lockPath}.pending-${nonce}`;

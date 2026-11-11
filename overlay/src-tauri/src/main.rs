@@ -612,9 +612,30 @@ fn broker_health_ok() -> bool {
     text.starts_with("HTTP/1.1 200") && text.contains("\"ok\":true")
 }
 
-/// Stops then starts the owner-launched broker task -- a plain `/Run` on an already-"running" task record
+/// True if any `m9r-web-broker.exe` process is still alive. There is supposed to be exactly one such
+/// process system-wide (it is the singleton owner-launched broker), so matching by image name here --
+/// unlike `m9r-engine.exe`, which legitimately runs several roles at once and must never be bulk-killed
+/// by name -- does not risk taking down an unrelated process.
+#[cfg(windows)]
+fn broker_image_still_running() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut query = Command::new("tasklist");
+    query.args(["/FI", "IMAGENAME eq m9r-web-broker.exe", "/FO", "CSV", "/NH"]).creation_flags(CREATE_NO_WINDOW);
+    match query.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).to_lowercase().contains("m9r-web-broker.exe"),
+        // Could not even ask the process table; do not assume it is gone.
+        Err(_) => true,
+    }
+}
+
+/// Stops then starts the owner-launched broker task. A plain `/Run` on an already-"running" task record
 /// is a no-op when the process is wedged but the scheduler still thinks it's up, so the stuck process must
-/// be ended first.
+/// be ended first -- and `/End` is only a request to the scheduler, not proof the process actually exited
+/// (it can stop the task's own wrapper while the real `m9r-web-broker.exe` survives, orphaned, still holding
+/// the port). Confirmed live on 2026-11-10: the scheduled task's last-run time moved while the broker stayed
+/// the same pre-existing process. This now verifies the exit instead of assuming it, and force-stops the
+/// exact lingering image before ever calling `/Run` again, rather than risking a second broker on the port.
 fn restart_broker_task() {
     #[cfg(windows)]
     {
@@ -623,7 +644,28 @@ fn restart_broker_task() {
         let mut end = Command::new("schtasks");
         end.args(["/End", "/TN", BROKER_TASK_NAME]).creation_flags(CREATE_NO_WINDOW);
         let _ = end.output();
-        std::thread::sleep(Duration::from_secs(2));
+
+        // Poll for the real process to disappear instead of trusting `/End` after a fixed sleep.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while broker_image_still_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        if broker_image_still_running() {
+            eprintln!("M9R: '{BROKER_TASK_NAME}' survived /End; force-stopping the lingering m9r-web-broker.exe image before restart");
+            let mut kill = Command::new("taskkill");
+            kill.args(["/IM", "m9r-web-broker.exe", "/F"]).creation_flags(CREATE_NO_WINDOW);
+            let _ = kill.output();
+            let kill_deadline = Instant::now() + Duration::from_secs(5);
+            while broker_image_still_running() && Instant::now() < kill_deadline {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if broker_image_still_running() {
+                eprintln!("M9R: m9r-web-broker.exe is still running after a forced stop; refusing to start a second instance on the same port");
+                return;
+            }
+        }
+
         let mut run = Command::new("schtasks");
         run.args(["/Run", "/TN", BROKER_TASK_NAME]).creation_flags(CREATE_NO_WINDOW);
         match run.output() {

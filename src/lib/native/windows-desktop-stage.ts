@@ -1649,6 +1649,13 @@ interface PendingNativeStageRequest {
  */
 function createPersistentWindowsStageHost(executable: string) {
   let child: ChildProcessWithoutNullStreams | undefined;
+  // The pid of a helper we have told to die but have not yet confirmed exited. `failAll()` drops `child`
+  // to `undefined` as soon as a kill is issued, not when the OS confirms the process is actually gone
+  // (TerminateProcess is not instantaneous, especially mid native UIA call) -- without this, the very next
+  // `ensureChild()` can spawn a second live helper while the first is still exiting, exactly as was
+  // confirmed live on 2026-11-10 (an old helper staying alive alongside a freshly spawned one after a
+  // timeout). `ensureChild()` force-confirms this pid is gone before ever spawning its replacement.
+  let terminatingPid: number | undefined;
   let closed = false;
   let buffer = Buffer.alloc(0);
   let stderrTail = "";
@@ -1662,8 +1669,16 @@ function createPersistentWindowsStageHost(executable: string) {
     ? new DesktopInputNotDispatchedError(`${message} No target input was sent.`, "native-dispatch-unavailable")
     : new Error(message);
 
+  /** Kill a helper that is being replaced (not one being shut down for good) and remember its pid so the
+   * next `ensureChild()` can confirm it is actually gone before spawning a second live helper. */
+  const terminate = (target: ChildProcessWithoutNullStreams | undefined): void => {
+    if (!target) return;
+    if (typeof target.pid === "number") terminatingPid = target.pid;
+    target.kill();
+  };
+
   const failProtocol = (error: Error, reason: string): void => {
-    child?.kill();
+    terminate(child);
     failAll(error,
       (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because ${reason}.`),
       () => error);
@@ -1714,7 +1729,7 @@ function createPersistentWindowsStageHost(executable: string) {
       // Keep that one result uncertain; later queued input is known not sent.
       const error = diagnosticError(`Native Windows desktop-stage operation “${request.operation}” (${request.requestId}) received no start acknowledgement within ${elapsedMs}ms; its outcome is uncertain and the helper was terminated.`);
       process.stderr.write(`[native-stage-helper-no-start] operation=${request.operation}; requestId=${request.requestId}; elapsedMs=${elapsedMs}\n`);
-      host.kill();
+      terminate(host);
       failAll(error,
         (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the preceding helper request never started.`),
         () => error);
@@ -1722,7 +1737,7 @@ function createPersistentWindowsStageHost(executable: string) {
     host.stdin.write(request.frame, (writeError) => {
       if (!writeError) return;
       const error = diagnosticError(`Native Windows stage request ${request.operation} (${request.requestId}) could not be written; its outcome is uncertain${writeError.message ? `: ${writeError.message}` : "."}`);
-      host.kill();
+      terminate(host);
       failAll(error,
         (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the preceding helper request could not be written.`),
         () => error);
@@ -1773,7 +1788,7 @@ function createPersistentWindowsStageHost(executable: string) {
           request.timeout = setTimeout(() => {
             const elapsedMs = Date.now() - request.startedAt!;
             const error = new Error(`Native Windows desktop-stage operation “${request.operation}” (${request.requestId}) did not return after ${elapsedMs}ms; its outcome is uncertain, the helper was terminated, and the target must be re-observed before retrying.`);
-            child?.kill();
+            terminate(child);
             failAll(error,
               (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the preceding ${request.operation} request timed out.`),
               () => error);
@@ -1799,10 +1814,27 @@ function createPersistentWindowsStageHost(executable: string) {
     }
   };
 
+  /** True if `pid` is still a live process. Windows reuses pids, but this is only ever checked for the
+   * brief window right after we asked that exact pid to terminate, so a false positive here only costs
+   * one extra, harmless kill attempt on a pid that has already been recycled. */
+  const isPidAlive = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true; }
+    catch { return false; }
+  };
+
   const ensureChild = (): ChildProcessWithoutNullStreams => {
     if (closed) throw new Error("Native Windows stage helper is closed.");
     if (child) return child;
     if (!existsSync(executable)) throw new Error(`The native Windows stage helper is missing at ${executable}. Reinstall or rebuild the M9R Windows runtime first.`);
+    if (terminatingPid !== undefined) {
+      // A previous helper was told to die but may not have actually exited yet. Confirm it, and force it
+      // again if needed, before a second live helper is ever spawned alongside it.
+      if (isPidAlive(terminatingPid)) {
+        process.stderr.write(`[native-stage-helper-exit] pid=${terminatingPid} had not exited before its replacement was about to spawn; forcing it down now\n`);
+        try { process.kill(terminatingPid, "SIGKILL"); } catch { /* already gone, or not killable; either way we proceed */ }
+      }
+      terminatingPid = undefined;
+    }
     const spawned = spawn(executable, ["--desktop-stage-server"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     child = spawned;
     spawned.stdout.on("data", (chunk: Buffer | string) => {
@@ -1811,6 +1843,9 @@ function createPersistentWindowsStageHost(executable: string) {
     });
     spawned.stderr.on("data", (chunk: Buffer | string) => {
       stderrTail = `${stderrTail}${Buffer.from(chunk).toString("utf8")}`.slice(-8_192);
+    });
+    spawned.once("close", () => {
+      if (terminatingPid === spawned.pid) terminatingPid = undefined;
     });
     spawned.once("error", (error) => failAll(error,
       (request) => notDispatchedError(request, `Native Windows desktop-stage operation “${request.operation}” was not dispatched because the helper could not be started.`),
