@@ -121,7 +121,10 @@ export function buildHeader(actions: ViewActions): ViewHost {
   return {
     el,
     sync() {
-      workMode.hidden = !actions.setOwnerWorkMode;
+      // Hidden for now: not wired into actual foreground-approval gating the
+      // way the UI implies, and the real "agents-free" state is set directly
+      // in ~/.m9r/owner-work-mode.json for now, not through this toggle.
+      workMode.hidden = true;
       workMode.textContent = State.ownerWorkMode === "working" ? "I'm Working" : "Agents Free";
       workMode.setAttribute("aria-pressed", String(State.ownerWorkMode === "agents-free"));
       workMode.title = State.ownerWorkMode === "working" ? "Background work continues. Foreground turns need your approval." : "Agents may use foreground input. Click to protect your current work.";

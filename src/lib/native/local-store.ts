@@ -509,10 +509,29 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     }
   }
 
+  let cachedStateFingerprint: string | undefined;
+  let cachedState: StoreState | undefined;
+
   function readState(): StoreState {
     if (!existsSync(statePath)) return emptyState();
-    const fileBytes = statSync(statePath).size;
+    const stat = statSync(statePath);
+    const fileBytes = stat.size;
     if (fileBytes > maxStateBytes) throw new LocalStateCapacityError(fileBytes, maxStateBytes);
+    // Every caller gets an independent, mutable copy -- some (notably
+    // update()) mutate the returned object in place before writing it back.
+    // Re-parsing and re-reconciling the whole file on every call (some
+    // callers poll every 150ms) was burning a full CPU core continuously
+    // for no reason when nothing had changed; skip straight to a clone when
+    // the file's mtime+size match what's already cached.
+    const fingerprint = `${stat.mtimeMs}:${fileBytes}`;
+    if (cachedState && cachedStateFingerprint === fingerprint) return structuredClone(cachedState);
+    const parsedState = parseAndReconcileState();
+    cachedState = parsedState;
+    cachedStateFingerprint = fingerprint;
+    return structuredClone(parsedState);
+  }
+
+  function parseAndReconcileState(): StoreState {
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(readFileSync(statePath, "utf8")); }
     catch { throw new Error(`M9R local state at ${statePath} is invalid. The original file was preserved; restore a verified backup before retrying.`); }

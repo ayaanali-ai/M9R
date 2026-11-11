@@ -1,6 +1,10 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { appendFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { defaultStoreRoot } from "./local-store";
 
 type Rgb = readonly [number, number, number];
 
@@ -23,7 +27,7 @@ export interface AgentCursorOverlayHost {
 
 type OverlayMessage = { event?: unknown; requestId?: unknown; ok?: unknown };
 type SpawnOverlay = typeof spawn;
-type OverlayChild = ChildProcessByStdio<Writable, Readable, null>;
+type OverlayChild = ChildProcessByStdio<Writable, Readable, Readable>;
 
 const READY_TIMEOUT_MS = 2_000;
 const ACK_TIMEOUT_MS = 900;
@@ -51,6 +55,19 @@ function overlaySpawnEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const marker of AGENT_CONTEXT_MARKERS) delete env[marker];
   return env;
+}
+
+// Temporary: the overlay's own stderr was previously discarded entirely
+// (stdio [pipe, pipe, "ignore"]), and the task-record timing evidence alone
+// could not distinguish "process never spawned", "spawned but the window
+// never rendered", and "spawned, rendered, but the ack IPC stalled". This
+// writes every spawn/exit/timeout to a durable log the engine's own stdout
+// doesn't carry, so the next live task run tells us which one it actually is.
+const DEBUG_LOG_PATH = join(defaultStoreRoot(homedir(), process.env), "cursor-overlay-debug.log");
+function debugLog(event: string, detail: Record<string, unknown> = {}): void {
+  try {
+    appendFileSync(DEBUG_LOG_PATH, `${new Date().toISOString()} ${event} ${JSON.stringify(detail)}\n`);
+  } catch { /* diagnostic logging must never affect overlay behavior */ }
 }
 
 /**
@@ -112,25 +129,38 @@ export function createAgentCursorOverlayHost(input: {
       resolveReady(value);
     };
     let process: OverlayChild;
+    const spawnStartedAt = Date.now();
     try {
       process = spawnProcess(input.executablePath, ["--spawn-cursor-overlay"], {
         windowsHide: true,
-        stdio: ["pipe", "pipe", "ignore"],
+        stdio: ["pipe", "pipe", "pipe"],
         env: overlaySpawnEnv(),
       }) as OverlayChild;
-    } catch {
+    } catch (spawnError) {
+      debugLog("spawn-threw", { error: String(spawnError) });
       finishReady(false);
       return readiness;
     }
+    debugLog("spawned", { pid: process.pid, executablePath: input.executablePath });
     child = process;
     ready = readiness;
-    (process as OverlayChild & { __m9rReady?: () => void }).__m9rReady = () => finishReady(true);
+    (process as OverlayChild & { __m9rReady?: () => void }).__m9rReady = () => {
+      debugLog("ready", { pid: process.pid, msSinceSpawn: Date.now() - spawnStartedAt });
+      finishReady(true);
+    };
     const lines = createInterface({ input: process.stdout });
     lines.on("line", consumeLine);
-    process.once("error", () => finishReady(false));
-    process.once("exit", () => {
+    const stderrLines = createInterface({ input: process.stderr });
+    stderrLines.on("line", (line) => debugLog("stderr", { pid: process.pid, line }));
+    process.once("error", (error) => {
+      debugLog("process-error", { pid: process.pid, error: String(error) });
+      finishReady(false);
+    });
+    process.once("exit", (code, signal) => {
+      debugLog("exit", { pid: process.pid, code, signal, msSinceSpawn: Date.now() - spawnStartedAt });
       finishReady(false);
       lines.close();
+      stderrLines.close();
       failPending();
       if (child === process) {
         child = undefined;
@@ -138,13 +168,17 @@ export function createAgentCursorOverlayHost(input: {
         visible.clear();
       }
     });
-    const timer = setTimeout(() => finishReady(false), READY_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      debugLog("ready-timeout", { pid: process.pid, timeoutMs: READY_TIMEOUT_MS });
+      finishReady(false);
+    }, READY_TIMEOUT_MS);
     const result = await readiness;
     clearTimeout(timer);
     if (!result && child === process) {
       child = undefined;
       ready = undefined;
       lines.close();
+      stderrLines.close();
       try { process.kill(); } catch { /* the process may already have exited */ }
     }
     return result;
@@ -160,14 +194,17 @@ export function createAgentCursorOverlayHost(input: {
       return false;
     }
     const line = `${JSON.stringify({ ...command, requestId })}\n`;
+    const sentAt = Date.now();
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
+        debugLog("ack-timeout", { pid: process.pid, requestId, cmd: command.cmd, timeoutMs: ACK_TIMEOUT_MS });
         pending.delete(requestId);
         resolve(false);
       }, ACK_TIMEOUT_MS);
       pending.set(requestId, { resolve, timer });
       process.stdin.write(line, (error) => {
         if (!error) return;
+        debugLog("stdin-write-error", { pid: process.pid, requestId, cmd: command.cmd, error: String(error), msSinceSent: Date.now() - sentAt });
         const request = pending.get(requestId);
         if (!request) return;
         clearTimeout(request.timer);
