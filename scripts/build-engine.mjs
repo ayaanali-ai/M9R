@@ -36,30 +36,15 @@ const stableCliOutput = join(engineDir, ".m9r-engine-cli-input");
 // that path stable across UUID-named staging directories so identical source
 // produces identical m9r-engine.exe bytes.
 const stableEngineBundle = join(engineDir, ".m9r-engine-bundle.cjs");
-// The accepted-ui artifact is the owner-confirmed live pill. Keep using that
-// exact binary until a new pill is reviewed and promoted with its runtime
-// identity; the mutable Cargo target is not a release input.
+// Flow guard 4A: the pill is built from source on every single build, with
+// no committed static binary and no separate manual "accept" step to forget.
+// (A prior design copied a committed release-assets/accepted-ui/m9r-overlay.exe
+// instead -- that exact gap is what let a real pill source fix sit committed
+// but never actually ship, discovered live on 2026-11-11.)
 if (process.env.M9R_OVERLAY_EXE) {
-  throw new Error("M9R_OVERLAY_EXE is not a supported build input. The runtime builder only uses the owner-accepted live pill.");
+  throw new Error("M9R_OVERLAY_EXE is not a supported build input. The pill is always built from overlay/ source.");
 }
-const acceptedRuntimePath = join(root, "release-assets", "accepted-runtime.json");
-if (!existsSync(acceptedRuntimePath)) {
-  throw new Error("The accepted runtime identity is missing at release-assets/accepted-runtime.json; refusing to select a desktop pill.");
-}
-const acceptedRuntime = JSON.parse(readFileSync(acceptedRuntimePath, "utf8"));
-const acceptedOverlayHash = acceptedRuntime?.artifacts?.["m9r-overlay.exe"];
-if (acceptedRuntime.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(acceptedRuntime.buildId ?? "")
-  || !/^[a-f0-9]{64}$/.test(acceptedOverlayHash ?? "")) {
-  throw new Error("The accepted runtime identity is malformed; review it before building.");
-}
-const overlayExe = join(root, "release-assets", "accepted-ui", "m9r-overlay.exe");
-if (process.platform === "win32" && !existsSync(overlayExe)) {
-  throw new Error("The owner-accepted live pill is missing at release-assets/accepted-ui/m9r-overlay.exe; Cargo output is not an automatic fallback.");
-}
-if (process.platform === "win32"
-  && createHash("sha256").update(readFileSync(overlayExe)).digest("hex") !== acceptedOverlayHash) {
-  throw new Error("The preserved live pill does not match the accepted runtime identity. Refusing to package it.");
-}
+const overlayExe = join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(cliOutput, "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
@@ -254,6 +239,14 @@ if (process.platform === "win32") {
   if (r.error || r.status !== 0) throw new Error("The native input host build failed.", { cause: r.error });
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
 
+  // Flow guard 4A: build the pill from its own source every time, same as
+  // every other binary in this pipeline -- no committed binary, no separate
+  // acceptance step that can silently fall out of sync with what's committed.
+  rmSync(overlayExe, { force: true });
+  const pillBuild = spawnSync("npm", ["run", "build"], { cwd: join(root, "overlay"), env: cargoEnv, stdio: "inherit", shell: true });
+  if (pillBuild.error || pillBuild.status !== 0) throw new Error("The pill (overlay) build failed.", { cause: pillBuild.error });
+  if (!existsSync(overlayExe)) throw new Error(`Pill build did not produce ${overlayExe}.`);
+
   // Keep the JavaScript SDK and native bindings beside the executable, and include
   // Cua's separately built DPI-aware Windows daemon. M9R must use the daemon path
   // for the OS cursor overlay; the in-process Node runtime is DPI-virtualized on
@@ -332,7 +325,7 @@ console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(outp
 console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);
 console.log(`Runtime build identity ${publishedIdentity.buildId} verified across ${Object.keys(publishedIdentity.artifacts).length} files.`);
 console.log(`Runtime source ${provenance.sourceCommit} (${provenance.sourceDirty ? "dirty" : "clean"}).`);
-if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the owner-accepted live pill artifact (${acceptedOverlayHash}).`);
+if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")}, built fresh from overlay/ source this run.`);
 } finally {
   rmSync(buildRoot, { recursive: true, force: true });
     rmSync(stableEngineBundle, { force: true });

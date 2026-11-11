@@ -8,6 +8,36 @@ import { spawnSync } from "node:child_process";
 import { verifyRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Flow guard 3A: build only from the one designated folder, only on the
+// designated trunk branch, only with a clean tree -- no exceptions. See
+// BUILD_INSTALL_FLOW.md. Set CI=1 to allow a CI checkout's own working
+// directory instead of the one hardcoded developer path.
+const CANONICAL_ROOT = "C:\\RunLeak\\runleak";
+if (!process.env.CI && resolve(root).toLowerCase() !== CANONICAL_ROOT.toLowerCase()) {
+  throw new Error(`Refusing to build from ${root}; the designated folder is ${CANONICAL_ROOT} (see BUILD_INSTALL_FLOW.md, flow guard 3A).`);
+}
+{
+  const branchResult = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, encoding: "utf8" });
+  if (branchResult.error || branchResult.status !== 0) throw new Error("Cannot determine the current branch; refusing to build.");
+  const currentBranch = String(branchResult.stdout).trim();
+  const trunkBranch = readFileSync(join(root, "scripts", "trunk-branch.txt"), "utf8").trim();
+  if (!trunkBranch) throw new Error("scripts/trunk-branch.txt is empty; refusing to build without a designated trunk branch.");
+  if (currentBranch !== trunkBranch) {
+    throw new Error(`Refusing to build from branch "${currentBranch}"; the designated trunk branch is "${trunkBranch}" (update scripts/trunk-branch.txt to change this, see BUILD_INSTALL_FLOW.md flow guard 3A/2B).`);
+  }
+  const dirtyCheck = spawnSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8", maxBuffer: 1024 * 1024 });
+  if (dirtyCheck.error || dirtyCheck.status !== 0) throw new Error("Cannot determine whether the working tree is clean; refusing to build.");
+  const dirtyLines = String(dirtyCheck.stdout).split(/\r?\n/).filter(Boolean);
+  // engine/candidates/ holds this very script's own prior outputs, which are
+  // never source; everything else (including the rest of engine/) is a real
+  // dirty-build failure with no exceptions, per flow guard 3A.
+  const realDirtyLines = dirtyLines.filter((line) => !/^(?:\?\?|[ MARCD]{2})\s+engine\/candidates\//.test(line));
+  if (realDirtyLines.length > 0) {
+    throw new Error(`Refusing to build from a dirty working tree (flow guard 3A). Uncommitted/untracked paths:\n${realDirtyLines.join("\n")}`);
+  }
+}
+
 const engineDir = join(root, "engine");
 const candidatesRoot = resolve(engineDir, "candidates");
 const resumeIndex = process.argv.indexOf("--resume");
@@ -35,7 +65,7 @@ if (resumePath) {
     throw new Error("This candidate predates the accepted-live-pill build receipt and cannot be resumed. Create a new candidate; the old directory was left untouched.");
   }
   const priorBuildReceipt = JSON.parse(readFileSync(buildReceiptPath, "utf8"));
-  if (priorBuildReceipt.schemaVersion !== 1 || priorBuildReceipt.buildMode !== "accepted-live-overlay"
+  if (priorBuildReceipt.schemaVersion !== 1 || priorBuildReceipt.buildMode !== "pill-built-from-source"
     || priorBuildReceipt.runtimeBuildId !== priorManifest.buildId
     || priorBuildReceipt.sourceCommit !== sourceCommit
     || priorBuildReceipt.pillSha256 !== priorManifest.artifacts["m9r-overlay.exe"]) {
@@ -79,21 +109,19 @@ if (!resumePath) {
 
 const runtimeIdentity = verifyRuntimeBuildManifest(runtimeOutput, { exact: true });
 const pillSha256 = runtimeIdentity.artifacts["m9r-overlay.exe"];
-const acceptedPath = join(root, "release-assets", "accepted-runtime.json");
-const accepted = JSON.parse(readFileSync(acceptedPath, "utf8"));
+// Flow guard 4A: the pill was just built from overlay/ source by build-engine.mjs,
+// in this same run, with no separate "accepted" value to compare against -- a
+// fresh pill build IS the candidate's pill, unconditionally.
 if (!/^[a-f0-9]{64}$/.test(pillSha256 ?? "") || !existsSync(join(runtimeOutput, "m9r-overlay.exe"))) {
-  throw new Error("Candidate runtime does not contain the owner-accepted live pill.");
+  throw new Error("Candidate runtime does not contain a built pill.");
 }
 if (createHash("sha256").update(readFileSync(join(runtimeOutput, "m9r-overlay.exe"))).digest("hex") !== pillSha256) {
   throw new Error("Candidate runtime pill hash does not match its complete runtime manifest.");
 }
-if (pillSha256 !== accepted.artifacts?.["m9r-overlay.exe"]) {
-  throw new Error("Candidate runtime pill differs from the owner-accepted live pill; refusing to package it.");
-}
 if (!resumePath) {
   const buildReceipt = {
     schemaVersion: 1,
-    buildMode: "accepted-live-overlay",
+    buildMode: "pill-built-from-source",
     candidateId,
     sourceCommit,
     runtimeBuildId: runtimeIdentity.buildId,
@@ -124,7 +152,7 @@ if (!new RegExp(`^${zipHash}\\s+\\*?m9r-engine-windows-x64\\.zip$`, "i").test(si
 }
 const receipt = {
   schemaVersion: 1,
-  buildMode: "accepted-live-overlay",
+  buildMode: "pill-built-from-source",
   candidateId,
   sourceCommit,
   runtimeBuildId: runtimeIdentity.buildId,

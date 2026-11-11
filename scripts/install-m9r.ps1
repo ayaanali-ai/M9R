@@ -211,7 +211,7 @@ function Get-AcceptedRuntimeIdentity {
 function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
     if (-not $AllowLocalCandidate) { return }
     $receipt = $script:CandidateReceipt
-    if (-not $receipt -or $receipt.schemaVersion -ne 1 -or $receipt.buildMode -ne 'accepted-live-overlay' -or
+    if (-not $receipt -or $receipt.schemaVersion -ne 1 -or $receipt.buildMode -ne 'pill-built-from-source' -or
         [string]$receipt.candidateId -notmatch '^\d{4}-\d{2}-\d{2}T.+-[a-fA-F0-9]{8}$') {
         throw 'The external candidate receipt is malformed. Nothing was installed.'
     }
@@ -236,6 +236,20 @@ function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
     foreach ($field in @('runtimeManifest', 'exactRuntimeArtifactSet', 'acceptedPillHash', 'packageChecksum')) {
         if ($receipt.verified.$field -ne $true) { throw "The candidate receipt does not verify $field. Nothing was installed." }
     }
+    # Flow guard 5B: install only from a tagged release -- stricter than "any
+    # ancestor of trunk". A local candidate's source commit must be pointed at
+    # by an annotated or lightweight tag matching the release naming pattern,
+    # in the repo this installer script itself lives in.
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $sourceCommit = [string]$receipt.sourceCommit
+    if ($sourceCommit -notmatch '^[a-fA-F0-9]{40}$') {
+        throw 'The candidate receipt has no valid source commit. Nothing was installed.'
+    }
+    $tagOutput = & git -C $repoRoot tag --points-at $sourceCommit --list 'release-*' 2>$null
+    $releaseTags = @($tagOutput | Where-Object { $_ -match '^release-' })
+    if ($releaseTags.Count -eq 0) {
+        throw "Refusing to install candidate source commit $sourceCommit: it is not pointed at by any 'release-*' tag (flow guard 5B). Tag it first."
+    }
 }
 
 function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
@@ -251,14 +265,13 @@ function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
         # An explicitly supplied local candidate is the controlled promotion
         # path for development/demo builds. Its external receipt binds the
         # exact ZIP, source commit, runtime manifest, and artifact hashes. The
-        # owner-accepted policy still pins the visual pill so a runtime update
-        # can never silently replace the accepted UI, but engine/broker/helper
-        # binaries are allowed to advance as one verified candidate set.
-        $acceptedPill = [string]$accepted.artifacts.'m9r-overlay.exe'
+        # Flow guard 4A: the pill is built from source on every candidate build
+        # (see build-engine.mjs), so there is no separate "accepted" pill value
+        # to compare against anymore -- its hash is verified below as just
+        # another runtime artifact, against the candidate's own manifest.
         $candidatePill = [string]$runtime.artifacts.'m9r-overlay.exe'
-        if (($acceptedPill -notmatch '^[a-fA-F0-9]{64}$' -or $candidatePill -notmatch '^[a-fA-F0-9]{64}$') -or
-            (-not [string]::Equals($candidatePill, $acceptedPill, [StringComparison]::OrdinalIgnoreCase))) {
-            throw 'The local candidate pill does not match the owner-accepted live pill. Nothing was installed.'
+        if ($candidatePill -notmatch '^[a-fA-F0-9]{64}$') {
+            throw 'The local candidate runtime has no valid pill hash. Nothing was installed.'
         }
         $runtimeEntries = @($runtime.artifacts.PSObject.Properties)
         if ($runtimeEntries.Count -eq 0) { throw 'The local candidate runtime has no artifact inventory. Nothing was installed.' }
