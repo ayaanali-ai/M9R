@@ -248,7 +248,7 @@ function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
     $tagOutput = & git -C $repoRoot tag --points-at $sourceCommit --list 'release-*' 2>$null
     $releaseTags = @($tagOutput | Where-Object { $_ -match '^release-' })
     if ($releaseTags.Count -eq 0) {
-        throw "Refusing to install candidate source commit $sourceCommit: it is not pointed at by any 'release-*' tag (flow guard 5B). Tag it first."
+        throw "Refusing to install candidate source commit ${sourceCommit}: it is not pointed at by any 'release-*' tag (flow guard 5B). Tag it first."
     }
 }
 
