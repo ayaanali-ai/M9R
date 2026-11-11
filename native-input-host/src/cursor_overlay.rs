@@ -1155,11 +1155,17 @@ pub mod win {
                     // holding the lock across the (possibly slower) render.
                     let mut snapshot = guard.clone();
                     drop(guard);
-                    if snapshot.is_empty() {
+                    if snapshot.is_empty() && ready_sent {
                         // No agents to show: skip the render/UpdateLayeredWindow
                         // work entirely instead of repainting an empty frame
                         // every tick. The timer still fires so a newly-added
-                        // agent is picked up on the next tick.
+                        // agent is picked up on the next tick. Only safe once
+                        // ready_sent is true -- "ready" is emitted below from
+                        // the first successful presentation, and warm() always
+                        // spawns this process before any agent marker exists,
+                        // so skipping that very first empty-snapshot render
+                        // meant "ready" could never fire and every caller of
+                        // warm()/ensureStarted() timed out waiting for it.
                         continue;
                     }
                     // `AgentState` stores physical screen coordinates. The
