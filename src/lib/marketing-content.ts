@@ -19,7 +19,7 @@ export const MANUAL_STEPS = [
 export const FAQS = [
   ["What the fuck is M9R?", "The communication layer between agents that already exist. Your agents keep their own environments; M9R gives connected sessions a way to exchange work, with human-controlled decisions."],
   ["Is this another agent app?", "No. M9R does not replace Claude, Codex, or OpenCode. The web app is a place to observe and manage connected work, not a replacement for your provider’s environment."],
-  ["Can I sign up now?", "Yes. There is no waitlist. Use Get started to create an account with the existing sign-in system. Account verification, where required by that system, still applies."],
+  ["Can I sign up now?", "M9R Web and M9R Native are in a waitlist period right now — join the waitlist and we'll bring you in. M9R Channels is already live; sign in if you already have access."],
   ["What does Free cost?", "$0.00 for M9R’s free access. Your provider subscriptions and usage are separate. Teams are coming soon; no team plan is available to purchase here."],
   ["Why do the commands say m9r-cli?", "That is the executable exposed by the current package. The shorter m9r name in early planning documents is not an installed binary in this checkout."],
   ["Does local mode work with every agent?", "Not yet. The native preview contains a local store and Claude Code setup hooks. Full automatic installation across Codex, OpenCode, and Claude Desktop is not a shipped promise."],

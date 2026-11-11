@@ -43,11 +43,11 @@ function ProductWindow({ title, kicker, status, children, className = "" }: { ti
   </div>;
 }
 
-export default function ReferenceHome({ configured, authNext }: { configured: boolean; authNext?: string }) {
+export default function ReferenceHome({ configured, authNext, openWaitlist = false }: { configured: boolean; authNext?: string; openWaitlist?: boolean }) {
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef({ active: false, startX: 0, startScroll: 0 });
   const [reduced, setReduced] = useState(false);
-  const [waitlistOpen, setWaitlistOpen] = useState(false);
+  const [waitlistOpen, setWaitlistOpen] = useState(openWaitlist);
   const closeWaitlist = () => setWaitlistOpen(false);
 
   useEffect(() => {
@@ -147,11 +147,11 @@ export default function ReferenceHome({ configured, authNext }: { configured: bo
       <section className={s.benefits} data-benefits>
         <h2 data-reveal="focus"><em>Everything</em><br />falls in...</h2>
         <div className={s.orbStage} data-reveal="orb"><div className={s.lists}><ul><li><em>Less</em> Clicking</li><li><em>Less</em> Typing</li><li><em>Less</em> Switching windows</li><li><em>Less</em> Being the bottleneck</li></ul><ul><li><em>More</em> Done without you</li><li><em>More</em> Several things at once</li><li><em>More</em> Your time back</li><li><em>More</em> Still in control</li></ul></div></div>
-        <div className={s.bottomCta}><div className={s.bottomButtons}><button type="button" onClick={() => setWaitlistOpen(true)}>Join the waitlist</button><Link href="/auth?mode=login">Sign in</Link></div><p>M9R Channels is live: sign in today. The waitlist covers M9R Web and M9R Native.</p></div>
+        <div className={s.bottomCta}><div className={s.bottomButtons}><button type="button" onClick={() => setWaitlistOpen(true)}>Join the waitlist</button></div></div>
       </section>
       <div className={s.gradientBridge}>{reduced ? <div /> : <video src={asset("954b15a1be6a905b.mp4")} autoPlay muted playsInline loop aria-hidden="true" />}</div>
     </main>
-    <footer className={s.footer}><div className={s.footerMarquee} aria-hidden="true">{[0, 1].map(copy => <div className={s.wordmarks} key={copy}><span className={s.wmSerif}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /><span className={s.wmItalic}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /><span className={s.wmPixel}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /><span className={s.wmBold}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /></div>)}</div><div className={s.footerInner}><nav aria-label="Footer"><a href="#top">Home</a><a href="/how-it-works">How it works</a><a href="/docs">Docs</a><a href="/faq">FAQ</a><a href="/open-core">Open core</a></nav><div className={s.socials}>{[["X (@useM9R)", "7e2a52ba473849dc"]].map(([name, id]) => <a key={id} href="https://x.com/useM9R" target="_blank" rel="noreferrer" aria-label={name}><img src={asset(`${id}.webp`)} alt="" /></a>)}</div></div><p className={s.legal}>M9R © 2026 All rights reserved　𐄁　<a href="/terms">Terms</a>　𐄁　<a href="/privacy">Privacy</a>　𐄁　<a href="/acceptable-use">Acceptable Use</a>　𐄁　<a href="/data-processing">Data Processing</a>　𐄁　<a href="/security">Security</a>　𐄁　<a href="/cookies">Cookies</a>　𐄁　<a href="/support">Support</a></p></footer>
+    <footer className={s.footer}><div className={s.footerMarquee} aria-hidden="true">{[0, 1].map(copy => <div className={s.wordmarks} key={copy}><span className={s.wmSerif}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /><span className={s.wmItalic}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /><span className={s.wmPixel}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /><span className={s.wmBold}>M9R</span><img className={`${s.marqueeLogo} ${s.logoTint}`} src={asset("m9r-logo-transparent.png")} alt="" /></div>)}</div><div className={s.footerInner}><nav aria-label="Footer"><a href="#top">Home</a><a href="/how-it-works">How it works</a><a href="/docs">Docs</a><a href="/faq">FAQ</a></nav><div className={s.socials}>{[["X (@useM9R)", "7e2a52ba473849dc"]].map(([name, id]) => <a key={id} href="https://x.com/useM9R" target="_blank" rel="noreferrer" aria-label={name}><img src={asset(`${id}.webp`)} alt="" /></a>)}</div></div><p className={s.legal}>M9R © 2026 All rights reserved　𐄁　<a href="/terms">Terms</a>　𐄁　<a href="/privacy">Privacy</a>　𐄁　<a href="/acceptable-use">Acceptable Use</a>　𐄁　<a href="/data-processing">Data Processing</a>　𐄁　<a href="/security">Security</a>　𐄁　<a href="/cookies">Cookies</a>　𐄁　<a href="/support">Support</a></p></footer>
 
     <WaitlistDialog open={waitlistOpen} onClose={closeWaitlist} />
     {authNext && <InviteDialog configured={configured} next={authNext} />}
