@@ -770,6 +770,13 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       fenced.delete(taskId);
       emitState(profile);
       startNextOwnerPrompt(profile);
+      // A queued peer (A2A) message for this now-idle profile would otherwise
+      // wait up to one full bridgeTimer tick (150ms) to be noticed, for no
+      // reason -- the moment this profile goes idle is exactly when bridgeOnce
+      // would next find it deliverable anyway. startNextOwnerPrompt above may
+      // have just made it active again, which bridgeOnce's own active.has
+      // check already handles correctly.
+      void bridgeOnce().catch(() => undefined);
     }
   }
 
