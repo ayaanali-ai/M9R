@@ -244,6 +244,55 @@ export function summarizeStageTimingEvents(events: readonly StageTimingEvent[]):
   return summary;
 }
 
+/**
+ * The phases a timedStagePhase() call wraps end-to-end: each one spans the whole time a
+ * desktop-stage request spent in that phase, including every finer sub-phase recorded inside it
+ * (e.g. "action" already contains "input-dispatch", "accessibility-read", "cursor-motion", ...).
+ * Summing these six is real, non-overlapping M9R-side time; summing every StageTimingPhase would
+ * double-count every sub-phase against its own parent.
+ */
+export const TOP_LEVEL_STAGE_TIMING_PHASES: readonly StageTimingPhase[] = ["queue_wait", "prepare", "launch", "action", "close", "stop"];
+
+export interface TaskThinkTimeBreakdown {
+  /** Wall-clock span from task creation to task completion. */
+  totalElapsedMs: number;
+  /** Sum of the top-level (non-overlapping) stage-timing phases: real M9R dispatch/infra time. */
+  m9rInfraMs: number;
+  /** totalElapsedMs minus m9rInfraMs, floored at 0. Not a direct measurement -- the remainder
+   *  after subtracting every M9R-side phase we instrument. On a real task this is dominated by
+   *  the agent provider's own reasoning time between dispatched actions, which M9R does not (and
+   *  should not claim to) speed up; it can also include provider-side network/queueing time M9R
+   *  has no visibility into. Treat it as "time not accounted for by M9R's own pipeline," not as
+   *  a verified measurement of model think time specifically. */
+  inferredNonInfraMs: number;
+  /** m9rInfraMs as a share of totalElapsedMs, 0-100. */
+  m9rInfraSharePercent: number;
+}
+
+/**
+ * Splits a finished task's total wall-clock time into "M9R's own instrumented dispatch work" vs.
+ * "everything else" (overwhelmingly the agent provider's own think time on a real task). Returns
+ * null for a task with no completion timestamp yet (the total span is not closed) or where
+ * completion is recorded before creation (clock skew / malformed data -- never report a negative
+ * duration as if it were real).
+ */
+export function summarizeTaskThinkTime(input: { createdAt: string; completedAt: string | undefined; stageTimingSummary: StageTimingSummary | undefined }): TaskThinkTimeBreakdown | null {
+  if (!input.completedAt) return null;
+  const startedMs = Date.parse(input.createdAt);
+  const endedMs = Date.parse(input.completedAt);
+  if (!Number.isFinite(startedMs) || !Number.isFinite(endedMs) || endedMs < startedMs) return null;
+  const totalElapsedMs = endedMs - startedMs;
+  const summary = input.stageTimingSummary ?? {};
+  const m9rInfraMs = TOP_LEVEL_STAGE_TIMING_PHASES.reduce((total, phase) => total + (summary[phase]?.totalDurationMs ?? 0), 0);
+  const boundedInfraMs = Math.min(m9rInfraMs, totalElapsedMs);
+  return {
+    totalElapsedMs,
+    m9rInfraMs: Math.round(boundedInfraMs * 100) / 100,
+    inferredNonInfraMs: Math.round((totalElapsedMs - boundedInfraMs) * 100) / 100,
+    m9rInfraSharePercent: totalElapsedMs > 0 ? Math.round((boundedInfraMs / totalElapsedMs) * 10000) / 100 : 0,
+  };
+}
+
 /** Canonical inbox key: tolerate a single mention marker and provider-handle casing. */
 export function normalizeHandle(handle: string): string {
   return (handle.startsWith("@") ? handle.slice(1) : handle).toLowerCase();

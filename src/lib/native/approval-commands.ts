@@ -5,7 +5,7 @@
 import { createLocalStore, handleForProvider, MAX_LOCAL_EVENT_HISTORY, MAX_STAGE_TIMING_EVENTS_PER_TASK } from "./local-store";
 import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { isHumanContext, lapsedPending, parseDuration, PENDING_TTL_MS } from "./approval-core";
-import { summarizeStageTimingEvents, type Task } from "./inbox-core";
+import { summarizeStageTimingEvents, summarizeTaskThinkTime, type Task } from "./inbox-core";
 
 export interface ApprovalIo {
   env: Record<string, string | undefined>;
@@ -161,6 +161,11 @@ export function runTaskLog(io: ApprovalIo, storeRoot: string, rawId: string | un
     stageTiming,
     stageTimingSummary,
     stageTimingSummaryStartedAt: task.stageTimingSummaryStartedAt ?? stageTiming[0]?.startedAt ?? null,
+    timingBreakdown: summarizeTaskThinkTime({
+      createdAt: task.createdAt,
+      completedAt: task.lifecycle?.completedAt ?? task.completion?.updatedAt,
+      stageTimingSummary,
+    }),
     correlatedStoreEvents,
     retention: {
       stageTimingEvents: stageTiming.length,
