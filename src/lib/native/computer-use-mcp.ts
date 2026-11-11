@@ -711,10 +711,19 @@ function publicStageCapture(capture: Record<string, unknown>) {
  * web broker as the only dispatch backends. Observations are session-scoped,
  * bounded, short-lived, and never contain raw HWND/process handles.
  */
-export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcpDeps): void {
+export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcpDeps): { observationModalityStats: () => { observations: number; explicitVisual: number; treeIncompleteFallback: number; treeOnly: number } } {
   const records = new Map<string, TargetRecord>();
   const logicalTargets = new Map<string, string>();
   const changeBaselines = new Map<string, StoredObservationFingerprint>();
+  // Item 7 of the latency plan: observeDesktop() already defaults to a structured
+  // (tree-only) observation and only falls back to a screenshot when the tree itself
+  // reports it can't answer (status !== "complete", including the unlabeled-interactive
+  // and truncated cases folded into that status). This counter adds pure visibility into
+  // how often that already-built gating actually keeps the screenshot out of the response,
+  // with no change to the gating decision itself -- proof before any further tuning, the
+  // same pattern as item 6's uiTreeCacheStats.
+  const observationModalityStats = { observations: 0, explicitVisual: 0, treeIncompleteFallback: 0, treeOnly: 0 };
+  function observationModalitySnapshot() { return { ...observationModalityStats }; }
   const monotonicNow = deps.monotonicNow ?? (() => performance.now());
   const now = deps.now ?? (() => new Date());
   const inputSchemas = buildInputSchemas(deps.authField);
@@ -1050,6 +1059,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       ...(control.rect ? { rect: control.rect } : {}),
     }));
     const image = visibleCapture ? dataUrlImage(visibleCapture.dataUrl) : undefined;
+    observationModalityStats.observations += 1;
+    if (input.representation === "visual") observationModalityStats.explicitVisual += 1;
+    else if (image) observationModalityStats.treeIncompleteFallback += 1;
+    else observationModalityStats.treeOnly += 1;
     const observation = input.representation === "structured"
       ? { representation: "structured", ...(structuredObservation ? { structure: structuredObservation } : {}), controls: publicControls,
           change: record.change,
@@ -1980,4 +1993,6 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       status: matching.length > boundedLimit ? "partial" : record.context.structureStatus ?? "unknown", absenceEvidence: "unknown",
       controls: matching.slice(0, boundedLimit), truncated: matching.length > boundedLimit } });
   });
+
+  return { observationModalityStats: observationModalitySnapshot };
 }
