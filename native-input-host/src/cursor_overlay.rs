@@ -1155,6 +1155,13 @@ pub mod win {
                     // holding the lock across the (possibly slower) render.
                     let mut snapshot = guard.clone();
                     drop(guard);
+                    if snapshot.is_empty() {
+                        // No agents to show: skip the render/UpdateLayeredWindow
+                        // work entirely instead of repainting an empty frame
+                        // every tick. The timer still fires so a newly-added
+                        // agent is picked up on the next tick.
+                        continue;
+                    }
                     // `AgentState` stores physical screen coordinates. The
                     // layered window's backing DIB starts at the virtual
                     // desktop origin, which may be negative on multi-monitor
