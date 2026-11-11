@@ -22,6 +22,7 @@ import { preDispatchRetry, type ComputerUseRetry } from "./computer-use-recovery
 import { recordComputerUseLatency } from "./computer-use-latency";
 import { runComputerUseProgram } from "./computer-use-program";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
+import type { ObservationModalityLedger } from "./observation-modality-ledger";
 import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
 import type { VerifiedIdentity } from "./identity-core";
 import type { ComputerOperationInput, LocalStore, StageOperationClaim } from "./local-store";
@@ -243,6 +244,7 @@ interface ComputerUseMcpDeps {
    */
   authField?: { token?: z.ZodString | z.ZodOptional<z.ZodString> };
   workflowPreferences?: WorkflowPreferenceLedger;
+  observationModalityLedger?: ObservationModalityLedger;
 }
 
 type TextBlock = { type: "text"; text: string };
@@ -711,7 +713,7 @@ function publicStageCapture(capture: Record<string, unknown>) {
  * web broker as the only dispatch backends. Observations are session-scoped,
  * bounded, short-lived, and never contain raw HWND/process handles.
  */
-export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcpDeps): { observationModalityStats: () => { observations: number; explicitVisual: number; treeIncompleteFallback: number; treeOnly: number } } {
+export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcpDeps): { observationModalityStats: () => ReturnType<ObservationModalityLedger["snapshot"]> } {
   const records = new Map<string, TargetRecord>();
   const logicalTargets = new Map<string, string>();
   const changeBaselines = new Map<string, StoredObservationFingerprint>();
@@ -721,9 +723,17 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
   // and truncated cases folded into that status). This counter adds pure visibility into
   // how often that already-built gating actually keeps the screenshot out of the response,
   // with no change to the gating decision itself -- proof before any further tuning, the
-  // same pattern as item 6's uiTreeCacheStats.
-  const observationModalityStats = { observations: 0, explicitVisual: 0, treeIncompleteFallback: 0, treeOnly: 0 };
-  function observationModalitySnapshot() { return { ...observationModalityStats }; }
+  // same pattern as item 6's uiTreeCacheStats. Callers that care about real numbers across
+  // process restarts (the live MCP server) pass a persisted deps.observationModalityLedger;
+  // callers that don't (every existing test fixture) get an in-memory-only ledger instead,
+  // so this never requires touching unrelated test setup.
+  const observationModalityLedger: ObservationModalityLedger = deps.observationModalityLedger
+    ?? (() => { let state = { observations: 0, explicitVisual: 0, treeIncompleteFallback: 0, treeOnly: 0 };
+      return { record(outcome) { state = { ...state, observations: state.observations + 1,
+        explicitVisual: state.explicitVisual + (outcome === "explicit-visual" ? 1 : 0),
+        treeIncompleteFallback: state.treeIncompleteFallback + (outcome === "tree-incomplete-fallback" ? 1 : 0),
+        treeOnly: state.treeOnly + (outcome === "tree-only" ? 1 : 0) }; },
+        snapshot() { return { ...state }; } }; })();
   const monotonicNow = deps.monotonicNow ?? (() => performance.now());
   const now = deps.now ?? (() => new Date());
   const inputSchemas = buildInputSchemas(deps.authField);
@@ -1059,10 +1069,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       ...(control.rect ? { rect: control.rect } : {}),
     }));
     const image = visibleCapture ? dataUrlImage(visibleCapture.dataUrl) : undefined;
-    observationModalityStats.observations += 1;
-    if (input.representation === "visual") observationModalityStats.explicitVisual += 1;
-    else if (image) observationModalityStats.treeIncompleteFallback += 1;
-    else observationModalityStats.treeOnly += 1;
+    observationModalityLedger.record(input.representation === "visual" ? "explicit-visual" : image ? "tree-incomplete-fallback" : "tree-only");
     const observation = input.representation === "structured"
       ? { representation: "structured", ...(structuredObservation ? { structure: structuredObservation } : {}), controls: publicControls,
           change: record.change,
@@ -1994,5 +2001,5 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       controls: matching.slice(0, boundedLimit), truncated: matching.length > boundedLimit } });
   });
 
-  return { observationModalityStats: observationModalitySnapshot };
+  return { observationModalityStats: () => observationModalityLedger.snapshot() };
 }

@@ -29,6 +29,7 @@ import { gitRead, readGovernedFile } from "../bridge/governed-agent-tools";
 import { prepareTaskStageNotice } from "./task-stage-notice";
 import { registerComputerUseTools } from "./computer-use-mcp";
 import { createWorkflowPreferenceLedger } from "./workflow-preferences";
+import { createObservationModalityLedger } from "./observation-modality-ledger";
 import type { MultiplayerA2ASendInput } from "./multiplayer-runtime";
 
 export interface McpServerDeps {
@@ -187,6 +188,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const operationNamespace = randomUUID();
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
   const workflowPreferences = createWorkflowPreferenceLedger(deps.store.root, deps.now ?? (() => new Date()));
+  const observationModalityLedger = createObservationModalityLedger(deps.store.root, deps.now ?? (() => new Date()));
   // Whether this process was ever told anything connection-mode-shaped at startup. This stays a
   // static fact about how the process was launched (its env/deps genuinely never changes after
   // that) -- what changed is that it no longer freezes the *schema* or skips a fresh resolution
@@ -648,6 +650,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     monotonicNow: deps.monotonicNow,
     authField: AUTH_FIELD,
     workflowPreferences,
+    observationModalityLedger,
   });
 
   function workingDirectory(identity: VerifiedIdentity): string {

@@ -6,6 +6,7 @@ import { createLocalStore, handleForProvider, MAX_LOCAL_EVENT_HISTORY, MAX_STAGE
 import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { isHumanContext, lapsedPending, parseDuration, PENDING_TTL_MS } from "./approval-core";
 import { summarizeStageTimingEvents, summarizeTaskThinkTime, type Task } from "./inbox-core";
+import { createObservationModalityLedger } from "./observation-modality-ledger";
 
 export interface ApprovalIo {
   env: Record<string, string | undefined>;
@@ -76,6 +77,30 @@ export function runTasks(io: ApprovalIo, storeRoot: string): number {
   for (const t of tasks) io.out(`${t.id}  @${t.from} -> @${t.to}  [${stateLabel(t)}]  ${oneLine(t.goal, 70)}`);
   const waiting = tasks.filter((t) => t.approval === "pending");
   if (waiting.length) io.out(`${waiting.length} waiting for you: m9r-cli approve <id>  or  m9r-cli deny <id>`);
+  return 0;
+}
+
+/**
+ * Read-only, owner-terminal view of item 7's observation-modality counter: how many
+ * m9r_computer_observe calls actually resolved tree-only versus fell back to a screenshot
+ * because the tree reported it couldn't answer, versus explicitly asked for pixels. Reading
+ * it never writes -- createObservationModalityLedger() only persists on record().
+ */
+export function runObservationStats(io: ApprovalIo, storeRoot: string): number {
+  if (!isHuman(io)) {
+    io.err("Observation-modality stats are available only to the owner at a terminal.");
+    return 1;
+  }
+  const stats = createObservationModalityLedger(storeRoot).snapshot();
+  if (stats.observations === 0) {
+    io.out("No desktop observations recorded yet in this M9R local store.");
+    return 0;
+  }
+  const percent = (count: number) => `${((count / stats.observations) * 100).toFixed(1)}%`;
+  io.out(`${stats.observations} desktop observation(s) recorded${stats.updatedAt ? ` (last at ${stats.updatedAt})` : ""}:`);
+  io.out(`  tree-only (no screenshot needed):        ${stats.treeOnly} (${percent(stats.treeOnly)})`);
+  io.out(`  tree-incomplete screenshot fallback:      ${stats.treeIncompleteFallback} (${percent(stats.treeIncompleteFallback)})`);
+  io.out(`  explicit representation=visual requested: ${stats.explicitVisual} (${percent(stats.explicitVisual)})`);
   return 0;
 }
 

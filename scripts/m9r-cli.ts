@@ -120,9 +120,9 @@ const argv = process.argv.slice(2);
 // deliberately retained so migration is recoverable and non-destructive.
 normalizeLegacyM9rEnvironment(process.env);
 // Evidence export must be usable as a genuinely read-only diagnostic. In
-// particular, running `task-log` must not trigger the compatibility copier
-// before it reads the current canonical store.
-if (argv[0] !== "task-log") {
+// particular, running `task-log` or `observation-stats` must not trigger the
+// compatibility copier before it reads the current canonical store.
+if (argv[0] !== "task-log" && argv[0] !== "observation-stats") {
   for (const stateRoot of new Set([process.cwd(), homedir()])) {
     try {
       const migration = migrateLegacyM9rDirectory(stateRoot);
