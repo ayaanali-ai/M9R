@@ -242,6 +242,8 @@ body {
   cursor: default;
 }
 
+.header-actions button[hidden] { display: none; }
+
 .header-actions button.on {
   color: var(--ink);
 }
