@@ -16,7 +16,15 @@ test("incomplete work is preserved without a completed receipt or successful res
     store.markDelivered([task.id], identity.sessionId);
     assert.equal(store.recordTaskResult(identity.token, task.id, "First requirement done.", { status: "incomplete", remainingWork: ["Verify the second requirement"] }).ok, true);
     const saved = store.getTask(task.id)!;
-    assert.equal(saved.receipt?.state, "paused");
+    // "uncertain", not "paused" -- this is the agent's own self-report, not an
+    // owner-initiated pause, so it must stay a non-terminal state the same
+    // task can still be completed from (see the next assertion below). Using
+    // "paused" here used to permanently strand the task: recordTaskResult
+    // refuses any later call once a task is "paused", so a real completion
+    // reported afterward was silently discarded forever (confirmed live as
+    // T274's task-log showing "incomplete" even though the agent's own
+    // transcript said the work had finished).
+    assert.equal(saved.receipt?.state, "uncertain");
     assert.equal(saved.resultSummary, undefined);
     assert.notEqual(saved.delivery?.state, "done");
     assert.deepEqual(saved.completion?.remainingWork, ["Verify the second requirement"]);
@@ -24,6 +32,12 @@ test("incomplete work is preserved without a completed receipt or successful res
     const handoff = logicalTaskHandoff({ ...saved, logicalContext: context });
     assert.match(handoff, /Verify the second requirement/);
     assert.equal(context.workId, saved.id);
+    // The actual bug this guards against: a later genuine completion for the
+    // SAME task must still be accepted, not silently refused.
+    assert.equal(store.recordTaskResult(identity.token, task.id, "Second requirement verified too.", { status: "completed", remainingWork: [] }).ok, true);
+    const completed = store.getTask(task.id)!;
+    assert.equal(completed.receipt?.state, "completed");
+    assert.equal(completed.resultSummary, "Second requirement verified too.");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

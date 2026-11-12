@@ -63,9 +63,16 @@ test("a provider turn ending without a completion report preserves unfinished M9
     assert.equal(owner.deliver("codex", "Verify both documents.").ok, true);
     for (let attempt = 0; attempt < 100 && !gated?.sent.length; attempt++) await new Promise((done) => setTimeout(done, 10));
     gated!.release();
-    for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "paused"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "uncertain"; attempt++) await new Promise((done) => setTimeout(done, 10));
     const task = store.getTask("T1")!;
-    assert.equal(task.receipt?.state, "paused");
+    // "uncertain", not "paused" -- a provider turn ending without an explicit
+    // m9r_result call is not an owner-initiated pause (T274, live 2026-11-11:
+    // the agent's own transcript said it finished, but this exact fallback
+    // had recorded "paused" here, which is a dead end everywhere else in the
+    // receipt state machine -- recordTaskResult refuses any later call once a
+    // task is "paused", so the agent's actual completion was silently
+    // discarded and task-log showed "incomplete" forever).
+    assert.equal(task.receipt?.state, "uncertain");
     assert.equal(task.resultSummary, undefined);
     assert.deepEqual(task.completion?.remainingWork, ["Verify both documents."]);
     assert.match(gated!.sent[0]!.prompt, /Ending the provider turn alone never completes/);

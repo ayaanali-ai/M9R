@@ -321,7 +321,11 @@ test("incomplete teammate results are returned, while depth limits and missing s
     assert.ok(partialReply);
     assert.match(partialReply.goal, /incomplete/);
     assert.match(partialReply.goal, /Confirm the third field/);
-    assert.equal(t.store.getTask(incomplete.id)?.receipt?.state, "paused");
+    // "uncertain", not "paused" -- a self-reported incomplete result must stay
+    // a non-terminal state so a later real completion for this same task is
+    // still accepted (recordTaskResult refuses any further call once a task
+    // is actually "paused", which is reserved for an owner-initiated pause).
+    assert.equal(t.store.getTask(incomplete.id)?.receipt?.state, "uncertain");
     assert.equal(t.store.getTask(incomplete.id)?.resultSummary, undefined);
 
     const capped = t.store.addTask({ from: "claude", to: "codex", goal: "One last request.", origin: "agent_initiated",

@@ -2688,7 +2688,20 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           t.logicalContext.state = "paused";
           t.logicalContext.remainingWork = report.remainingWork;
           t.logicalContext.priorOutcome = clean.slice(0, 2_000);
-          recordTaskReceipt(t, { state: "paused", at, source: "provider-session" });
+          // Not an owner-initiated pause -- the completion heuristic could not
+          // confirm success from this report. "paused" is a one-way door
+          // elsewhere (recordTaskResult refuses any later call once paused;
+          // resolveResultTaskId/pendingTasksFor exclude it from discovery), so
+          // using it here permanently stranded a task the moment one self-report
+          // was misread as incomplete, even when the agent went on to actually
+          // finish and later call m9r_result with status "completed" -- that
+          // later call was being silently refused. "uncertain" is the correct
+          // existing state for "outcome not confirmed yet" (RECEIPT_TRANSITIONS
+          // already allows provider_received/started -> uncertain -> completed,
+          // unlike "retryable", which only the delivery layer reaches into and
+          // which has no path back to "completed" at all); it keeps the task
+          // active and discoverable for exactly that later, real completion.
+          recordTaskReceipt(t, { state: "uncertain", at, source: "provider-session" });
           return t;
         }
         rememberDelivery(t);
@@ -2859,7 +2872,17 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           task.logicalContext.state = "paused";
           task.logicalContext.remainingWork = report.remainingWork;
           task.logicalContext.priorOutcome = bounded.slice(0, 2_000);
-          recordTaskReceipt(task, { state: "paused", at, source: "provider-session", sessionId: identity.sessionId });
+          // Same reasoning as setResult() above: this is the agent's own
+          // uncertain/incomplete report, not an owner pause, so it must not
+          // become the "paused" dead end that blocks every later real
+          // completion for this exact task (see the refusal three lines above
+          // this block, and resolveResultTaskId/pendingTasksFor in
+          // mcp-server.ts, which both exclude "paused" from discovery).
+          // "uncertain" (not "retryable") because RECEIPT_TRANSITIONS allows
+          // provider_received/started -> uncertain -> completed; "retryable"
+          // is reachable only from accepted/dispatched/failed and has no
+          // transition back to "completed" at all.
+          recordTaskReceipt(task, { state: "uncertain", at, source: "provider-session", sessionId: identity.sessionId });
           return { ok: true, ...queueAgentReply(s, task, identity) };
         }
         rememberDelivery(task);
