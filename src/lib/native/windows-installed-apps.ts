@@ -146,13 +146,26 @@ foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths',
     }
   }
 }
-# Packaged apps have exact registered names and stable activation IDs. Resolve
-# those alongside any compatibility stub. The final resolver can then prefer
-# the packaged route (for example, modern Notepad) instead of returning the
-# legacy App Paths shim merely because it was enumerated first.
-foreach ($app in @(Get-StartApps | Where-Object { Matches $_.Name })) {
+# Packaged apps have exact registered names and stable activation IDs; the
+# AppUserModelId alone is enough for window matching in the common case (see
+# stageWindowMatchesApp). Resolving the exact executable via Get-AppxPackage |
+# Get-AppxPackageManifest is a real cost (COM calls, manifest XML parsing) that
+# only earns its keep when there's an actual ambiguity to resolve: a legacy App
+# Paths compatibility stub also registered for this name, or more than one
+# packaged match. Everything else gets the AUMID for free and skips it; the
+# rare window that truly has no AUMID (for example, current Notepad's own
+# HWND) still gets resolved later by the lazy renderer lookup in
+# task-desktop-stage.ts, which calls discoverInstalledWindowExecutable only
+# when the cheap AUMID match actually fails.
+$packagedMatches = @(Get-StartApps | Where-Object { Matches $_.Name })
+$needsExactIdentity = ($found.Count -gt 0) -or ($packagedMatches.Count -gt 1)
+foreach ($app in $packagedMatches) {
   if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
   $family = $Matches[1]; $id = $Matches[2]
+  if (-not $needsExactIdentity) {
+    $found += @{ executable = (Join-Path $env:SystemRoot 'explorer.exe'); args = @('shell:AppsFolder\' + $app.AppID); appUserModelId = [string] $app.AppID }
+    continue
+  }
   $packageName = $family.Substring(0, $family.LastIndexOf('_'))
   $package = Get-AppxPackage -Name $packageName | Where-Object PackageFamilyName -eq $family | Select-Object -First 1
   if (-not $package) { continue }
