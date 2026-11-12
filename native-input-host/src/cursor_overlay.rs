@@ -15,8 +15,17 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{stdin, BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Set whenever a command actually changes presentation state (a new/moved
+/// marker, a chatter bubble, or a removal) and cleared after the tick that
+/// renders it. Lets the WM_TIMER loop below skip the render+blit entirely on
+/// a tick where nothing changed, instead of repainting an unchanged frame at
+/// the full 16ms timer rate for every agent that is simply sitting still
+/// between actions -- the bulk of a real task's wall-clock time.
+static PRESENTATION_DIRTY: AtomicBool = AtomicBool::new(true);
 
 pub const MARKER_SIZE: f32 = 30.0;
 const CHIP_OFFSET_SCALE: f32 = MARKER_SIZE / 46.0;
@@ -157,6 +166,9 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
         None => return false,
     };
     let mut guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
+    if matches!(cmd, "upsert" | "say" | "hide") {
+        PRESENTATION_DIRTY.store(true, Ordering::Release);
+    }
     match cmd {
         "upsert" => {
             let x = value.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32;
@@ -1179,6 +1191,7 @@ pub mod win {
                         agent.x -= x as f32;
                         agent.y -= y as f32;
                     }
+                    let mut blink_changed = false;
                     {
                         let mut guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
                         for agent in guard.values_mut() {
@@ -1189,16 +1202,37 @@ pub mod win {
                                         EYE_BLINK_MIN_MS
                                             + (rand_u64() % (EYE_BLINK_MAX_MS - EYE_BLINK_MIN_MS)),
                                     );
+                                blink_changed = true;
                             } else if agent.blink_until.map(|u| now >= u).unwrap_or(false) {
                                 agent.blink_until = None;
+                                blink_changed = true;
                             }
                             if let Some(b) = &agent.bubble {
                                 let elapsed = now.duration_since(b.started_at).as_millis() as f32;
                                 if bubble_opacity(elapsed).is_none() {
                                     agent.bubble = None;
+                                    blink_changed = true;
                                 }
                             }
                         }
+                    }
+                    // Continuous conditions that need every tick redrawn while
+                    // true: a position tween still in flight, and any visible
+                    // chatter bubble (its opacity/slide changes every frame
+                    // during fade; treating the whole visible window as
+                    // animating is a deliberately conservative simplification,
+                    // not a frame-accurate fade/hold split). Anything else
+                    // (idle, blink not yet due, no bubble) only needs a repaint
+                    // on the tick something actually changed (blink_changed
+                    // above, or an external command via PRESENTATION_DIRTY).
+                    let still_animating = snapshot.values().any(|agent| {
+                        agent.anim_duration_ms > 0.0
+                            && now.saturating_duration_since(agent.anim_start).as_secs_f32() * 1000.0
+                                < agent.anim_duration_ms
+                    }) || snapshot.values().any(|agent| agent.bubble.is_some());
+                    let command_dirty = PRESENTATION_DIRTY.swap(false, Ordering::AcqRel);
+                    if ready_sent && !command_dirty && !blink_changed && !still_animating {
+                        continue;
                     }
                     if renderer.is_none() {
                         renderer = Renderer::new().ok();
