@@ -212,6 +212,13 @@ export interface CuaStageCapture {
   controls?: CuaStageTargetDescription[];
   /** True when `controls` was cut off at its element cap; the window has more controls than were returned. */
   controlsTruncated?: true;
+  /**
+   * The same-call accessibility tree, when an action's own post-dispatch
+   * capture already paired one (see captureWithStructure below). Lets the MCP
+   * observation layer skip a second, separate read_structure round trip for
+   * the same post-dispatch moment -- the duplicate read measured in T276.
+   */
+  structure?: Omit<CuaStageStructure, "fallbackCapture">;
 }
 
 /**
@@ -895,6 +902,22 @@ function stageCapture(capture: { dataUrl: string; width: number; height: number;
     ...(capture.ownedPopups ? { ownedPopups: capture.ownedPopups } : {}),
     ...(capture.popupCaptureStatus ? { popupCaptureStatus: capture.popupCaptureStatus } : {}),
     capturedAt: "capturedAt" in capture && typeof capture.capturedAt === "string" ? capture.capturedAt : now().toISOString() };
+}
+
+/**
+ * Build a post-dispatch capture that already carries the accessibility tree,
+ * instead of the image-only capture most action handlers return. The MCP
+ * observation layer (computer-use-mcp.ts's observeDesktop) only issues its own
+ * separate read_structure round trip when the capture it was handed has no
+ * `.structure` -- so this is what lets that second native call be skipped for
+ * an action whose caller wants a structured post-action observation, instead
+ * of paying for the same window's tree twice (once here, once there).
+ */
+async function captureWithStructure(readStructure: () => Promise<CuaStageStructure>, now: () => Date): Promise<CuaStageCapture> {
+  const structure = await readStructure();
+  const { fallbackCapture, ...structureWithoutImage } = structure;
+  const base = fallbackCapture ?? { dataUrl: "", width: 0, height: 0 };
+  return { ...stageCapture(base, now), structure: structureWithoutImage };
 }
 
 function findDesktopCaptureId(value: unknown): string | undefined {
@@ -3493,7 +3516,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   }
 
   async function clickElement(name: string, ref: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementByToken }) => {
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, readStructure, elementByToken }) => {
       const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
       if (!selected?.element.elementToken || selected.element.enabled === false) {
         throw new DesktopInputNotDispatchedError(options.expectedRole !== undefined || options.expectedLabel !== undefined
@@ -3532,7 +3555,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         }
         if (semantic.dispatched) {
           return {
-            capture: stageCapture(await captureWindow(), now),
+            capture: await captureWithStructure(readStructure, now),
             outcome: { status: "unverified", summary: `Native UI Automation dispatched ${semantic.mechanism ?? "the control action"}; the refreshed window capture is the separate effect check.` },
           };
         }
@@ -3554,7 +3577,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId,
           field: { x: screenPoint.x, y: screenPoint.y, label: selected.element.label, role: selected.element.role } });
       }
-      return { capture: stageCapture(await captureWindow(), now), outcome };
+      return { capture: await captureWithStructure(readStructure, now), outcome };
     }, cursorIdentity);
   }
 
