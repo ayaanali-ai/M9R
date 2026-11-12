@@ -600,6 +600,12 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     let accepted = false;
     let acceptanceRecorded = false;
     let firstVisibleAction = false;
+    // Any MCP tool call sets firstVisibleAction, including m9r_result itself --
+    // so it cannot distinguish "the agent touched the real desktop" from "the
+    // agent reasoned to an answer and only called m9r_result." Track the
+    // actual desktop-dispatch tools separately so a completed result that
+    // never touched the desktop can be labeled, not presented as verified.
+    let realDispatchObserved = false;
     let completionRecorded = false;
     let terminalObserved = false;
     let dispatchStartedMs: number | undefined;
@@ -711,11 +717,19 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           }
           lastToolEventMs = Date.now();
           lastToolEventTick = performance.now();
+          if (event.name === "m9r_stage_action" || event.name === "m9r_stage_app") realDispatchObserved = true;
           emit({ kind: "tool", handle: profile.handle, provider: profile.provider, name: event.name, runId });
         }
         else if (event.kind === "result") {
           terminalObserved = true;
-          emit({ kind: "result", handle: profile.handle, provider: profile.provider, text: event.text, isError: event.isError, runId });
+          // A task can call m9r_result without ever touching the real desktop
+          // (an answer reasoned from the model, not observed from the app).
+          // Flag that case for the owner instead of presenting it as a
+          // verified outcome -- this never blocks or alters the result itself.
+          const unverified = kind === "owner" && !event.isError && !realDispatchObserved;
+          emit({ kind: "result", handle: profile.handle, provider: profile.provider,
+            text: unverified ? `${event.text}\n\n[M9R: no desktop action was observed during this task -- this looks like the model's own answer, not something verified by opening or reading the app.]` : event.text,
+            isError: event.isError, runId });
           if (event.isError) {
             const reason = event.text.trim() || "Provider returned an error result.";
             recordCompletion("error", reason);
