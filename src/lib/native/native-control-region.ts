@@ -29,6 +29,13 @@ export function sameNativeControlEpoch(observed: NativeWindowStructureElement, c
   const sameEpoch = observed.runtimeId?.length
     ? JSON.stringify(observed.runtimeId) === JSON.stringify(current.runtimeId)
     : JSON.stringify(observed.path) === JSON.stringify(current.path);
-  return Boolean(sameEpoch && current.role === observed.role && current.label === observed.label
-    && current.className === observed.className && current.automationId === observed.automationId);
+  if (!sameEpoch || current.role !== observed.role || current.className !== observed.className
+    || current.automationId !== observed.automationId) return false;
+  // The control's display label can legitimately change (a document title's
+  // unsaved-state marker, a live counter, status text) without the control
+  // itself changing identity. A stable automationId is a stronger, non-mutable
+  // identity signal; only fall back to requiring an exact label match when no
+  // automationId is available to lean on.
+  if (observed.automationId.trim()) return true;
+  return current.label === observed.label;
 }

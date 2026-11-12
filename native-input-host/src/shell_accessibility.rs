@@ -775,11 +775,18 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         .ok()
         .map(|value| value.to_string())
         .unwrap_or_default();
+    // A control's display name can legitimately change (a document title's
+    // unsaved-state marker, a live counter, status text) without the control
+    // itself changing identity. A matched, non-empty automation ID is a
+    // stronger, non-mutable identity signal than the name; only fall back to
+    // requiring an exact name match when no automation ID is available to
+    // confirm identity instead.
+    let automation_id_confirmed = !expected_automation_id.is_empty()
+        && truncate_text(&automation_id, 256) == expected_automation_id;
     if role != expected_role
-        || truncate_text(&label, 160) != expected_label
+        || (!automation_id_confirmed && truncate_text(&label, 160) != expected_label)
         || (!expected_class.is_empty() && truncate_text(&class_name, 120) != expected_class)
-        || (!expected_automation_id.is_empty()
-            && truncate_text(&automation_id, 256) != expected_automation_id)
+        || (!expected_automation_id.is_empty() && !automation_id_confirmed)
     {
         return Err(crate::InputDispatchError::not_dispatched(
             "The observed native element changed before dispatch; no semantic input was sent",
