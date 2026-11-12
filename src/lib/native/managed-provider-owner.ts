@@ -604,6 +604,15 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     let terminalObserved = false;
     let dispatchStartedMs: number | undefined;
     let dispatchStartedTick: number | undefined;
+    // The gap between the agent's last visible tool call and the provider's
+    // terminal "result" event is otherwise invisible: it's folded into the
+    // single "completion" span (turn start -> turn end), which already
+    // includes every tool call's own time. Tracking the LAST tool event lets
+    // us measure specifically how long the provider spends after its last
+    // action before it reports done -- the window that keeps the cursor
+    // overlay visible with nothing happening on screen.
+    let lastToolEventMs: number | undefined;
+    let lastToolEventTick: number | undefined;
     let latencyTemperature: LatencyTemperature = "cold";
     const turnStartedMs = Date.now();
     const turnStartedTick = performance.now();
@@ -620,6 +629,9 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       const endedMs = Date.now();
       const endedTick = performance.now();
       recordTurnTiming(taskId, "completion", turnStartedMs, endedMs, status, detail, endedTick - turnStartedTick);
+      if (lastToolEventMs !== undefined && lastToolEventTick !== undefined) {
+        recordTurnTiming(taskId, "post-action-wrapup", lastToolEventMs, endedMs, status, detail, endedTick - lastToolEventTick);
+      }
       if (dispatchStartedMs !== undefined && dispatchStartedTick !== undefined) {
         latencyTelemetry.record({
           kind: "action_completion",
@@ -697,6 +709,8 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
             recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok", undefined, firstEventTick - dispatchStartTick);
             latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: firstEventTick - dispatchStartTick, status: "ok" });
           }
+          lastToolEventMs = Date.now();
+          lastToolEventTick = performance.now();
           emit({ kind: "tool", handle: profile.handle, provider: profile.provider, name: event.name, runId });
         }
         else if (event.kind === "result") {

@@ -187,7 +187,7 @@ export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | 
   | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "cursor-overlay" | "foreground-lease" | "background-dispatch"
   | "window-capture" | "accessibility-read" | "target-resolution" | "input-dispatch" | "post-action-observation"
   | "launch-discovery"
-  | "provider-acceptance" | "first-visible-action" | "completion";
+  | "provider-acceptance" | "first-visible-action" | "completion" | "post-action-wrapup";
 
 /**
  * Timing is deliberately kept on the task record so a later result or audit can reconcile
