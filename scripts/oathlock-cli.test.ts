@@ -38,6 +38,13 @@ test("task-log is routed to the native CLI command instead of reported as unknow
   assert.doesNotMatch(err.join("\n"), /Unknown command/);
 });
 
+test("observation-stats is routed to the native CLI command instead of reported as unknown", async () => {
+  const { deps, err } = makeDeps({ env: { USERPROFILE: "C:/Users/test" } });
+  assert.equal(await run(["observation-stats"], deps), 1);
+  assert.match(err.join("\n"), /available only to the owner at a terminal/);
+  assert.doesNotMatch(err.join("\n"), /Unknown command/);
+});
+
 interface FakeResponse {
   ok: boolean;
   status: number;
