@@ -107,6 +107,7 @@ test("production desktop lifecycle retains one input stream across tasks and del
     assert.equal(second?.streamId, first?.streamId);
     assert.equal(second?.nextSequence, 3);
     assert.equal(f.service.inputStreamSnapshot().length, 1);
+    f.store.flushStageTiming();
     assert.ok(f.store.getTask(followup.id)?.stageTiming?.some((event) => event.detail?.includes(`input-stream=${first?.streamId};sequence=2`)));
   } finally { await f.service.close(); f.cleanup(); }
 });
@@ -220,6 +221,7 @@ test("task timing persists native subphase labels, operation correlation, and fr
       detail: "route=native",
     });
     assert.equal(accepted, true);
+    f.store.flushStageTiming();
     assert.deepEqual(f.store.getTask(f.task.id)?.stageTiming?.at(-1), {
       phase: "input-dispatch",
       startedAt: "2026-11-05T12:00:00.000Z",
@@ -245,6 +247,7 @@ test("task timing persists cursor overlay host timings", () => {
       status: "ok",
       detail: "renderer=m9r;screenPoint=verified;visible=true",
     }), true);
+    f.store.flushStageTiming();
     assert.equal(f.store.getTask(f.task.id)?.stageTiming?.at(-1)?.phase, "cursor-overlay");
     assert.equal(f.store.getTask(f.task.id)?.stageTimingSummary?.["cursor-overlay"]?.totalDurationMs, 12);
   } finally { f.cleanup(); }
@@ -262,6 +265,7 @@ test("task timing keeps full per-phase aggregates after raw event history reache
         status: i % 10 === 0 ? "error" : "ok",
       }), true);
     }
+    f.store.flushStageTiming();
 
     const recorded = f.store.getTask(f.task.id)!;
     assert.equal(recorded.stageTiming?.length, 256, "raw event retention remains bounded");

@@ -439,6 +439,40 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   const lockPath = join(root, "state.lock");
   const maxStateBytes = Math.min(MAX_LOCAL_STATE_BYTES, Math.max(1, Math.floor(deps.maxStateBytes ?? MAX_LOCAL_STATE_BYTES)));
 
+  // Stage timing is best-effort telemetry (see recordStageTiming's own doc
+  // comment), but was going through the same full clone+serialize+atomic-write
+  // pipeline as real task state on every single phase boundary -- 15-25 of
+  // these per action, each paying the full state.json round trip (measured
+  // 108-225ms against the real file). Batch same-tick events into one update()
+  // instead of one per event; this changes nothing about what gets stored or
+  // how task-log reads it, only how many disk round trips it costs to store it.
+  let pendingStageTiming: Array<{ taskId: string; event: StageTimingEvent }> = [];
+  let pendingStageTimingFlush: ReturnType<typeof setTimeout> | undefined;
+  const STAGE_TIMING_FLUSH_MS = 150;
+  function flushStageTiming(): void {
+    if (pendingStageTiming.length === 0) return;
+    const batch = pendingStageTiming;
+    pendingStageTiming = [];
+    pendingStageTimingFlush = undefined;
+    try {
+      update((s) => {
+        for (const { taskId, event: stored } of batch) {
+          const task = s.tasks.find((candidate) => candidate.id === taskId);
+          if (!task) continue;
+          const prior = Array.isArray(task.stageTiming) ? task.stageTiming.slice(-MAX_STAGE_TIMING_EVENTS_PER_TASK) : [];
+          if (!task.stageTimingSummary) {
+            task.stageTimingSummary = summarizeStageTimingEvents(prior);
+            task.stageTimingSummaryStartedAt = prior[0]?.startedAt ?? stored.startedAt;
+            task.stageTimingSummaryMayBeIncomplete = prior.length >= MAX_STAGE_TIMING_EVENTS_PER_TASK;
+          }
+          task.stageTimingSummary = addStageTimingToSummary(task.stageTimingSummary, stored);
+          task.stageTiming = [...prior, stored].slice(-MAX_STAGE_TIMING_EVENTS_PER_TASK);
+        }
+        return true;
+      });
+    } catch { /* a dropped timing batch must never surface as a control-flow error */ }
+  }
+
   function acquire(): string {
     mkdirSync(root, { recursive: true });
     const deadline = Date.now() + lockWaitMs;
@@ -1101,19 +1135,30 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         ...(event.cached === undefined ? {} : { cached: event.cached }),
         ...(detail ? { detail } : {}),
       };
-      return update((s) => {
-        const task = s.tasks.find((candidate) => candidate.id === taskId);
-        if (!task) return false;
-        const prior = Array.isArray(task.stageTiming) ? task.stageTiming.slice(-MAX_STAGE_TIMING_EVENTS_PER_TASK) : [];
-        if (!task.stageTimingSummary) {
-          task.stageTimingSummary = summarizeStageTimingEvents(prior);
-          task.stageTimingSummaryStartedAt = prior[0]?.startedAt ?? stored.startedAt;
-          task.stageTimingSummaryMayBeIncomplete = prior.length >= MAX_STAGE_TIMING_EVENTS_PER_TASK;
-        }
-        task.stageTimingSummary = addStageTimingToSummary(task.stageTimingSummary, stored);
-        task.stageTiming = [...prior, stored].slice(-MAX_STAGE_TIMING_EVENTS_PER_TASK);
+      // Validation above is synchronous and still rejects malformed events
+      // immediately (same return value a caller sees today). The actual disk
+      // write is batched; see flushStageTiming above.
+      pendingStageTiming.push({ taskId, event: stored });
+      // Definitive end-of-task events are infrequent (at most once or twice
+      // per task) and task-log is commonly read moments after one fires, so
+      // flush these eagerly instead of risking a reader seeing a task as done
+      // without its closing evidence for the full debounce window.
+      if (event.phase === "completion" || event.phase === "stop") {
+        if (pendingStageTimingFlush) { clearTimeout(pendingStageTimingFlush); pendingStageTimingFlush = undefined; }
+        flushStageTiming();
         return true;
-      });
+      }
+      pendingStageTimingFlush ??= setTimeout(flushStageTiming, STAGE_TIMING_FLUSH_MS);
+      pendingStageTimingFlush.unref?.();
+      return true;
+    },
+
+    /** Force any buffered stage-timing events to disk now. Tests and callers
+     * that need to read timing evidence immediately after recording it (task-log,
+     * synchronous assertions) should call this instead of waiting out the debounce. */
+    flushStageTiming(): void {
+      if (pendingStageTimingFlush) { clearTimeout(pendingStageTimingFlush); pendingStageTimingFlush = undefined; }
+      flushStageTiming();
     },
 
     /** Associate an execution with the verified owner-runtime build without storing provider credentials or prompts. */

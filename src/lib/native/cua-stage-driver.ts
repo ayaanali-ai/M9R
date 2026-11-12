@@ -2298,7 +2298,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         try { control = await timed("target-resolution", () => manager.pointControl(point.screenPoint.x, point.screenPoint.y),
           { detail: "source=uia-element-at-point" }); }
         catch { /* an inspection miss has dispatched no input; physical fallback remains available */ }
-        if (control?.windowPid === point.target.pid && control.windowId === point.target.windowId.toString()) {
+        // A control without InvokePattern will fail every invoke attempt, not
+        // just sometimes (T276: 5 identical failures on Chrome's address
+        // bar, each misread as an ambiguous "uncertain" outcome that blocks
+        // a safe fallback). The uninvoked inspection above already reports
+        // this; skip the doomed attempt instead of paying its full
+        // dispatch-and-verify round trip for a known outcome.
+        if (control?.windowPid === point.target.pid && control.windowId === point.target.windowId.toString()
+          && control.supportsInvoke !== false) {
           try {
             const invoked = await timedInputDispatch("uia-point", () => manager.pointControl(point.screenPoint.x, point.screenPoint.y, control),
               (result) => result.invoked === true);

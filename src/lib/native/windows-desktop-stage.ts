@@ -120,6 +120,11 @@ export interface NativePointControl {
   rect: { x: number; y: number; width: number; height: number };
   invoked: boolean;
   confirmed?: boolean;
+  // Reported by the uninvoked inspection call (shell_accessibility.rs). A
+  // control without InvokePattern will always fail an invoke attempt, not
+  // sometimes -- treating that failure as "uncertain" (T276) blocks a safe
+  // fallback for a known, not ambiguous, outcome.
+  supportsInvoke?: boolean;
 }
 
 export interface WindowsSystemControlRequest {
