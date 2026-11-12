@@ -63,19 +63,55 @@ foreach ($app in @(Get-StartApps | Where-Object { ($keys -contains (Key $_.Name)
 ConvertTo-Json -InputObject @($found | Sort-Object -Unique) -Compress
 `;
 
+/**
+ * Both discovery lookups in this file spawn a cold PowerShell process and walk
+ * Windows' package/shortcut inventory -- real cost (seconds, sometimes the full
+ * 15s timeout) paid on every single app launch, for every app, with nothing
+ * about installed apps having changed since the last lookup. Cache by the
+ * exact query key for a bounded time so repeat launches of the same app (the
+ * overwhelmingly common case) skip the scan entirely; a real install/uninstall
+ * mid-session is picked up again once the entry expires. Only the real
+ * (non-test) query path is cached -- a caller passing its own `query` is
+ * always an injected test fixture, and caching would make one test's fixture
+ * answer a later test's differently-fixtured call for the same name.
+ */
+const DISCOVERY_CACHE_TTL_MS = 10 * 60_000;
+interface DiscoveryCacheEntry<T> { readonly value?: T; readonly error?: Error; readonly expiresAt: number; }
+const windowExecutableCache = new Map<string, DiscoveryCacheEntry<string>>();
+const installedAppCache = new Map<string, DiscoveryCacheEntry<InstalledWindowsApp>>();
+
 export async function discoverInstalledWindowExecutable(executable: string,
   query?: (script: string, env: Record<string, string>) => Promise<string>): Promise<string | undefined> {
   if (!query && process.platform !== "win32") return undefined;
+  const cacheKey = query ? undefined : executable.toLowerCase();
+  if (cacheKey) {
+    const cached = windowExecutableCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (cached.error) throw cached.error;
+      return cached.value;
+    }
+  }
   const run = query ?? ((script: string, env: Record<string, string>) => new Promise<string>((resolve, reject) => {
     execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
       { windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024, env: { ...process.env, ...env } },
       (error, stdout) => error ? reject(new Error("Windows renderer identity lookup failed; no mismatched window was adopted.")) : resolve(stdout));
   }));
-  const parsed: unknown = JSON.parse((await run(WINDOWS_RENDERER_DISCOVERY_SCRIPT, { M9R_APP_LAUNCHER: executable })).replace(/^\uFEFF/, ""));
-  if (!Array.isArray(parsed) || parsed.some((path) => typeof path !== "string" || !isAbsolute(path) || !/\.exe$/i.test(path))) return undefined;
-  const paths = [...new Map((parsed as string[]).map((path) => [path.toLowerCase(), path])).values()];
-  return paths.length === 1 ? paths[0] : undefined;
+  try {
+    const parsed: unknown = JSON.parse((await run(WINDOWS_RENDERER_DISCOVERY_SCRIPT, { M9R_APP_LAUNCHER: executable })).replace(/^\uFEFF/, ""));
+    const result = !Array.isArray(parsed) || parsed.some((path) => typeof path !== "string" || !isAbsolute(path) || !/\.exe$/i.test(path))
+      ? undefined
+      : (() => {
+        const paths = [...new Map((parsed as string[]).map((path) => [path.toLowerCase(), path])).values()];
+        return paths.length === 1 ? paths[0] : undefined;
+      })();
+    if (cacheKey) windowExecutableCache.set(cacheKey, { value: result, expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS });
+    return result;
+  } catch (error) {
+    const normalized = error instanceof Error ? error : new Error(String(error));
+    if (cacheKey) windowExecutableCache.set(cacheKey, { error: normalized, expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS });
+    throw normalized;
+  }
 }
 
 function appNameKey(value: string): string {
@@ -153,35 +189,53 @@ export async function discoverInstalledWindowsApp(
   query?: (script: string, env: Record<string, string>) => Promise<string>,
 ): Promise<InstalledWindowsApp | undefined> {
   if (!query && process.platform !== "win32") return undefined;
-  const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const env = { M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) };
-  const output = query
-    ? await query(WINDOWS_APP_DISCOVERY_SCRIPT, env)
-    : await new Promise<string>((resolve, reject) => {
-      execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_APP_DISCOVERY_SCRIPT], {
-        windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024,
-        env: { ...process.env, ...env },
-      }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
-    });
-  const parsed: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));
-  if (!Array.isArray(parsed)) throw new Error("Windows app discovery returned an invalid inventory.");
-  const apps = parsed.filter((app): app is InstalledWindowsApp => app && typeof app.executable === "string"
-    && isAbsolute(app.executable) && /\.exe$/i.test(app.executable) && Array.isArray(app.args)
-    && (app.args.length === 0 || (app.args.length === 1 && typeof app.args[0] === "string"
-      && (/^shell:AppsFolder\\[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(app.args[0]) || (isAbsolute(app.args[0]) && /\.lnk$/i.test(app.args[0]) && !/[\u0000-\u001f]/.test(app.args[0])))))
-    && (app.windowExecutable === undefined || /^[^\\/]+\.exe$/i.test(app.windowExecutable))
-    && (app.windowExecutablePath === undefined || (isAbsolute(app.windowExecutablePath) && /\.exe$/i.test(app.windowExecutablePath)))
-    && (app.appUserModelId === undefined || /^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(app.appUserModelId)));
-  const unique = [...new Map(apps.map((app) => [`${app.executable.toLowerCase()}\0${app.args.join("\0")}`, app])).values()];
-  const packaged = unique.filter((app) => app.args[0]?.startsWith("shell:AppsFolder\\"));
-  // Windows ships compatibility stubs beside the registered packaged app
-  // (Notepad is one example). These are two launch routes for the same app.
-  if (packaged.length === 1 && unique.every((app) => app === packaged[0]
-    || [packaged[0].windowExecutablePath?.split(/[\\/]/).at(-1), packaged[0].windowExecutable]
-      .some((name) => typeof name === "string" && app.executable.split(/[\\/]/).at(-1)?.toLowerCase() === name.toLowerCase()))) return packaged[0];
-  if (unique.length > 1) {
-    const candidates = unique.slice(0, 10).map((app) => app.executable).join("; ");
-    throw new Error(`Windows found multiple installed apps named "${name}" (${candidates}); select the intended app.`);
+  const cacheKey = query ? undefined : appNameKey(name.trim());
+  if (cacheKey) {
+    const cached = installedAppCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (cached.error) throw cached.error;
+      return cached.value;
+    }
   }
-  return unique[0];
+  try {
+    const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const env = { M9R_APP_QUERY_NAMES: JSON.stringify(windowsAppSearchNames(name)) };
+    const output = query
+      ? await query(WINDOWS_APP_DISCOVERY_SCRIPT, env)
+      : await new Promise<string>((resolve, reject) => {
+        execFile(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_APP_DISCOVERY_SCRIPT], {
+          windowsHide: true, timeout: 15_000, maxBuffer: 256 * 1024,
+          env: { ...process.env, ...env },
+        }, (error, stdout, stderr) => error ? reject(new Error(`Windows app discovery failed: ${error.killed ? "Windows inventory query exceeded its 15-second deadline." : (stderr.trim() || error.message.split("\n")[0]).slice(0, 500)}`)) : resolve(stdout));
+      });
+    const parsed: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));
+    if (!Array.isArray(parsed)) throw new Error("Windows app discovery returned an invalid inventory.");
+    const apps = parsed.filter((app): app is InstalledWindowsApp => app && typeof app.executable === "string"
+      && isAbsolute(app.executable) && /\.exe$/i.test(app.executable) && Array.isArray(app.args)
+      && (app.args.length === 0 || (app.args.length === 1 && typeof app.args[0] === "string"
+        && (/^shell:AppsFolder\\[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(app.args[0]) || (isAbsolute(app.args[0]) && /\.lnk$/i.test(app.args[0]) && !/[\u0000-\u001f]/.test(app.args[0])))))
+      && (app.windowExecutable === undefined || /^[^\\/]+\.exe$/i.test(app.windowExecutable))
+      && (app.windowExecutablePath === undefined || (isAbsolute(app.windowExecutablePath) && /\.exe$/i.test(app.windowExecutablePath)))
+      && (app.appUserModelId === undefined || /^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(app.appUserModelId)));
+    const unique = [...new Map(apps.map((app) => [`${app.executable.toLowerCase()}\0${app.args.join("\0")}`, app])).values()];
+    const packaged = unique.filter((app) => app.args[0]?.startsWith("shell:AppsFolder\\"));
+    // Windows ships compatibility stubs beside the registered packaged app
+    // (Notepad is one example). These are two launch routes for the same app.
+    const resolved = packaged.length === 1 && unique.every((app) => app === packaged[0]
+      || [packaged[0].windowExecutablePath?.split(/[\\/]/).at(-1), packaged[0].windowExecutable]
+        .some((winName) => typeof winName === "string" && app.executable.split(/[\\/]/).at(-1)?.toLowerCase() === winName.toLowerCase()))
+      ? packaged[0]
+      : unique.length > 1
+        ? (() => {
+          const candidates = unique.slice(0, 10).map((app) => app.executable).join("; ");
+          throw new Error(`Windows found multiple installed apps named "${name}" (${candidates}); select the intended app.`);
+        })()
+        : unique[0];
+    if (cacheKey) installedAppCache.set(cacheKey, { value: resolved, expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS });
+    return resolved;
+  } catch (error) {
+    const normalized = error instanceof Error ? error : new Error(String(error));
+    if (cacheKey) installedAppCache.set(cacheKey, { error: normalized, expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS });
+    throw normalized;
+  }
 }
