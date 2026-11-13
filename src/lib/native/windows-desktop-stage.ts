@@ -7,6 +7,7 @@ import { renameStateFile } from "./atomic-file";
 import { isAgentContext } from "./approval-core";
 import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "./desktop-input-errors";
 import { defaultStoreRoot } from "./local-store";
+import { isProcessAlive } from "./process-liveness";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 
@@ -485,8 +486,15 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     targets: Map<string, { pid: number; windowId: string }>;
   }>();
   const foregroundOperations = new Set(["bringToForeground", "setWindowState", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "restoreCursorPosition", "restoreForegroundContext"]);
+  const liveStageChildPids = new Set<number>();
+  const trackStageChildPid = (pid: number | undefined, alive: boolean): void => {
+    if (typeof pid !== "number") return;
+    if (alive) liveStageChildPids.add(pid); else liveStageChildPids.delete(pid);
+    recordStageChildPids(root, [...liveStageChildPids]);
+  };
+  if (!deps.invokeNative && !deps.nativeHostFactory) reapOrphanStageChildren(root);
   const hostFactory = deps.nativeHostFactory ?? (() => createPersistentWindowsStageHost(
-    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe")));
+    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), trackStageChildPid));
   const persistentHost = deps.invokeNative ? undefined : hostFactory();
   const streamHosts = new Map<string, ReturnType<typeof hostFactory>>();
   const foregroundMonitorLeases = new Map<string, Set<string>>();
@@ -1761,7 +1769,41 @@ interface PendingNativeStageRequest {
  * serialized by the queue and independently identified so acknowledgements
  * and responses can be correlated with their caller.
  */
-function createPersistentWindowsStageHost(executable: string) {
+/**
+ * A `--desktop-stage-server` child is spawned with no OS-level job/process-group tie to its Node
+ * parent. A graceful parent exit kills it via `closeManager`, but `Stop-Process -Force` (TerminateProcess)
+ * is not catchable, so the child is orphaned and runs forever -- confirmed live on 2026-11-13, where
+ * every forced broker restart during install left its old `--desktop-stage-server` children running
+ * alongside the new ones. Only one broker runs at a time by design, so every pid recorded here by a
+ * *previous* manager instance is safe to kill the moment a new one starts up.
+ */
+/** @internal exported for the orphan-reaping unit test only */
+export function orphanStagePidsPath(root: string): string {
+  return join(root, "native-stage-children.json");
+}
+
+/** @internal exported for the orphan-reaping unit test only */
+export function reapOrphanStageChildren(root: string): void {
+  const path = orphanStagePidsPath(root);
+  let pids: unknown;
+  try { pids = JSON.parse(readFileSync(path, "utf8")); }
+  catch { return; }
+  if (!Array.isArray(pids)) return;
+  for (const pid of pids) {
+    if (typeof pid !== "number" || !Number.isInteger(pid)) continue;
+    try { if (isProcessAlive(pid)) process.kill(pid, "SIGKILL"); }
+    catch { /* already gone, or not killable -- either way it is not this manager's problem */ }
+  }
+  try { writeFileSync(path, "[]"); } catch { /* best-effort cleanup only */ }
+}
+
+/** @internal exported for the orphan-reaping unit test only */
+export function recordStageChildPids(root: string, pids: readonly number[]): void {
+  try { writeFileSync(orphanStagePidsPath(root), JSON.stringify(pids)); }
+  catch { /* best-effort: worst case a future manager instance finds a stale pid to skip */ }
+}
+
+function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: number | undefined, alive: boolean) => void) {
   let child: ChildProcessWithoutNullStreams | undefined;
   // The pid of a helper we have told to die but have not yet confirmed exited. `failAll()` drops `child`
   // to `undefined` as soon as a kill is issued, not when the OS confirms the process is actually gone
@@ -1951,6 +1993,7 @@ function createPersistentWindowsStageHost(executable: string) {
     }
     const spawned = spawn(executable, ["--desktop-stage-server"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     child = spawned;
+    trackPid?.(spawned.pid, true);
     spawned.stdout.on("data", (chunk: Buffer | string) => {
       buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
       parseFrames();
@@ -1960,6 +2003,7 @@ function createPersistentWindowsStageHost(executable: string) {
     });
     spawned.once("close", () => {
       if (terminatingPid === spawned.pid) terminatingPid = undefined;
+      trackPid?.(spawned.pid, false);
     });
     spawned.once("error", (error) => failAll(error,
       (request) => notDispatchedError(request, `Native Windows desktop-stage operation “${request.operation}” was not dispatched because the helper could not be started.`),

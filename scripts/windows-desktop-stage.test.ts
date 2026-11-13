@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { createWindowsDesktopStageManager as createManager, formatWindowsStageRoomKeys } from "../src/lib/native/windows-desktop-stage";
+import { spawn } from "node:child_process";
+import { createWindowsDesktopStageManager as createManager, formatWindowsStageRoomKeys, orphanStagePidsPath, reapOrphanStageChildren, recordStageChildPids } from "../src/lib/native/windows-desktop-stage";
 import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "../src/lib/native/desktop-input-errors";
 
 const roomId = "3ecb4a09-87d4-4f8b-9fd1-48bc9d8c14ae";
@@ -373,6 +374,31 @@ test("owned-window discovery keeps a valid app candidate when sibling HWND recor
   await manager.create("launch-test");
   assert.deepEqual(await manager.listOwnedWindows("launch-test", 4321), [expected],
     "non-actionable siblings must not block exact selection of the verified app window");
+}));
+
+test("a desktop-stage child orphaned by a forcibly-killed broker is reaped on the next manager startup", async () => withRoot(async (root) => {
+  // A real long-lived process stands in for an orphaned --desktop-stage-server child:
+  // a forced kill (Stop-Process -Force / TerminateProcess) is what leaves one running in production,
+  // and this is the only way to prove the reap actually terminates a live process rather than just
+  // clearing the record of one.
+  const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  await new Promise((resolve) => orphan.once("spawn", resolve));
+  try {
+    recordStageChildPids(root, [orphan.pid!]);
+    assert.doesNotThrow(() => process.kill(orphan.pid!, 0), "the stand-in orphan must be alive before reaping");
+    reapOrphanStageChildren(root);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.throws(() => process.kill(orphan.pid!, 0), "reaping on the next manager startup must kill the recorded orphan");
+    assert.equal(readFileSync(orphanStagePidsPath(root), "utf8"), "[]", "the pid record is cleared once its orphans are reaped");
+  } finally {
+    try { orphan.kill("SIGKILL"); } catch { /* already reaped */ }
+  }
+}));
+
+test("reaping tolerates a missing or malformed pid record", async () => withRoot(async (root) => {
+  assert.doesNotThrow(() => reapOrphanStageChildren(root), "no pid file yet (first-ever manager startup) must not throw");
+  writeFileSync(orphanStagePidsPath(root), "not json");
+  assert.doesNotThrow(() => reapOrphanStageChildren(root), "a corrupt pid record must not block manager startup");
 }));
 
 function withRoot(run: (root: string) => Promise<void> | void): Promise<void> {
