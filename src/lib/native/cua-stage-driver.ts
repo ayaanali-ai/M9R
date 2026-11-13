@@ -3395,8 +3395,11 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       throw new DesktopInputNotDispatchedError(`Text must contain 1–${MAX_TEXT_ACTION_LENGTH} characters and no control characters.`);
     }
     const delayMs = normalizeTypeDelayMs(options.delayMs);
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow, elementAtPoint, elementByToken }) => {
-      const before = await captureFrame();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow, elementAtPoint, elementByToken }) => {
+      // Same reasoning as click()/drag()/scroll(): this step only ever uses
+      // geometry (field/point mapping, screen reprojection), never pixels.
+      const rect = await timed("target-resolution", () => manager.windowRect(pid, windowId.toString()), { detail: "source=window-rect" });
+      const before: CuaStageWindowFrame = { dataUrl: "", width: rect.width, height: rect.height, windowBounds: rect };
       // "replace" mode never actually replaced anything -- it discarded the
       // remembered field and fell through to the generic append path
       // (`type_text`), even though the schema requires an exact point for it and
