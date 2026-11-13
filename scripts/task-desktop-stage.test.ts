@@ -31,7 +31,7 @@ test("owner-preview launch queues coalesce same-app joins without blocking diffe
 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
   readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>, fenced = false,
-  managerHooks?: { onCloseInputStream?: (streamId: string) => void }) {
+  managerHooks?: { onCloseInputStream?: (streamId: string) => void }, cursorMaxLifetimeMsForTest?: number) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   setOwnerWorkMode(root, "agents-free"); // legacy-path regression fixture; safe-default coverage is separate
   const store = createLocalStore(root);
@@ -93,7 +93,8 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   }
   const service = createTaskDesktopStageService({ store, ...(mutationFence ? { mutationFence } : {}), ...(manager ? { manager } : {}),
     readPolicy: readPolicyOverride ?? (() => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) })), driver,
-    ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage });
+    ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}),
+    ...(cursorMaxLifetimeMsForTest !== undefined ? { cursorMaxLifetimeMsForTest } : {}), stage });
   return { root, store, identity, task, service, driver, nativeOps, presentedWindows,
     cursorEvents, sayEvents,
     setForegroundWindow: (pid: number, windowId: string) => { foregroundWindow = { pid, windowId }; },
@@ -185,6 +186,38 @@ test("sayAgentCursor resolves sender and recipient by handle alone when given no
     const ok = await f.service.sayAgentCursor("codex", "claude", "Pick a number");
     assert.equal(ok, true);
     assert.deepEqual(f.sayEvents, [{ from: "codex", to: "claude", text: "Pick a number" }]);
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
+test("a cursor is force-reaped once it outlives the safety-net bound even if its task never reaches a terminal state", async () => {
+  // A task stuck forever in a non-terminal lifecycle state (e.g. "acknowledged" with no further
+  // provider activity) never makes taskActive() go false, so the ordinary reap path above never fires.
+  // The safety net must still close the cursor once it has clearly outlived any legitimate task.
+  const f = fixture(true, undefined, undefined, false, undefined, 300);
+  const waitPastBound = () => new Promise((resolve) => setTimeout(resolve, 600));
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 12, y: 15 }, "owner-preview");
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+    // The task is left deliberately unfinished: no markDelivered/recordTaskResult, so taskActive() stays true.
+    await waitPastBound();
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"],
+      "the stuck task's cursor is reaped by age alone, independent of its lifecycle state");
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
+test("re-priming the same still-running task does not reset the safety-net age, but a genuinely new task does", async () => {
+  const f = fixture(true, undefined, undefined, false, undefined, 300);
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 12, y: 15 }, "owner-preview");
+    await wait(200);
+    // Re-priming the same task (e.g. a second action in the same turn) must not push its age back out.
+    await f.service.primeCursor(f.identity.token, f.task.id);
+    await wait(400);
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"],
+      "re-priming the same task does not reset the age the safety net measures against");
   } finally { await f.service.close(); f.cleanup(); }
 });
 

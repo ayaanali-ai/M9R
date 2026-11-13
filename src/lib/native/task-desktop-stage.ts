@@ -268,6 +268,8 @@ export function createTaskDesktopStageService(input: {
    * verified HWND must contend on one lease. Absent keeps the current behavior.
    */
   mutationFence?: MultiplayerDispatchFence;
+  /** Test seam: overrides the stuck-task cursor safety net's bound (production default is 30 minutes). */
+  cursorMaxLifetimeMsForTest?: number;
 }) {
   const root = input.store.root;
   const ownerWorkPolicy = createOwnerWorkPolicy(root, () => input.approvals?.(), { isTaskActive: (taskId) => {
@@ -523,7 +525,7 @@ export function createTaskDesktopStageService(input: {
   };
   const ownedApps = new Map<string, OwnedStageApp>();
   const observedRegionRevisions = new Map<string, { surfaceId: string; surfaceRevision: number; regions: Map<string, number> }>();
-  const activeAgentCursors = new Map<string, { identity: CuaAgentCursorIdentity; taskId: string }>();
+  const activeAgentCursors = new Map<string, { identity: CuaAgentCursorIdentity; taskId: string; primedAt: number }>();
   const cursorPresentationPending = new Set<string>();
   const cursorPresentationTask = new Map<string, string>();
   // A single failed identity/policy lookup is far more likely to be a transient
@@ -531,6 +533,11 @@ export function createTaskDesktopStageService(input: {
   // tear the cursor down after several consecutive failed ticks.
   const cursorAuthFailures = new Map<string, number>();
   const CURSOR_REVOKE_AFTER_FAILURES = 3;
+  // Safety net, independent of task state: a task that never reaches a terminal lifecycle (stuck at
+  // "acknowledged" forever, say) would otherwise keep its cursor alive indefinitely, since the normal
+  // reap path below only fires once taskActive() goes false. This bounds that worst case regardless of
+  // cause. Generous on purpose -- it must never cut off a genuinely long-running, still-progressing task.
+  const CURSOR_MAX_LIFETIME_MS = input.cursorMaxLifetimeMsForTest ?? 30 * 60 * 1000;
   let cursorReaperQueued = false;
 
   function recoverPersistedApp(name: string, taskId: string): OwnedStageApp | undefined {
@@ -609,7 +616,9 @@ export function createTaskDesktopStageService(input: {
 
   async function primeResolvedCursor(target: CursorTarget): Promise<AgentCursorPrimeResult> {
     const key = cursorIdentityKey(target.identity);
-    activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId });
+    const priorCursor = activeAgentCursors.get(key);
+    const primedAt = priorCursor && priorCursor.taskId === target.taskId ? priorCursor.primedAt : Date.now();
+    activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId, primedAt });
     if (cursorPresentationTask.get(key) === target.taskId) return { shown: true, agent: target.identity.handle };
     if (cursorPresentationPending.has(key)) return { shown: false, reason: "The local cursor surface is already starting." };
     const showAgentCursor = (driver as ReturnType<typeof createCuaStageDriver> & {
@@ -719,7 +728,12 @@ export function createTaskDesktopStageService(input: {
     if (task.receipt?.state === "paused") {
       throw new StageAuthorizationError("This task is paused; no desktop work is allowed for that turn.");
     }
-    activeAgentCursors.set(cursorIdentityKey(identity), { identity: { handle, sessionId: identity.sessionId }, taskId });
+    {
+      const authKey = cursorIdentityKey(identity);
+      const priorCursor = activeAgentCursors.get(authKey);
+      const primedAt = priorCursor && priorCursor.taskId === taskId ? priorCursor.primedAt : Date.now();
+      activeAgentCursors.set(authKey, { identity: { handle, sessionId: identity.sessionId }, taskId, primedAt });
+    }
     // Session-scoped reuse bounds desktop creation; task text never becomes a desktop name.
     const name = cursorStageName(identity, mode);
     return { identity, task, name, mode };
@@ -1750,7 +1764,11 @@ export function createTaskDesktopStageService(input: {
     cursorReaperQueued = true;
     const reconcile = async () => {
       for (const [key, active] of activeAgentCursors) {
-        if (!taskActive(active.taskId)) {
+        // A task stuck forever in a non-terminal lifecycle state (never completed, never failed, never
+        // canceled) would otherwise hold its cursor indefinitely -- taskActive() alone never goes false
+        // for it. Force the same cleanup once the cursor has clearly outlived any legitimate task.
+        const expired = Date.now() - active.primedAt >= CURSOR_MAX_LIFETIME_MS;
+        if (!taskActive(active.taskId) || expired) {
           ownerWorkPolicy.revokeTask({ agent: active.identity.handle, provider: active.identity.handle,
             sessionId: active.identity.sessionId, taskId: active.taskId });
           try {
