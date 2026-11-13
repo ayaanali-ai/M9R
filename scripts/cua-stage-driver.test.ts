@@ -1461,6 +1461,29 @@ test("shows a stable M9R label and color for each independent agent cursor", asy
   for (const identity of identities) await driver.closeAgentCursor(identity);
 }));
 
+test("concurrently active agent cursors never receive visually similar colors", async () => withRoot(async (root) => {
+  // A hash-derived hue previously let two active agents land on near-identical colors (both
+  // orangeish, say) by chance; colors must now come from a fixed, well-separated palette with
+  // no two concurrently active identities assigned the same slot.
+  await registerStage(root);
+  const points: Array<{ id: string; label: string; color: readonly [number, number, number]; x: number; y: number }> = [];
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { points.push(point); return true; }),
+    skipNativeFixturePreload: true,
+    loadSdk: async () => { throw new Error("CUA must not be loaded for cursor presentation"); },
+  });
+  const identities = [
+    { handle: "codex", sessionId: "session-a" },
+    { handle: "claude-code", sessionId: "session-b" },
+    { handle: "opencode", sessionId: "session-c" },
+  ] as const;
+  for (const identity of identities) await driver.showAgentCursor("stage", identity);
+
+  const colors = points.map(({ color }) => color.join(","));
+  assert.equal(new Set(colors).size, colors.length, "every concurrently active identity gets its own color slot");
+  for (const identity of identities) await driver.closeAgentCursor(identity);
+}));
+
 test("keeps an M9R cursor visible across repeated task preparation without an idle session expiry", async () => withRoot(async (root) => {
   await registerStage(root);
   let at = new Date("2026-11-05T12:00:00.000Z");

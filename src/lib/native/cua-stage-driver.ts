@@ -630,21 +630,15 @@ function agentCursorDetails(identity: CuaAgentCursorIdentity): AgentCursorSessio
   };
 }
 
-function cursorColorForIdentity(identityKey: string): readonly [number, number, number] {
-  const digest = createHash("sha256").update(identityKey).digest();
-  const hue = ((digest[0]! << 8) | digest[1]!) % 360;
-  const saturation = 0.78;
-  const lightness = 0.58;
-  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation;
-  const x = chroma * (1 - Math.abs((hue / 60) % 2 - 1));
-  const m = lightness - chroma / 2;
-  const [red, green, blue] = hue < 60 ? [chroma, x, 0]
-    : hue < 120 ? [x, chroma, 0]
-    : hue < 180 ? [0, chroma, x]
-    : hue < 240 ? [0, x, chroma]
-    : hue < 300 ? [x, 0, chroma] : [chroma, 0, x];
-  return [red, green, blue].map((channel) => Math.round((channel + m) * 255)) as [number, number, number];
-}
+// Hand-picked, maximally-separated hues (one per the 16-identity cap below) so two
+// concurrently active agent cursors are never visually indistinguishable the way a
+// hash-derived hue occasionally produced (two near-identical oranges, for example).
+const CURSOR_COLOR_PALETTE: readonly (readonly [number, number, number])[] = [
+  [230, 60, 60], [60, 170, 230], [60, 200, 110], [230, 170, 40],
+  [170, 80, 230], [230, 100, 170], [40, 200, 200], [230, 130, 40],
+  [120, 200, 60], [100, 100, 230], [230, 60, 140], [60, 230, 170],
+  [200, 200, 60], [150, 60, 60], [60, 150, 150], [150, 150, 230],
+];
 
 function parseWindowId(value: string): bigint {
   try {
@@ -1053,6 +1047,17 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // marker. Warm it during broker startup so the first task avoids cold spawn.
   void cursorOverlayHost?.warm?.().catch(() => undefined);
   const agentSessions = new Map<string, AgentCursorSession>();
+  const cursorColorAssignments = new Map<string, readonly [number, number, number]>();
+  function assignCursorColor(identityKey: string): readonly [number, number, number] {
+    const existing = cursorColorAssignments.get(identityKey);
+    if (existing) return existing;
+    const used = new Set(
+      [...agentSessions.keys()].map((key) => cursorColorAssignments.get(key)).filter(Boolean),
+    );
+    const color = CURSOR_COLOR_PALETTE.find((candidate) => !used.has(candidate)) ?? CURSOR_COLOR_PALETTE[0]!;
+    cursorColorAssignments.set(identityKey, color);
+    return color;
+  }
   const cursorSessionNames = new Map<string, string>();
   const cursorOverlayPresentations = new Map<string, { id: string; label: string; color: readonly [number, number, number] }>();
   const cursorStartSlots = new Map<string, number>();
@@ -1177,7 +1182,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
         to: recipient?.session ?? publicCursorLabel(to.handle),
         // When the recipient has no active cursor session, use a neutral
         // accent instead of implying a color identity that is not on screen.
-        toColor: recipient ? cursorColorForIdentity(to.key) : [200, 200, 200],
+        toColor: recipient ? assignCursorColor(to.key) : [200, 200, 200],
         text,
       });
     } catch {
@@ -1255,7 +1260,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     cursorOverlayPresentations.set(label, {
       id: `agent-${createHash("sha256").update(details.key).digest("hex")}`,
       label,
-      color: cursorColorForIdentity(details.key),
+      color: assignCursorColor(details.key),
     });
     // Cursor identity is M9R-owned presentation state. It deliberately does
     // not start a CUA driver session; native input dispatch has its own path.
