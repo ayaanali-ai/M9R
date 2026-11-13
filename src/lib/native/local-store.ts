@@ -2479,11 +2479,22 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       if (!Number.isFinite(maxAgeMs) || maxAgeMs < 1) throw new Error("Invalid stale-task age.");
       return update((s) => {
         const at = now();
+        const atIso = at.toISOString();
         let changed = 0;
         for (const task of s.tasks) {
           if (task.retiredAt || task.resultSummary || task.receipt?.state === "completed"
             || isFreshInboxTask(task.createdAt, at.getTime(), maxAgeMs)) continue;
-          task.retiredAt = at.toISOString();
+          // A task can sit on a non-terminal receipt (accepted/dispatched/provider_received/started)
+          // forever with no agent ever calling m9r_result for it -- confirmed live on 2026-11-13, where
+          // a delegated task landed on a session already mid-turn on another task and was never
+          // individually reported. Retirement already drops it from live delivery/discovery; leaving its
+          // receipt looking like an in-flight turn is misleading once it can no longer ever be resolved.
+          // "uncertain" is the same existing state used for a self-reported incomplete outcome.
+          if (task.receipt && ["accepted", "dispatched", "provider_received", "started"].includes(task.receipt.state)) {
+            recordTaskReceipt(task, { state: "uncertain", at: atIso, source: "system",
+              error: "This task aged out of live delivery before any result was ever recorded for it." });
+          }
+          task.retiredAt = atIso;
           task.dismissedAt ??= task.retiredAt;
           pushEvent(s, { kind: "task.retired", taskId: task.id, handle: task.to, text: task.id + " was retired from live delivery; its history is preserved" });
           changed += 1;

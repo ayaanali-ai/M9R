@@ -28,7 +28,12 @@ test("stale queued, sending, and deferred work is permanently retired with histo
       assert.ok(task.retiredAt);
       assert.equal(stateLabel(task), "retired from live delivery; history retained");
       assert.deepEqual(task.delivery, previous.delivery);
-      assert.deepEqual(task.receipt, previous.receipt);
+      // A task still on a non-terminal receipt (accepted/dispatched/provider_received/started) when it
+      // ages out can never be resolved by any later result, so retirement now closes its receipt out as
+      // "uncertain" instead of leaving it looking like a live, in-flight turn forever.
+      assert.notEqual(previous.receipt?.state, "uncertain", "the fixture's starting state must be non-terminal for this assertion to mean anything");
+      assert.equal(task.receipt?.state, "uncertain");
+      assert.equal(task.receipt?.history.at(-1)?.source, "system");
       assert.equal(task.goal, previous.goal);
       assert.equal(canQueue(task), false);
       assert.equal(restarted.claimCodexDelivery(task.id), undefined);
@@ -38,6 +43,24 @@ test("stale queued, sending, and deferred work is permanently retired with histo
     }
     assert.equal(renderInboxInjection(restarted.snapshot().tasks, 0, { now: clock.getTime(), maxAgeMs: Infinity }).includedIds.length, 0);
     assert.equal(restarted.snapshot().tasks.length, 3);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a task already paused, retryable, failed, or canceled when it ages out keeps its own receipt state", () => {
+  const fixture = join(process.cwd(), ".workcache", "native-test-fixtures");
+  mkdirSync(fixture, { recursive: true });
+  const root = mkdtempSync(join(fixture, "m9r-retire-terminal-"));
+  let clock = new Date("2026-10-01T12:00:00Z");
+  try {
+    const store = createLocalStore(root, { now: () => clock });
+    const { task: pausedTask } = store.addTask({ from: "you", to: "codex", goal: "paused work", origin: "human_typed", idempotencyKey: "retire-paused" });
+    store.pauseTask(pausedTask.id);
+    const { task: failedTask } = store.addTask({ from: "you", to: "codex", goal: "failed work", origin: "human_typed", idempotencyKey: "retire-failed" });
+    store.recordTaskFailure(failedTask.id, "provider crashed");
+    clock = new Date(clock.getTime() + 120_000);
+    assert.equal(store.retireStaleTasks(60_000), 2);
+    assert.equal(store.getTask(pausedTask.id)?.receipt?.state, "paused");
+    assert.equal(store.getTask(failedTask.id)?.receipt?.state, "failed");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
