@@ -2032,9 +2032,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // full accessibility-tree walk is unnecessary here: UIA's native
       // ElementFromPoint is the exact target-resolution mechanism, and avoids
       // sending thousands of unrelated controls just to inspect one point.
-      const image = await timed("window-capture", () => manager.captureWindow(pid, windowId.toString()),
-        { detail: "scope=target-resolution" });
-      const bounds = boundsAtWindowCapture(image);
+      // Only bounds/width/height (never pixels) are used below, so read
+      // geometry alone rather than paying for a PrintWindow/BitBlt capture
+      // whose image is discarded; windowRect and window-capture derive their
+      // bounds from the same GetWindowRect call, so this is the same
+      // coordinate space.
+      const windowGeometry = await timed("target-resolution", () => manager.windowRect(pid, windowId.toString()), { detail: "scope=target-resolution" });
+      const image = { width: windowGeometry.width, height: windowGeometry.height };
+      const bounds = windowGeometry;
       if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0 || x >= image.width || y >= image.height) {
         throw new DesktopInputNotDispatchedError("Target coordinates must fall inside the current stage window snapshot.");
       }

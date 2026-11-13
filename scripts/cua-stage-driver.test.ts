@@ -2038,6 +2038,8 @@ test("describeTarget reports the exact native point-control label for the money 
   assert.equal(await driver.describeTarget("stage", 199, 99), undefined, "a point with no named native control describes nothing");
   await assert.rejects(() => driver.describeTarget("stage", 200, 24), /inside the current stage window snapshot/);
   assert.equal(calls.some((call) => ["click", "typeText", "scroll", "drag"].includes(call.method)), false, "describing never acts");
+  assert.equal(nativeFixture(root).calls.some((call) => call.op === "captureWindow"), false,
+    "the money-gate coordinate conversion only needs geometry, never a pixel capture");
 }));
 
 test("native UI Automation click dispatch is headless and reports verification separately", async () => withRoot(async root => {
