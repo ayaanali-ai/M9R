@@ -857,14 +857,20 @@ pub fn send_click_at_screen_point(
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
     };
     for click in 0..count {
-        if !send_mouse(x, y, down) {
+        // SendInput can return 0 under momentary system load without the click itself being
+        // invalid -- the same situation send_drag already retries via send_mouse_retrying (see
+        // its doc comment). A plain click used to call send_mouse directly with no retry, so the
+        // exact same transient hiccup that a drag silently absorbs turned a click into a hard
+        // "uncertain" failure. Confirmed live on 2026-11-13: Paint's canvas click-dispatch was
+        // consistently flaky while its toolbar buttons were not, and a zero-length drag in place
+        // of a click reliably worked around it -- exactly what this retry difference predicts.
+        if !send_mouse_retrying(x, y, down) {
             return Err(InputDispatchError::uncertain(
                 "Windows declined the trusted mouse click after pointer movement was sent",
             ));
         }
         unsafe { Sleep(60) };
-        if !send_mouse(x, y, up) {
-            let _ = send_mouse(x, y, up);
+        if !send_mouse_retrying(x, y, up) {
             return Err(InputDispatchError::uncertain(
                 "Windows declined the trusted mouse release after click input was sent",
             ));
