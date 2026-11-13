@@ -673,7 +673,9 @@ pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatc
     }
     let mut input_sent = false;
     let normalized = normalize_text_line_endings(text);
-    for unit in normalized.encode_utf16() {
+    let units: Vec<u16> = normalized.encode_utf16().collect();
+    let last = units.len().saturating_sub(1);
+    for (index, unit) in units.into_iter().enumerate() {
         let unit = background_text_char(unit);
         if unsafe { PostMessageW(window, WM_CHAR, unit as usize, 0) } == 0 {
             return Err(dispatch_error(
@@ -682,6 +684,11 @@ pub fn post_text_to_window(window: usize, text: &str) -> Result<(), InputDispatc
             ));
         }
         input_sent = true;
+        // An unthrottled burst of WM_CHAR posts drops/corrupts characters on
+        // controls that process them no faster than they can repaint (the same
+        // failure `send_unicode_text` was fixed for in 7179dc8b -- this sibling
+        // path never got the same throttle). Pace posts the same way.
+        if index != last { unsafe { Sleep(8) }; }
     }
     Ok(())
 }
