@@ -2699,7 +2699,13 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         try { control = await timed("target-resolution", () => manager.pointControl(targetScreenPoint!.x, targetScreenPoint!.y),
           { detail: "source=uia-element-at-point" }); }
         catch { /* an inspection miss sends nothing; the owner-visible fallback remains available */ }
-        if (control?.pid === pid && control.windowPid === pid && control.windowId === windowId.toString()) {
+        // supportsInvoke === false (a raw drawing surface like Paint's canvas:
+        // plain pixels, no accessible children) means UIA itself already
+        // knows this control has no semantic action. Attempting the
+        // invocation anyway risks an ambiguous native outcome that can't
+        // safely fall through to the pointer-input route below; skip straight
+        // to it instead, the same way the shellControl branch above does.
+        if (control?.pid === pid && control.windowPid === pid && control.windowId === windowId.toString() && control.supportsInvoke !== false) {
           try {
             const invoked = await timedInputDispatch("uia-point", () => manager.pointControl(targetScreenPoint!.x, targetScreenPoint!.y, control),
               (result) => result.invoked === true);

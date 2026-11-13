@@ -2078,6 +2078,23 @@ test("owner-preview click uses the headless exact-window route when no semantic 
   await driver.shutdown();
 }));
 
+test("a click on a raw canvas control (supportsInvoke false) skips UIA invocation and uses native point-click", async () => withRoot(async root => {
+  await registerStage(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const canvasControl = { label: "Canvas", pid: 4321, windowId, windowPid: 4321, rect: { x: 0, y: 0, width: 200, height: 100 }, invoked: false, supportsInvoke: false };
+  setNativeFixture(root, { responses: { inspectPointControl: { ok: true, control: canvasControl } } });
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls }) as never });
+
+  const result = await driver.click("stage", 42, 24);
+  assert.equal(result.outcome.status, "unverified");
+  assert.equal(nativeFixture(root).calls.filter(call => call.op === "invokePointControl").length, 0,
+    "a control UIA itself marked as having no semantic action is never invoked");
+  assert.equal(nativeFixture(root).calls.filter(call => call.op === "postClickToWindow").length, 1,
+    "the click falls straight through to native pointer input");
+  await driver.shutdown();
+}));
+
 test("an exact UIA ref with no advertised activation pattern still uses native point-click fallback", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
