@@ -164,6 +164,52 @@ test("an A2A provider error is durably failed with build evidence, not left as a
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a task driven entirely through the structured computer-use tools is never flagged as unverified", async () => {
+  // m9r_computer_action/m9r_computer_program dispatch real desktop input
+  // exactly as much as the direct m9r_stage_action/m9r_stage_app tools --
+  // they are the public structured path, not a read-only alternative. A
+  // task whose agent used only this family previously still tripped the
+  // "no desktop action was observed" warning on every completed result,
+  // regardless of how much real input it actually sent.
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-structured-dispatch-"));
+  const store = createLocalStore(root);
+  const events: unknown[] = [];
+  const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, onEvent: (event) => events.push(event), createConnection: (profile) => {
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* () {
+          yield { kind: "accepted" };
+          yield { kind: "tool", name: "m9r_computer_action" };
+          yield { kind: "tool", name: "m9r_computer_program" };
+          yield { kind: "result", text: "Drew the shapes and saved the file.", isError: false };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    } });
+  try {
+    assert.equal(owner.deliver("codex", "Draw and save a snowman.").ok, true);
+    for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "completed"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    const resultEvent = events.find((event): event is { kind: string; text?: string } =>
+      typeof event === "object" && event !== null && (event as { kind?: string }).kind === "result") as { text?: string } | undefined;
+    assert.ok(resultEvent, JSON.stringify(events));
+    assert.doesNotMatch(resultEvent!.text ?? "", /no desktop action was observed/,
+      "the structured computer-use tools are real desktop dispatch, not an unverified model answer");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("managed provider bridge returns A2A results to the pinned sender session", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-a2a-roundtrip-"));
   const store = createLocalStore(root);

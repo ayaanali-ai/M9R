@@ -718,7 +718,14 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           }
           lastToolEventMs = Date.now();
           lastToolEventTick = performance.now();
-          if (event.name === "m9r_stage_action" || event.name === "m9r_stage_app") realDispatchObserved = true;
+          // m9r_computer_action/m9r_computer_program are the public structured
+          // path and dispatch real desktop input exactly as much as the direct
+          // m9r_stage_action/m9r_stage_app tools do. Missing them here meant
+          // any task whose agent used the structured path exclusively (a
+          // common, legitimate choice) always tripped the "no desktop action
+          // was observed" warning below, regardless of how much real input it
+          // actually sent -- a false positive on every such run, not a signal.
+          if (["m9r_stage_action", "m9r_stage_app", "m9r_computer_action", "m9r_computer_program"].includes(event.name)) realDispatchObserved = true;
           emit({ kind: "tool", handle: profile.handle, provider: profile.provider, name: event.name, runId });
         }
         else if (event.kind === "result") {
