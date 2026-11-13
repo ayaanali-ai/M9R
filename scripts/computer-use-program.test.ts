@@ -27,6 +27,25 @@ test("computer-use programs enforce a bounded call budget", async () => {
   );
 });
 
+test("an Error thrown by the sandboxed script is normalized to a host-realm Error", async () => {
+  // The script runs in a separate vm context, so an Error it constructs with
+  // its own `throw new Error(...)` is an instance of THAT context's Error,
+  // not this (host) realm's Error. A caller doing `error instanceof Error`
+  // (as computer-use-mcp.ts does to build its tool response) would see
+  // false for the raw cross-realm error and fall back to a generic message,
+  // discarding the real one -- runComputerUseProgram must re-throw a host
+  // Error so that check succeeds.
+  try {
+    await runComputerUseProgram({ code: `throw new Error("canvas click rejected: no safe semantic action");` }, {
+      async observe() { return {}; }, async act() { return {}; }, async sleep() {},
+    });
+    assert.fail("expected the program to reject");
+  } catch (error) {
+    assert.ok(error instanceof Error, "the rejection must be an instance of THIS realm's Error");
+    assert.equal(error.message, "canvas click rejected: no safe semantic action");
+  }
+});
+
 test("computer-use programs do not receive Node ambient capabilities", async () => {
   const result = await runComputerUseProgram({ code: `return { process: typeof process, require: typeof require, fetch: typeof fetch };` }, {
     async observe() { return {}; }, async act() { return {}; }, async sleep() {},

@@ -93,6 +93,15 @@ export async function runComputerUseProgram(input: ComputerUseProgramInput, api:
   let value: unknown;
   try {
     value = await Promise.race([promise, timeoutPromise]);
+  } catch (error) {
+    // A rejection from the sandboxed script carries an Error constructed in
+    // the vm context's own realm, so `error instanceof Error` is false for
+    // it in this (host) realm -- duck-type the message instead of losing it
+    // to a generic fallback.
+    const message = error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string"
+      ? (error as { message: string }).message
+      : "The program threw a non-Error value.";
+    throw new Error(message);
   } finally {
     if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
