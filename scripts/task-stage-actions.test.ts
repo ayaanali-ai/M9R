@@ -37,6 +37,14 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
   assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
 });
 
+test("drag action parsing treats durationMs as optional, matching its type", () => {
+  assert.deepEqual(parseTaskStageAction({ kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80 }),
+    { kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80 });
+  assert.deepEqual(parseTaskStageAction({ kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80, durationMs: 250 }),
+    { kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80, durationMs: 250 });
+  assert.throws(() => parseTaskStageAction({ kind: "drag", fromX: 10, fromY: 20, toX: 100 }), /Invalid stage action fields/);
+});
+
 test("delivery profiles distinguish semantic background routes from shared and foreground input", () => {
   assert.deepEqual(taskStageActionDeliveryProfile({ kind: "capture" }), { capabilities: ["observe.accessibility"], backgroundSafe: true });
   assert.deepEqual(taskStageActionDeliveryProfile({ kind: "click_element", ref: "e1" }),

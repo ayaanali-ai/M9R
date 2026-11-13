@@ -125,6 +125,10 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     : action.kind === "scroll" ? ["direction"]
     // Same reasoning as scroll: x/y are a convenience, not a requirement.
     : action.kind === "scroll_delta" ? ["deltaX", "deltaY", "unit"] : action.kind === "window_frame" ? allowedFields
+      // durationMs is explicitly optional on the drag action type (defaults
+      // downstream to the driver's own pacing) -- it must not be required
+      // here just because it's in the drag action's allowed-fields list.
+      : action.kind === "drag" ? ["fromX", "fromY", "toX", "toY"]
       : action.kind === "clipboard_read" ? ["includeText"] : action.kind === "clipboard_write" ? ["confirmSharedClipboard"] : action.kind === "click_element" ? ["ref"]
         : action.kind === "replace_element" ? ["ref", "text"] : action.kind === "scroll_element" ? ["ref", "direction"]
           : action.kind === "read_value" ? ["ref"] : allowedFields;
