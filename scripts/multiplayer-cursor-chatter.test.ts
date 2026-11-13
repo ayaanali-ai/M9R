@@ -34,7 +34,7 @@ function message(overrides: Partial<A2AMessage> = {}): A2AMessage {
 test("accepted roster A2A summaries map to sender and recipient cursor handles", () => {
   let listener: ((accepted: A2AMessage) => void) | undefined;
   let unsubscribed = false;
-  const rendered: Array<[string, string, string, string]> = [];
+  const rendered: Array<[string, string, string, string | undefined]> = [];
   const stop = subscribeA2ACursorChatter({
     multiplayer: { subscribe: (next) => { listener = next; return () => { unsubscribed = true; }; } },
     roster,
@@ -47,7 +47,10 @@ test("accepted roster A2A summaries map to sender and recipient cursor handles",
   listener!(message({ summary: "   " }));
   listener!(message({ taskId: undefined }));
 
-  assert.deepEqual(rendered, [["codex", "claude", "Check the first paragraph", "task-1"]]);
+  // message.taskId ("task-1" here) is only presence-checked to gate task-scoped chatter; it is never
+  // forwarded to sayAgentCursor, since it is the sender's own free-form A2A room label, not a real M9R
+  // task id -- so the mock sees no fourth argument (undefined), not the message's own "task-1".
+  assert.deepEqual(rendered, [["codex", "claude", "Check the first paragraph", undefined]]);
   stop();
   assert.equal(unsubscribed, true, "the broker can release the listener at shutdown");
 });

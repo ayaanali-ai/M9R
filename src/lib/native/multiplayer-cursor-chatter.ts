@@ -30,19 +30,24 @@ export function uniqueActiveCursorIdentity(
 export function subscribeA2ACursorChatter(input: {
   multiplayer: Pick<MultiplayerRuntime, "subscribe">;
   roster: MultiplayerRoster;
-  sayAgentCursor(fromHandle: string, toHandle: string, summary: string, taskId: string): boolean | Promise<boolean>;
+  sayAgentCursor(fromHandle: string, toHandle: string, summary: string, taskId?: string): boolean | Promise<boolean>;
 }): () => void {
   const handleByAgentId = new Map(input.roster.agents.map((agent) => [agent.agentId, agent.handle ?? agent.agentId]));
   return input.multiplayer.subscribe((message: A2AMessage) => {
     const fromHandle = handleByAgentId.get(message.agentId);
     // Cursor bubbles belong to one active task; unscoped chatter must not be
     // accidentally attached to whichever task happens to own a cursor now.
+    // message.taskId itself is only presence-checked here (gating "is this a
+    // task-scoped exchange at all") -- it is the sender's own free-form,
+    // model-chosen A2A room label, never M9R's internal "T<number>" task id,
+    // so it is never passed on for cursor lookup; sayAgentCursor resolves by
+    // handle alone and fails closed on genuine ambiguity.
     if (!fromHandle || !message.taskId || !message.summary.trim()) return;
     const recipients = message.recipient.kind === "agent" ? [message.recipient.agentId] : message.recipient.agentIds;
     for (const recipientId of recipients) {
       const toHandle = handleByAgentId.get(recipientId);
       if (!toHandle) continue;
-      try { void Promise.resolve(input.sayAgentCursor(fromHandle, toHandle, message.summary, message.taskId)).catch(() => undefined); }
+      try { void Promise.resolve(input.sayAgentCursor(fromHandle, toHandle, message.summary)).catch(() => undefined); }
       catch { /* presentation failures never affect A2A message handling */ }
     }
   });

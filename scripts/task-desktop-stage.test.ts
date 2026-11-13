@@ -44,6 +44,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
   const nativeOps: string[] = [];
   const presentedWindows: Array<{ pid: number; windowId: string }> = [];
   const cursorEvents: string[] = [];
+  const sayEvents: Array<{ from: string; to: string; text: string }> = [];
   let visibleWindows: TestVisibleWindow[] = [];
   const previewCapture = { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date(0).toISOString() };
   const driver = {
@@ -56,6 +57,10 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     focusWindow: async () => ({ capture: previewCapture, outcome: { status: "confirmed" as const } }),
     showAgentCursor: async (_stageName: string, cursorIdentity: { handle: string; sessionId: string }) => { cursorEvents.push(`show:${cursorIdentity.sessionId}`); },
     closeAgentCursor: async (cursorIdentity: { handle: string; sessionId: string }) => { cursorEvents.push(`close:${cursorIdentity.sessionId}`); },
+    sayAgentCursor: async (sender: { handle: string }, recipient: { handle: string }, text: string) => {
+      sayEvents.push({ from: sender.handle, to: recipient.handle, text });
+      return true;
+    },
     shutdown: async () => undefined,
   } as unknown as ReturnType<typeof createCuaStageDriver>;
   const mutationFence = fenced ? createMultiplayerDispatchFence({ store }) : undefined;
@@ -90,7 +95,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     readPolicy: readPolicyOverride ?? (() => ({ handles: ["codex"], ...(control ? { controlHandles: ["codex"] } : {}) })), driver,
     ...(resolveStageAppForTest ? { resolveStageAppForTest: (appId: string) => resolveStageAppForTest(root, appId) } : {}), stage });
   return { root, store, identity, task, service, driver, nativeOps, presentedWindows,
-    cursorEvents,
+    cursorEvents, sayEvents,
     setForegroundWindow: (pid: number, windowId: string) => { foregroundWindow = { pid, windowId }; },
     setVisibleWindows: (windows: TestVisibleWindow[]) => { visibleWindows = windows; },
     retiredDesktopOpCount: () => retiredDesktopOpCount, creations: () => retiredDesktopOpCount, desktopActions, cleanup: () => rmSync(root, { recursive: true, force: true }) };
@@ -161,6 +166,26 @@ test("transient cursor policy reads do not close the agent overlay until three c
     await f.service.close();
     f.cleanup();
   }
+});
+
+test("sayAgentCursor resolves sender and recipient by handle alone when given no M9R task id", async () => {
+  // A teammate message's own taskId is the sender's free-form A2A room label, never a real "T<number>"
+  // M9R task id -- subscribeA2ACursorChatter never passes it through for exactly that reason, so this
+  // must resolve correctly on handle alone when both agents have exactly one active cursor each.
+  const f = fixture(false, undefined, () => ({ handles: ["codex", "claude"] }));
+  try {
+    f.store.registerEndpoint({ provider: "codex", sessionId: "session-one" });
+    const claudeIdentity = f.store.issueIdentity("claude", "claude-code", "session-claude");
+    f.store.registerEndpoint({ provider: "claude-code", sessionId: "session-claude" });
+    const claudeTask = f.store.addTask({ from: "you", to: "claude", goal: "Other stage", origin: "human_typed", idempotencyKey: "claude-stage-one", targetSession: "session-claude" }).task;
+    const primedCodex = await f.service.primeCursor(f.identity.token, f.task.id);
+    const primedClaude = await f.service.primeCursor(claudeIdentity.token, claudeTask.id);
+    assert.deepEqual(primedCodex, { shown: true, agent: "codex" }, "codex cursor must prime");
+    assert.deepEqual(primedClaude, { shown: true, agent: "claude" }, "claude cursor must prime");
+    const ok = await f.service.sayAgentCursor("codex", "claude", "Pick a number");
+    assert.equal(ok, true);
+    assert.deepEqual(f.sayEvents, [{ from: "codex", to: "claude", text: "Pick a number" }]);
+  } finally { await f.service.close(); f.cleanup(); }
 });
 
 test("task completion removes the persistent cursor but preserves the agent-session native input stream", async () => {

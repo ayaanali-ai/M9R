@@ -643,7 +643,11 @@ export function createTaskDesktopStageService(input: {
    * Render only a real A2A summary from one uniquely active roster identity.
    * Bubble presentation is best-effort and never changes message delivery.
    */
-  async function sayAgentCursor(fromHandle: string, toHandle: string, text: string, taskId: string): Promise<boolean> {
+  // taskId is M9R's own internal "T<number>" task id, used only to disambiguate when a handle has more
+  // than one concurrently active cursor; it is NOT the free-form, model-chosen A2A room label a teammate
+  // message's own taskId field carries (those never match a real task id, which silently failed every
+  // chatter-bubble lookup before this was optional). Omit it when the caller only knows that room label.
+  async function sayAgentCursor(fromHandle: string, toHandle: string, text: string, taskId?: string): Promise<boolean> {
     const from = uniqueActiveCursorIdentity(activeAgentCursors.values(), fromHandle, taskActive, taskId);
     if (!from) return false;
     const to = uniqueActiveCursorIdentity(activeAgentCursors.values(), toHandle, taskActive, taskId);
