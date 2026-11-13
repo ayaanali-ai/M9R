@@ -46,6 +46,29 @@ test("an Error thrown by the sandboxed script is normalized to a host-realm Erro
   }
 });
 
+test("a timed-out program's still-running continuation can never reach a later m9r call", async () => {
+  // vm's own `timeout` option only bounds synchronous execution; an awaited
+  // m9r.sleep() keeps the script's async IIFE alive well past that, and
+  // Promise.race never cancels the losing side. Without an abort flag, the
+  // script would still be free to call m9r.act() (real desktop input) after
+  // its caller already gave up and returned a timeout.
+  const order: string[] = [];
+  await assert.rejects(
+    runComputerUseProgram({ timeoutMs: 20, code: `
+      await m9r.sleep(60);
+      await m9r.act({ afterTimeout: true });
+    ` }, {
+      async observe() { return {}; },
+      async act(input) { order.push(`act:${String((input as Record<string, unknown>).afterTimeout)}`); return {}; },
+      async sleep() {},
+    }),
+    /timed out/,
+  );
+  // Let the script's sleep(60) actually elapse and attempt its post-timeout act().
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(order, [], "no m9r call started after the host returned a timeout may ever reach the real desktop capability");
+});
+
 test("computer-use programs do not receive Node ambient capabilities", async () => {
   const result = await runComputerUseProgram({ code: `return { process: typeof process, require: typeof require, fetch: typeof fetch };` }, {
     async observe() { return {}; }, async act() { return {}; }, async sleep() {},

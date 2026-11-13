@@ -56,8 +56,17 @@ export async function runComputerUseProgram(input: ComputerUseProgramInput, api:
   const timeoutMs = boundedInteger(input.timeoutMs, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const maxCalls = boundedInteger(input.maxCalls, DEFAULT_MAX_CALLS, MAX_MAX_CALLS);
   let calls = 0;
+  let timedOut = false;
   const started = Date.now();
   const count = () => {
+    // Once the host has given up waiting and returned a timeout to its
+    // caller, the script's own async IIFE keeps running underneath (vm's
+    // `timeout` option only bounds synchronous execution, not awaited work;
+    // Promise.race below never cancels the losing promise). Refusing every
+    // further capability call here is what actually stops it from sending
+    // more desktop input or re-resolving stage revisions after its caller
+    // has moved on to recovery.
+    if (timedOut) throw new Error(`Program timed out after ${timeoutMs}ms; no further m9r calls are honored.`);
     calls += 1;
     if (calls > maxCalls) throw new Error(`Program call budget exceeded (${maxCalls}).`);
   };
@@ -90,10 +99,16 @@ export async function runComputerUseProgram(input: ComputerUseProgramInput, api:
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutHandle = setTimeout(() => reject(new Error(`Program timed out after ${timeoutMs}ms.`)), timeoutMs);
   });
+  // The script's own IIFE rejection is handled below (or, on a timeout,
+  // never awaited at all) -- give it an immediate catch so an eventual
+  // rejection from the still-running script never surfaces as an unhandled
+  // promise rejection in this process.
+  promise.catch(() => {});
   let value: unknown;
   try {
     value = await Promise.race([promise, timeoutPromise]);
   } catch (error) {
+    if (error instanceof Error && error.message === `Program timed out after ${timeoutMs}ms.`) timedOut = true;
     // A rejection from the sandboxed script carries an Error constructed in
     // the vm context's own realm, so `error instanceof Error` is false for
     // it in this (host) realm -- duck-type the message instead of losing it
