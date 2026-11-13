@@ -804,10 +804,17 @@ export function createTaskDesktopStageService(input: {
       const active = activeInputs.get(stageName);
       if (active?.taskId === taskId) active.controller.abort(new Error("Explicit desktop stop requested."));
       inputStreams.cancelTask(streamIdentity, taskId, new Error("Explicit desktop stop requested."));
-      try { await driver.closeAgentCursor(streamIdentity); } catch { /* stop remains effective even if marker cleanup fails */ }
+      let cursorClosed = true;
+      try { await driver.closeAgentCursor(streamIdentity); } catch { cursorClosed = false; /* stop remains effective even if marker cleanup fails */ }
       const cursorKey = cursorIdentityKey(streamIdentity);
-      activeAgentCursors.delete(cursorKey);
-      cursorPresentationTask.delete(cursorKey);
+      if (cursorClosed) {
+        activeAgentCursors.delete(cursorKey);
+        cursorPresentationTask.delete(cursorKey);
+      }
+      // Leaving the entry in activeAgentCursors on failure is deliberate: the
+      // cursor reaper below polls every 250ms and will see this task is no
+      // longer active, retrying closeAgentCursor itself instead of this stop
+      // path's single best-effort attempt orphaning the marker for good.
       const endedMs = Date.now();
       recordStageTiming(taskId, { phase: "stop", startedAt: new Date(startedMs).toISOString(), endedAt: new Date(endedMs).toISOString(),
         durationMs: endedMs - startedMs, status: "ok" });

@@ -3919,26 +3919,29 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     const details = agentCursorDetails(cursorIdentity);
     const overlaySession = cursorSessionNames.get(details.key) ?? details.session;
     const presentation = cursorOverlayPresentations.get(overlaySession);
-    cursorOverlayPresentations.delete(overlaySession);
-    // A single dropped/timed-out hide ack previously orphaned the marker on
-    // screen forever: this function always forgot its own bookkeeping
-    // regardless of whether the renderer actually hid it, so nothing ever
-    // retried. Retry a few times -- a slow overlay catching up is the common
-    // case -- before giving up so cleanup still can't block stream revocation.
-    try {
-      if (presentation && cursorOverlayHost) {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          if (await cursorOverlayHost.hide(presentation.id)) break;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250));
-        }
+    // The real retry loop is the caller's: task-desktop-stage.ts's cursor reaper
+    // polls every 250ms for as long as the entry stays in activeAgentCursors,
+    // and its own catch blocks are written to keep an entry around on failure.
+    // This function used to delete the presentation record and swallow every
+    // failure *before* that loop ever saw one, which both lied about success
+    // and destroyed the one thing (the presentation id) a later retry would
+    // need -- so a hide that failed even once orphaned the marker forever. Now:
+    // keep the presentation until hide actually succeeds, and let failure
+    // propagate so the caller's forever-retry loop actually gets to retry.
+    if (presentation && cursorOverlayHost) {
+      let hidden = false;
+      for (let attempt = 0; attempt < 3 && !hidden; attempt++) {
+        hidden = await cursorOverlayHost.hide(presentation.id).catch(() => false);
+        if (!hidden && attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250));
       }
-    } catch { /* cursor cleanup must not block stream revocation */ }
+      if (!hidden) throw new Error("cursor overlay hide ack never arrived");
+    }
+    cursorOverlayPresentations.delete(overlaySession);
     // The input target registry is owned by the logical agent identity, not by
     // the optional cursor process. A target may have been remembered while the
     // cursor overlay was absent; revoking/closing that agent must clear it too.
     agentSessions.delete(details.key);
     cursorSessionNames.delete(details.key);
-    cursorOverlayPresentations.delete(overlaySession);
     cursorStartSlots.delete(details.key);
     cursorPresentationWork.delete(details.key);
     forgetAgentDesktopInputTargets(cursorIdentity);
