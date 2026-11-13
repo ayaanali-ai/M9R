@@ -445,7 +445,7 @@ function testCursorOverlayHost(upsert: (point: { id: string; label: string; colo
   return {
     upsert,
     say,
-    hide: async (id: string) => { hidden.push(id); },
+    hide: async (id: string) => { hidden.push(id); return true; },
     close: async () => { closed.count += 1; },
   };
 }

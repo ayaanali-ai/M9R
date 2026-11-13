@@ -3920,8 +3920,18 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     const overlaySession = cursorSessionNames.get(details.key) ?? details.session;
     const presentation = cursorOverlayPresentations.get(overlaySession);
     cursorOverlayPresentations.delete(overlaySession);
+    // A single dropped/timed-out hide ack previously orphaned the marker on
+    // screen forever: this function always forgot its own bookkeeping
+    // regardless of whether the renderer actually hid it, so nothing ever
+    // retried. Retry a few times -- a slow overlay catching up is the common
+    // case -- before giving up so cleanup still can't block stream revocation.
     try {
-      if (presentation && cursorOverlayHost) await cursorOverlayHost.hide(presentation.id);
+      if (presentation && cursorOverlayHost) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (await cursorOverlayHost.hide(presentation.id)) break;
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
     } catch { /* cursor cleanup must not block stream revocation */ }
     // The input target registry is owned by the logical agent identity, not by
     // the optional cursor process. A target may have been remembered while the

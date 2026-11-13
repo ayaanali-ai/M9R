@@ -21,7 +21,8 @@ export interface AgentCursorOverlayHost {
   warm?(): Promise<boolean>;
   upsert(point: AgentCursorOverlayPoint): Promise<boolean>;
   say(input: { id: string; to: string; toColor: Rgb; text: string }): Promise<boolean>;
-  hide(id: string): Promise<void>;
+  /** True once the marker is confirmed hidden (or was already not visible). False on a dropped/timed-out ack -- the caller must retry rather than forget the marker. */
+  hide(id: string): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -85,9 +86,11 @@ export function createAgentCursorOverlayHost(input: {
   let closing: Promise<void> | undefined;
   const pending = new Map<number, { resolve: (ok: boolean) => void; timer: NodeJS.Timeout }>();
   const visible = new Set<string>();
-  const hide = async (id: string): Promise<void> => {
-    if (!visible.has(id)) return;
-    if (await send({ cmd: "hide", id })) visible.delete(id);
+  const hide = async (id: string): Promise<boolean> => {
+    if (!visible.has(id)) return true;
+    const ok = await send({ cmd: "hide", id });
+    if (ok) visible.delete(id);
+    return ok;
   };
 
   const failPending = () => {
@@ -237,7 +240,7 @@ export function createAgentCursorOverlayHost(input: {
       return send({ cmd: "say", id: message.id, to, toColor: message.toColor, text });
     },
     async hide(id) {
-      await hide(id);
+      return hide(id);
     },
     async close() {
       if (closing) return closing;
