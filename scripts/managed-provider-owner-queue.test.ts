@@ -210,6 +210,56 @@ test("a task driven entirely through the structured computer-use tools is never 
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a task that hit an unresolved action error but still self-reports completed is flagged for the owner", async () => {
+  // Reproduces T317 directly: the agent's plan hit a real, recoverable
+  // action-phase error mid-task ("the stage click target could not be
+  // resolved"), it skipped the rest of the plan instead of retrying, then
+  // called m9r_result with completion.status "completed" anyway. Nothing in
+  // recordTaskResult checks the task's own stage ledger before accepting
+  // that -- this is the advisory signal that catches it without blocking or
+  // altering the recorded result.
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-completion-honesty-"));
+  const store = createLocalStore(root);
+  const events: unknown[] = [];
+  const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, onEvent: (event) => events.push(event), createConnection: (profile, context) => {
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* () {
+          yield { kind: "accepted" };
+          yield { kind: "tool", name: "m9r_computer_action" };
+          const now = new Date();
+          store.recordStageTiming("T1", { phase: "action", startedAt: now.toISOString(), endedAt: now.toISOString(),
+            durationMs: 5, status: "error", detail: "The stage click target could not be resolved from the last observation." });
+          store.recordTaskResult(context.token, "T1", "Drew the snowman and saved the file.", { status: "completed", remainingWork: [] });
+          yield { kind: "result", text: "Drew the snowman and saved the file.", isError: false };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    } });
+  try {
+    assert.equal(owner.deliver("codex", "Draw and save a snowman.").ok, true);
+    for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "completed"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    const resultEvent = events.find((event): event is { kind: string; text?: string } =>
+      typeof event === "object" && event !== null && (event as { kind?: string }).kind === "result") as { text?: string } | undefined;
+    assert.ok(resultEvent, JSON.stringify(events));
+    assert.match(resultEvent!.text ?? "", /reported completion, but 1 action failed during this turn/,
+      "a completed report with an unresolved action-phase error from this turn must carry an advisory, not be presented as a clean success");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("managed provider bridge returns A2A results to the pinned sender session", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-a2a-roundtrip-"));
   const store = createLocalStore(root);

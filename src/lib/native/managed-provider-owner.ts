@@ -735,8 +735,43 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           // Flag that case for the owner instead of presenting it as a
           // verified outcome -- this never blocks or alters the result itself.
           const unverified = kind === "owner" && !event.isError && !realDispatchObserved;
+          // The agent's own completion.status is self-reported and nothing in
+          // the recording path (recordTaskResult / m9r_result) checks it
+          // against what actually happened this turn. T317 reproduced this
+          // directly: two actions failed mid-task ("no popup window right
+          // now", "stage click target could not be resolved"), the agent
+          // skipped the rest of the plan, then reported completion.status
+          // "completed" anyway. Surface it the same way realDispatchObserved
+          // is surfaced above -- additive text only, never blocking or
+          // altering the recorded result -- when this turn's own stage
+          // ledger shows an action-phase failure the agent never retried
+          // successfully afterward.
+          // recordStageTiming batches non-terminal phases (like "action") to
+          // disk on a debounce timer -- reading task.stageTiming without
+          // flushing first can miss an error recorded only moments earlier
+          // in this same turn.
+          if (kind === "owner" && !event.isError) deps.store.flushStageTiming?.();
+          const freshTask: Task | undefined = kind === "owner" && !event.isError ? deps.store.getTask?.(taskId) : undefined;
+          const turnStageErrors = freshTask?.stageTiming?.filter((entry) =>
+            entry.status === "error" && Date.parse(entry.startedAt) >= turnStartedMs) ?? [];
+          const lastErrorIndex = freshTask?.stageTiming ? freshTask.stageTiming.length - 1 - [...freshTask.stageTiming].reverse().findIndex((entry) =>
+            entry.status === "error" && Date.parse(entry.startedAt) >= turnStartedMs) : -1;
+          const laterOkSameIndex = lastErrorIndex >= 0 && freshTask?.stageTiming
+            ? freshTask.stageTiming.slice(lastErrorIndex + 1).some((entry) => entry.status === "ok" && entry.phase === freshTask.stageTiming![lastErrorIndex].phase)
+            : false;
+          const uncheckedFailure = turnStageErrors.length > 0 && !laterOkSameIndex;
+          // Only second-guess a claimed "completed" -- an honest "incomplete"
+          // report already carries its own remainingWork, so the ledger's
+          // errors are already acknowledged and need no second warning.
+          const completionSuspect = kind === "owner" && !event.isError && uncheckedFailure
+            && freshTask?.completion?.status === "completed";
+          const advisory = unverified
+            ? "\n\n[M9R: no desktop action was observed during this task -- this looks like the model's own answer, not something verified by opening or reading the app.]"
+            : completionSuspect
+              ? `\n\n[M9R: this task reported completion, but ${turnStageErrors.length} action${turnStageErrors.length === 1 ? "" : "s"} failed during this turn with no later success in that same phase -- verify the result before treating it as done.]`
+              : "";
           emit({ kind: "result", handle: profile.handle, provider: profile.provider,
-            text: unverified ? `${event.text}\n\n[M9R: no desktop action was observed during this task -- this looks like the model's own answer, not something verified by opening or reading the app.]` : event.text,
+            text: `${event.text}${advisory}`,
             isError: event.isError, runId });
           if (event.isError) {
             const reason = event.text.trim() || "Provider returned an error result.";
