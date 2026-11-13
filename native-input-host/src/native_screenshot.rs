@@ -129,7 +129,15 @@ pub fn capture_window(window: usize) -> Result<NativeWindowCapture, String> {
         }
         return Err("Windows could not select the capture bitmap into its memory context".into());
     }
-    let painted = unsafe { PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(0)).as_bool() };
+    // PW_RENDERFULLCONTENT (2, not yet in the windows crate's own binding) asks DWM to render the
+    // window's real composited content into our DC. Without it, PrintWindow reports success (`painted`
+    // true) for a DirectComposition/hardware-accelerated window -- the modern Paint app among them --
+    // while actually painting nothing, so the fallback BitBlt below never runs and the capture comes
+    // back solid black. Confirmed live on 2026-11-13: M9R's own mid-task observation captures of Paint's
+    // canvas were black while a plain OS-level screenshot of the same window was not, because only the
+    // observation path went through this PrintWindow call.
+    const PW_RENDERFULLCONTENT: u32 = 0x00000002;
+    let painted = unsafe { PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool() };
     let copied = if painted {
         true
     } else {
