@@ -25,6 +25,10 @@ export function createMultiplayerInboxDelivery(input: {
   store: Pick<LocalStore, "addTask" | "setDelivery" | "setApproval" | "tasksFor">;
   agents: readonly MultiplayerInboxAgent[];
   sessionIdOf?: (handle: string) => string | undefined;
+  /** Best-effort: push this A2A content as a fresh provider turn on an existing task (the recipient's
+   * session may be idle after already pausing/finishing). Never affects this function's own return value --
+   * a wake failure never turns a legitimate dedup/"already-present" result into an error. */
+  wakeRecipient?: (handle: string, text: string, taskId: string) => void;
 }): MultiplayerDelivery {
   const profiles = new Map(input.agents.map((agent) => [agent.agentId, agent]));
 
@@ -33,6 +37,12 @@ export function createMultiplayerInboxDelivery(input: {
     if (!recipient) return { ok: false, error: "The structured teammate recipient is not configured." };
     const sender = profiles.get(message.agentId);
     if (!sender) return { ok: false, error: "The structured teammate sender is not configured." };
+
+    const detail = message.details ? `\nStructured details: ${JSON.stringify(message.details)}` : "";
+    const rootTaskId = message.taskId ?? `run-${message.runId}`;
+    const conversationId = message.conversationId ?? `conversation-${message.taskId ?? message.runId}`;
+    const replyLine = message.replyToMessageId ? ` reply-to ${message.replyToMessageId}` : "";
+    const goal = `[M9R team conversation ${conversationId}; task ${rootTaskId}; message ${message.messageId}${replyLine}; kind ${message.kind}] @${sender.handle}: ${message.summary}${detail}`.slice(0, 4_000);
 
     // A teammate's delegation can redundantly duplicate work the recipient already received directly
     // from the owner (e.g. "Claude, ask Codex to do X" where the owner's own message also named Codex).
@@ -46,16 +56,16 @@ export function createMultiplayerInboxDelivery(input: {
         const existing = input.store.tasksFor(recipient.handle)
           .find((task) => task.broadcastId === senderBroadcastId && isTaskActive(task));
         if (existing) {
+          // Suppressing the duplicate task record must not silently drop the delegation's actual content:
+          // the recipient may already have paused/finished its own turn waiting for exactly this (e.g. "wait
+          // for Claude's explicit delegation" from the shared broadcast), and nothing else would ever wake
+          // it back up. Push the content as a fresh turn on the existing task instead of a second task.
+          try { input.wakeRecipient?.(recipient.handle, goal, existing.id); }
+          catch { /* best-effort: the dedup result below is correct regardless */ }
           return { ok: true, taskId: existing.id, created: false, state: "already-present" };
         }
       }
     }
-
-    const detail = message.details ? `\nStructured details: ${JSON.stringify(message.details)}` : "";
-    const rootTaskId = message.taskId ?? `run-${message.runId}`;
-    const conversationId = message.conversationId ?? `conversation-${message.taskId ?? message.runId}`;
-    const replyLine = message.replyToMessageId ? ` reply-to ${message.replyToMessageId}` : "";
-    const goal = `[M9R team conversation ${conversationId}; task ${rootTaskId}; message ${message.messageId}${replyLine}; kind ${message.kind}] @${sender.handle}: ${message.summary}${detail}`.slice(0, 4_000);
     const senderSession = input.sessionIdOf?.(sender.handle);
     const result = input.store.addTask({
       to: recipient.handle,

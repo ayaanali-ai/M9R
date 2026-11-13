@@ -380,10 +380,12 @@ test("owner broker queues one durable peer conversation item and returns its rea
 test("a teammate delegation is suppressed when the recipient already has the same broadcast in flight", () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-a2a-broadcast-"));
   const store = createLocalStore(root);
+  const woken: Array<{ handle: string; text: string; taskId: string }> = [];
   const inboxDelivery = createMultiplayerInboxDelivery({
     store,
     agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
     sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
+    wakeRecipient: (handle, text, taskId) => { woken.push({ handle, text, taskId }); },
   });
   const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
   try {
@@ -412,6 +414,48 @@ test("a teammate delegation is suppressed when the recipient already has the sam
       assert.equal(result.delivery.taskId, codexBroadcastTask.task.id);
     }
     assert.equal(store.tasksFor("codex").length, 1, "the delegation must not create a second task for codex");
+    // Suppressing the duplicate task record must not silently drop the delegation's content: the recipient
+    // may already have paused its own turn waiting for exactly this (observed live -- Codex finished its
+    // turn reporting "waiting for Claude's delegation" and nothing else would ever wake it back up).
+    assert.equal(woken.length, 1);
+    assert.equal(woken[0]!.handle, "codex");
+    assert.equal(woken[0]!.taskId, codexBroadcastTask.task.id);
+    assert.ok(woken[0]!.text.includes("Please pick a number."), "the delegation's actual content reaches the recipient as a fresh turn");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a suppressed delegation's dedup result is unaffected when waking the recipient fails", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-a2a-broadcast-wake-fails-"));
+  const store = createLocalStore(root);
+  const inboxDelivery = createMultiplayerInboxDelivery({
+    store,
+    agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
+    sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
+    wakeRecipient: () => { throw new Error("provider connection is down"); },
+  });
+  const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
+  try {
+    const claudeBroadcastTask = store.addTask({
+      from: "you", to: "claude", goal: "shared broadcast", origin: "human_typed",
+      idempotencyKey: "bcast-claude-2", broadcastId: "bcast-2",
+    });
+    const codexBroadcastTask = store.addTask({
+      from: "you", to: "codex", goal: "shared broadcast", origin: "human_typed",
+      idempotencyKey: "bcast-codex-2", broadcastId: "bcast-2",
+    });
+    assert.equal(claudeBroadcastTask.created, true);
+    const result = runtime.sendFromHandle("claude", "claude-code", {
+      to: "codex", taskId: "shared-room-3", summary: "Please pick a number.", kind: "delegate",
+      progressFingerprint: "p-3", progressKind: "observation", idempotencyKey: "delegate-3",
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.delivery.created, false);
+      assert.equal(result.delivery.taskId, codexBroadcastTask.task.id);
+    }
+    assert.equal(store.tasksFor("codex").length, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

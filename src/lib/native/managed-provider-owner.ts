@@ -850,7 +850,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     }
 
     if (taskId) {
-      void runTask(profile, taskId, `The owner says:\n${text}`, "room");
+      void runTask(profile, taskId, text, "room");
     } else {
       let ownerTaskId: string | undefined;
       try { ownerTaskId = makeOwnerTask(profile, text, broadcastId); }
