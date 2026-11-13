@@ -903,9 +903,16 @@ test("native action timings separate observation, targeting, dispatch, and the r
   const result = await driver.click("stage", 42, 24);
   assert.equal(result.outcome.status, "unverified", "instrumentation must not turn OS delivery into semantic success");
   const phases = timings.map(({ phase }) => phase);
-  for (const phase of ["window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation"]) {
+  for (const phase of ["accessibility-read", "target-resolution", "input-dispatch", "post-action-observation"]) {
     assert.ok(phases.includes(phase), `missing measured phase: ${phase}`);
   }
+  // A click's pre-dispatch bounds check and coordinate reprojection only need
+  // the window's geometry, never its pixels -- it must not pay for a second,
+  // pixel-wasting captureWindow() alongside the one real post-dispatch
+  // observation. "target-resolution" above already covers the cheap geometry
+  // read.
+  assert.equal(phases.filter((phase) => phase === "window-capture").length, 0,
+    "a click's only real screenshot is the post-dispatch observation (measured as post-action-observation), never an unused pre-dispatch one");
   const dispatchIndex = phases.indexOf("input-dispatch");
   const postObservationIndex = phases.indexOf("post-action-observation");
   assert.ok(dispatchIndex >= 0 && postObservationIndex > dispatchIndex, "the refreshed observation follows actual input delivery");

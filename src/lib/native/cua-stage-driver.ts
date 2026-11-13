@@ -2680,8 +2680,15 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   }
 
   async function click(name: string, x: number, y: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaDesktopClickOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
-      const before = await captureFrame();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
+      // Only geometry is needed before dispatch (bounds-check the point,
+      // reproject it to screen space); a full captureFrame() here would pay
+      // for a PrintWindow/BitBlt pixel capture whose pixels are never
+      // examined. windowRect and the window-capture path both derive their
+      // bounds from the same GetWindowRect call (native_screenshot.rs), so
+      // this is the identical coordinate space at a fraction of the cost.
+      const rect = await timed("target-resolution", () => manager.windowRect(pid, windowId.toString()), { detail: "source=window-rect" });
+      const before: CuaStageWindowFrame = { dataUrl: "", width: rect.width, height: rect.height, windowBounds: rect };
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, x, y, before);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
