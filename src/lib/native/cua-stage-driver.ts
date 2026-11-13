@@ -3463,8 +3463,11 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   }
 
   async function scroll(name: string, xInput: number | undefined, yInput: number | undefined, direction: "up" | "down", cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageScrollOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
-      const before = await captureFrame();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
+      // Same reasoning as click() and drag(): only geometry is needed before
+      // dispatch here, never pixels.
+      const rect = await timed("target-resolution", () => manager.windowRect(pid, windowId.toString()), { detail: "source=window-rect" });
+      const before: CuaStageWindowFrame = { dataUrl: "", width: rect.width, height: rect.height, windowBounds: rect };
       // A scroll targets one already-exact window; unlike a click or a drag,
       // there is nothing ambiguous about defaulting to its center when no
       // point was given -- scrolling the window itself is what was meant.
@@ -3489,8 +3492,12 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   }
 
   async function drag(name: string, fromX: number, fromY: number, toX: number, toY: number, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageDragOptions = {}): Promise<CuaStageActionProof> {
-    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, capture: captureWindow }) => {
-      const before = await captureFrame();
+    return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, capture: captureWindow }) => {
+      // Same reasoning as click(): drag's pre-dispatch step only needs
+      // geometry to bounds-check both endpoints and reproject them to screen
+      // space, never pixels.
+      const rect = await timed("target-resolution", () => manager.windowRect(pid, windowId.toString()), { detail: "source=window-rect" });
+      const before: CuaStageWindowFrame = { dataUrl: "", width: rect.width, height: rect.height, windowBounds: rect };
       if (!validPoint(fromX, fromY, before) || !validPoint(toX, toY, before)) {
         throw new DesktopInputNotDispatchedError("Both drag points must fall inside the current stage window snapshot.");
       }

@@ -1994,6 +1994,9 @@ test("scroll and drag use native screen coordinates and validate bounds before d
   assert.deepEqual(cursorPoints.slice(-2), [{ x: 110, y: 70 }, { x: 200, y: 130 }],
     "the M9R presentation cursor follows the registered-window drag from its grab point to its drop point");
   assert.equal(calls.length, 0, "native scrolling and dragging do not initialize the CUA cursor runtime");
+  assert.equal(native.filter((call) => call.op === "captureWindow").length, 2,
+    "exactly one real screenshot each for scroll and drag: their post-dispatch observations, never an unused pre-dispatch one");
+  assert.ok(native.some((call) => call.op === "windowRect"), "scroll/drag read cheap geometry instead of a pixel capture before dispatch");
   const callsBeforeInvalid = native.filter((call) => call.op === "sendDrag").length;
   await assert.rejects(() => driver.drag("stage", 10, 20, 200, 80, identity), /Both drag points must fall inside/);
   assert.equal(native.filter((call) => call.op === "sendDrag").length, callsBeforeInvalid);
