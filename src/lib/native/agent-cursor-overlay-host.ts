@@ -31,6 +31,12 @@ type SpawnOverlay = typeof spawn;
 type OverlayChild = ChildProcessByStdio<Writable, Readable, Readable>;
 
 const READY_TIMEOUT_MS = 2_000;
+// A freshly-installed, unsigned exe routinely gets held up by Windows Defender's first-run scan well
+// past READY_TIMEOUT_MS -- confirmed live on 2026-11-13, reproducing on the very first spawn after every
+// install. That one-time scan doesn't recur for the same file, so a single longer-timeout retry absorbs
+// it immediately instead of leaving no agent marker on screen until some later, unrelated action happens
+// to trigger the next lazy respawn attempt (observed live as a multi-minute gap).
+const READY_RETRY_TIMEOUT_MS = 10_000;
 const ACK_TIMEOUT_MS = 900;
 const EXIT_TIMEOUT_MS = 700;
 
@@ -120,9 +126,7 @@ export function createAgentCursorOverlayHost(input: {
     request.resolve(message.ok === true);
   }
 
-  async function ensureStarted(): Promise<boolean> {
-    if (child && ready) return ready;
-    if (closing) await closing;
+  async function attemptStart(timeoutMs: number): Promise<boolean> {
     let resolveReady!: (value: boolean) => void;
     const readiness = new Promise<boolean>((resolve) => { resolveReady = resolve; });
     let settled = false;
@@ -141,8 +145,7 @@ export function createAgentCursorOverlayHost(input: {
       }) as OverlayChild;
     } catch (spawnError) {
       debugLog("spawn-threw", { error: String(spawnError) });
-      finishReady(false);
-      return readiness;
+      return false;
     }
     debugLog("spawned", { pid: process.pid, executablePath: input.executablePath });
     child = process;
@@ -172,9 +175,9 @@ export function createAgentCursorOverlayHost(input: {
       }
     });
     const timer = setTimeout(() => {
-      debugLog("ready-timeout", { pid: process.pid, timeoutMs: READY_TIMEOUT_MS });
+      debugLog("ready-timeout", { pid: process.pid, timeoutMs });
       finishReady(false);
-    }, READY_TIMEOUT_MS);
+    }, timeoutMs);
     const result = await readiness;
     clearTimeout(timer);
     if (!result && child === process) {
@@ -185,6 +188,15 @@ export function createAgentCursorOverlayHost(input: {
       try { process.kill(); } catch { /* the process may already have exited */ }
     }
     return result;
+  }
+
+  async function ensureStarted(): Promise<boolean> {
+    if (child && ready) return ready;
+    if (closing) await closing;
+    if (await attemptStart(READY_TIMEOUT_MS)) return true;
+    // One retry with a much longer timeout absorbs a one-time Defender scan of the freshly-written exe
+    // instead of leaving no cursor marker on screen until some unrelated later action retries.
+    return attemptStart(READY_RETRY_TIMEOUT_MS);
   }
 
   async function send(command: Record<string, unknown>): Promise<boolean> {
