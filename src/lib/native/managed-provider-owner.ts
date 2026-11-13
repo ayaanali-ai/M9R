@@ -447,7 +447,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     waiter.resolve(result);
   }
 
-  function makeOwnerTask(profile: ManagedProviderConnectionProfile, text: string): string | undefined {
+  function makeOwnerTask(profile: ManagedProviderConnectionProfile, text: string, broadcastId?: string): string | undefined {
     if (!deps.store.addTask || !deps.store.setDelivery || !deps.store.claimProviderDelivery) return undefined;
     const created = deps.store.addTask({
       from: "you",
@@ -456,6 +456,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       origin: "human_typed",
       cwd: profile.cwd,
       idempotencyKey: `owner:${profile.connectionId}:${Date.now()}:${randomUUID()}`,
+      ...(broadcastId ? { broadcastId } : {}),
     });
     const id = created.task.id;
     const deferred = deps.store.setDelivery(id, { state: "deferred" });
@@ -808,7 +809,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     }
   }
 
-  function deliver(handle: string, text: string, taskId?: string): ReturnType<SessionsPort["deliver"]> {
+  function deliver(handle: string, text: string, taskId?: string, broadcastId?: string): ReturnType<SessionsPort["deliver"]> {
     if (halted.value) return { ok: false, error: "The M9R owner supervisor is stopped." };
     const profile = resolveProfile(handle);
     if (!profile) return { ok: false, error: `no agent called @${handle}` };
@@ -817,7 +818,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     if (currentTask) {
       if (taskId) return { ok: false, error: `@${profile.handle} is handling another task; M9R did not replace the teammate delivery.` };
       let queuedTaskId: string | undefined;
-      try { queuedTaskId = makeOwnerTask(profile, text); }
+      try { queuedTaskId = makeOwnerTask(profile, text, broadcastId); }
       catch (error) { return { ok: false, error: errorText(error) }; }
       if (!queuedTaskId) return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not queued." };
       const queue = queuedOwnerPrompts.get(profile.connectionId) ?? [];
@@ -835,7 +836,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     const queued = queuedOwnerPrompts.get(profile.connectionId);
     if (!taskId && queued?.length) {
       let queuedTaskId: string | undefined;
-      try { queuedTaskId = makeOwnerTask(profile, text); }
+      try { queuedTaskId = makeOwnerTask(profile, text, broadcastId); }
       catch (error) { return { ok: false, error: errorText(error) }; }
       if (!queuedTaskId) return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not queued." };
       if (queued.length >= 8) {
@@ -852,7 +853,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       void runTask(profile, taskId, `The owner says:\n${text}`, "room");
     } else {
       let ownerTaskId: string | undefined;
-      try { ownerTaskId = makeOwnerTask(profile, text); }
+      try { ownerTaskId = makeOwnerTask(profile, text, broadcastId); }
       catch (error) { return { ok: false, error: errorText(error) }; }
       if (!ownerTaskId) return { ok: false, error: "M9R owner-task state is unavailable; the managed provider turn was not started." };
       if (!startOwnerTask(profile, ownerTaskId, text)) return { ok: false, error: "M9R could not bind the owner task to its managed provider connection." };

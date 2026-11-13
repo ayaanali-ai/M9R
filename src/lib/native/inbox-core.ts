@@ -359,6 +359,9 @@ export interface Task {
   replyToTaskId?: string;
   /** Internal authorization lineage; never included in provider-facing task text. */
   parentTaskId?: string;
+  /** Set when one owner message addresses several agents at once; shared across every resulting per-recipient
+   * task so a later teammate delegation can recognize the recipient already has equivalent work in flight. */
+  broadcastId?: string;
   /** Compact A2A state used for dedupe/acknowledgement; full prose remains in `goal`. */
   coordination?: TaskCoordination;
   /** Structured teammate-message identity, persisted with the durable inbox delivery. */
@@ -428,6 +431,8 @@ export interface NewTaskInput {
   parentTaskId?: string;
   /** Set only for an M9R-generated result reply; the referenced task is the request being answered. */
   replyToTaskId?: string;
+  /** Set only when one owner message addresses several agents at once; shared across each resulting task. */
+  broadcastId?: string;
   /** Structured A2A context for the durable recipient inbox item. */
   a2a?: TaskA2ALink;
   /** Agent-to-agent informational message vs. delegated task request. */
@@ -537,6 +542,7 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     ...(input.fromSession ? { fromSession: input.fromSession } : {}),
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
     ...(input.replyToTaskId ? { replyToTaskId: input.replyToTaskId } : {}),
+    ...(input.broadcastId ? { broadcastId: input.broadcastId } : {}),
   };
 }
 

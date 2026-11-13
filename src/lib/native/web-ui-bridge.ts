@@ -383,7 +383,9 @@ export interface SessionsPort {
    * not "genuinely finished". Computed fresh on every snapshot from live task state, not baked in at exit time, so it
    * clears itself the moment the answer actually lands. */
   snapshot(): Array<{ handle: string; provider: string; folder: string; status: SessionStatus; doing: string; waitingOn?: string }>;
-  deliver(handle: string, text: string, taskId?: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
+  /** broadcastId: shared across every recipient of one multi-agent owner message, so a later teammate
+   * delegation can recognize the recipient already has equivalent work in flight. */
+  deliver(handle: string, text: string, taskId?: string, broadcastId?: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
   /** Pause one active provider turn without closing M9R task state. */
   stop(handle: string): boolean;
   /** Pause active turns while keeping M9R task state available for follow-up. */
@@ -887,8 +889,12 @@ export function createWebUiBridge(options: { ownerWorkMode?: () => OwnerWorkMode
     }
     lastAddressed = targets;
     if (everyone) system(`Sent to ${targets.join(", ")}`);
+    // One owner message addressing several agents creates one task per recipient; tag them all with
+    // the same broadcastId so a later teammate delegation recognizes a recipient already has this
+    // same request in flight, instead of queuing a second, independent task for it.
+    const broadcastId = targets.length > 1 ? randomUUID() : undefined;
     for (const handle of targets) {
-      const result = sessions!.deliver(handle, composeAgentMessage(message.text, message.context, targets, handle, known));
+      const result = sessions!.deliver(handle, composeAgentMessage(message.text, message.context, targets, handle, known), undefined, broadcastId);
       if (!result.ok) system(`Couldn't reach @${handle}: ${result.error}`, handle);
       else if (result.mode === "interrupted") system(`Interrupted @${handle} with your new message.`, handle);
       else if (result.mode === "restarted-worker") system(`Stopped @${handle}'s current run and started again with your new message.`, handle);

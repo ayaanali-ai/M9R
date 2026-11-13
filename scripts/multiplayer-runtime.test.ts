@@ -377,3 +377,71 @@ test("owner broker queues one durable peer conversation item and returns its rea
   }
 });
 
+test("a teammate delegation is suppressed when the recipient already has the same broadcast in flight", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-a2a-broadcast-"));
+  const store = createLocalStore(root);
+  const inboxDelivery = createMultiplayerInboxDelivery({
+    store,
+    agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
+    sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
+  });
+  const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
+  try {
+    // Simulate one owner message that addressed both agents directly (web-ui-bridge.ts's multi-target
+    // broadcast loop): each recipient gets its own task, both tagged with the same broadcastId.
+    const claudeBroadcastTask = store.addTask({
+      from: "you", to: "claude", goal: "shared broadcast", origin: "human_typed",
+      idempotencyKey: "bcast-claude-1", broadcastId: "bcast-1",
+    });
+    const codexBroadcastTask = store.addTask({
+      from: "you", to: "codex", goal: "shared broadcast", origin: "human_typed",
+      idempotencyKey: "bcast-codex-1", broadcastId: "bcast-1",
+    });
+    assert.equal(claudeBroadcastTask.created, true);
+    assert.equal(codexBroadcastTask.created, true);
+
+    // Claude now delegates to Codex for the same underlying request -- Codex already has this work
+    // directly from the owner broadcast, so no second parallel task should be created for it.
+    const result = runtime.sendFromHandle("claude", "claude-code", {
+      to: "codex", taskId: "shared-room-1", summary: "Please pick a number.", kind: "delegate",
+      progressFingerprint: "p-1", progressKind: "observation", idempotencyKey: "delegate-1",
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.delivery.created, false);
+      assert.equal(result.delivery.taskId, codexBroadcastTask.task.id);
+    }
+    assert.equal(store.tasksFor("codex").length, 1, "the delegation must not create a second task for codex");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a teammate delegation still creates a new task when the recipient has no matching broadcast", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-a2a-no-broadcast-"));
+  const store = createLocalStore(root);
+  const inboxDelivery = createMultiplayerInboxDelivery({
+    store,
+    agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
+    sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
+  });
+  const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
+  try {
+    // Claude has an active broadcast-tagged task, but Codex was never part of that broadcast --
+    // a genuine first-time delegation must still create a task for Codex, not be suppressed.
+    store.addTask({
+      from: "you", to: "claude", goal: "solo broadcast", origin: "human_typed",
+      idempotencyKey: "solo-claude-1", broadcastId: "bcast-solo",
+    });
+    const result = runtime.sendFromHandle("claude", "claude-code", {
+      to: "codex", taskId: "shared-room-2", summary: "Please pick a number.", kind: "delegate",
+      progressFingerprint: "p-2", progressKind: "observation", idempotencyKey: "delegate-2",
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.delivery.created, true);
+    assert.equal(store.tasksFor("codex").length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+

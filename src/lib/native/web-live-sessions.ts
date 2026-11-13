@@ -1046,7 +1046,9 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
   // someone again (that is a real, deliberate resume, unlike a stale ask sitting in an inbox).
   let haltedByOwner = false;
 
-  function deliver(handle: string, text: string, taskId?: string): ReturnType<SessionsPort["deliver"]> {
+  function deliver(handle: string, text: string, taskId?: string, _broadcastId?: string): ReturnType<SessionsPort["deliver"]> {
+    // This path never calls addTask itself (task creation happens upstream), so there is nothing
+    // here to tag with broadcastId; the parameter only exists to satisfy the shared SessionsPort shape.
     const slot = slots.get(handle);
     if (!slot) return { ok: false, error: `no agent called @${handle}` };
     haltedByOwner = false;

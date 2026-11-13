@@ -1,4 +1,5 @@
 import type { LocalStore } from "./local-store";
+import type { Task } from "./inbox-core";
 import type { MultiplayerDelivery } from "./multiplayer-runtime";
 
 export interface MultiplayerInboxAgent {
@@ -6,13 +7,22 @@ export interface MultiplayerInboxAgent {
   readonly agentId: string;
 }
 
+/** Mirrors task-desktop-stage.ts's taskActive(): a task is still "in flight" until it reaches a terminal state. */
+function isTaskActive(task: Task): boolean {
+  return task.resultSummary === undefined && task.receipt?.state !== "canceled"
+    && task.lifecycle?.state !== "completed" && task.lifecycle?.state !== "failed";
+}
+
+/** The two A2A kinds that hand a recipient brand-new work, as opposed to a reply or status update. */
+const NEW_WORK_KINDS = new Set(["help-request", "delegate"]);
+
 /**
  * Persist one roster-authenticated A2A message as a recipient inbox item.
  * Message acceptance and provider receipt stay separate: this callback only
  * promises that the owner's durable task queue contains the peer message.
  */
 export function createMultiplayerInboxDelivery(input: {
-  store: Pick<LocalStore, "addTask" | "setDelivery" | "setApproval">;
+  store: Pick<LocalStore, "addTask" | "setDelivery" | "setApproval" | "tasksFor">;
   agents: readonly MultiplayerInboxAgent[];
   sessionIdOf?: (handle: string) => string | undefined;
 }): MultiplayerDelivery {
@@ -23,6 +33,23 @@ export function createMultiplayerInboxDelivery(input: {
     if (!recipient) return { ok: false, error: "The structured teammate recipient is not configured." };
     const sender = profiles.get(message.agentId);
     if (!sender) return { ok: false, error: "The structured teammate sender is not configured." };
+
+    // A teammate's delegation can redundantly duplicate work the recipient already received directly
+    // from the owner (e.g. "Claude, ask Codex to do X" where the owner's own message also named Codex).
+    // Both deliveries are individually legitimate; what's missing is recognizing the recipient already
+    // has equivalent work in flight. Key that off task lineage (broadcastId), not message wording, so
+    // it holds for any phrasing -- explicit @mentions, bare names, or anything said multiple times.
+    if (NEW_WORK_KINDS.has(message.kind)) {
+      const senderBroadcastId = input.store.tasksFor(sender.handle)
+        .find((task) => task.broadcastId && isTaskActive(task))?.broadcastId;
+      if (senderBroadcastId) {
+        const existing = input.store.tasksFor(recipient.handle)
+          .find((task) => task.broadcastId === senderBroadcastId && isTaskActive(task));
+        if (existing) {
+          return { ok: true, taskId: existing.id, created: false, state: "already-present" };
+        }
+      }
+    }
 
     const detail = message.details ? `\nStructured details: ${JSON.stringify(message.details)}` : "";
     const rootTaskId = message.taskId ?? `run-${message.runId}`;
