@@ -210,6 +210,57 @@ test("a task driven entirely through the structured computer-use tools is never 
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a result turn with no tool calls of its own is not flagged unverified when this task's own ledger already shows real dispatch", async () => {
+  // Item #24 (PROGRESS_NOTES.md 14.3 #5, live rehearsal): the "no desktop
+  // action was observed" banner fired on a task that clearly DID touch the
+  // desktop (typing into a sticky note, UIA-verified). realDispatchObserved
+  // is scoped to just this turn's own tool-call stream -- it cannot see
+  // dispatch recorded earlier in the same logical task's own stageTiming
+  // (e.g. a turn that only reports a result after an earlier turn already
+  // did the real work). Falling back to the task's own durable
+  // "input-dispatch" evidence closes that gap.
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-historical-dispatch-"));
+  const store = createLocalStore(root);
+  const events: unknown[] = [];
+  const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, onEvent: (event) => events.push(event), createConnection: (profile) => {
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* () {
+          yield { kind: "accepted" };
+          const now = new Date();
+          store.recordStageTiming("T1", { phase: "input-dispatch", startedAt: now.toISOString(), endedAt: now.toISOString(),
+            durationMs: 5, status: "ok", detail: "route=native" });
+          // No "tool" event this turn at all -- only the terminal result,
+          // as if the real work had already happened earlier in this task.
+          yield { kind: "result", text: "Already typed the note earlier; nothing left to do.", isError: false };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    } });
+  try {
+    assert.equal(owner.deliver("codex", "Type into the sticky note.").ok, true);
+    for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "uncertain"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    const resultEvent = events.find((event): event is { kind: string; text?: string } =>
+      typeof event === "object" && event !== null && (event as { kind?: string }).kind === "result") as { text?: string } | undefined;
+    assert.ok(resultEvent, JSON.stringify(events));
+    assert.doesNotMatch(resultEvent!.text ?? "", /no desktop action was observed/,
+      "this task's own ledger already proves real dispatch happened, even though this turn called no dispatch tool itself");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a task that hit an unresolved action error but still self-reports completed is flagged for the owner", async () => {
   // Reproduces T317 directly: the agent's plan hit a real, recoverable
   // action-phase error mid-task ("the stage click target could not be

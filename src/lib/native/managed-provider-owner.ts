@@ -742,11 +742,30 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
         }
         else if (event.kind === "result") {
           terminalObserved = true;
+          // recordStageTiming batches non-terminal phases (like "action") to
+          // disk on a debounce timer -- reading task.stageTiming without
+          // flushing first can miss an entry recorded only moments earlier
+          // in this same turn.
+          if (kind === "owner" && !event.isError) deps.store.flushStageTiming?.();
+          const freshTask: Task | undefined = kind === "owner" && !event.isError ? deps.store.getTask?.(taskId) : undefined;
           // A task can call m9r_result without ever touching the real desktop
           // (an answer reasoned from the model, not observed from the app).
           // Flag that case for the owner instead of presenting it as a
           // verified outcome -- this never blocks or alters the result itself.
-          const unverified = kind === "owner" && !event.isError && !realDispatchObserved;
+          // Item #24, live 2026-11-13 (PROGRESS_NOTES.md 14.3 #5): this banner
+          // fired on a task that clearly DID touch the desktop (typing into a
+          // sticky note, UIA-verified) -- realDispatchObserved alone only sees
+          // tool-call events from THIS turn's own event stream, but the real
+          // dispatch evidence for this task can already be durably recorded in
+          // its own stageTiming ("input-dispatch", phase ok) from earlier in
+          // the same logical task (e.g. a resumed/continued turn, or a result
+          // reported after retrying), even when this turn's own stream never
+          // calls one of the four dispatch tools again. Falling back to that
+          // durable record instead of only the in-memory, this-turn-only flag
+          // closes exactly the "scoped across provider turns" gap traced then.
+          const historicalDispatchObserved = freshTask?.stageTiming?.some((entry) =>
+            entry.phase === "input-dispatch" && entry.status === "ok") ?? false;
+          const unverified = kind === "owner" && !event.isError && !realDispatchObserved && !historicalDispatchObserved;
           // The agent's own completion.status is self-reported and nothing in
           // the recording path (recordTaskResult / m9r_result) checks it
           // against what actually happened this turn. T317 reproduced this
@@ -758,12 +777,6 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           // altering the recorded result -- when this turn's own stage
           // ledger shows an action-phase failure the agent never retried
           // successfully afterward.
-          // recordStageTiming batches non-terminal phases (like "action") to
-          // disk on a debounce timer -- reading task.stageTiming without
-          // flushing first can miss an error recorded only moments earlier
-          // in this same turn.
-          if (kind === "owner" && !event.isError) deps.store.flushStageTiming?.();
-          const freshTask: Task | undefined = kind === "owner" && !event.isError ? deps.store.getTask?.(taskId) : undefined;
           const turnStageErrors = freshTask?.stageTiming?.filter((entry) =>
             entry.status === "error" && Date.parse(entry.startedAt) >= turnStartedMs) ?? [];
           const lastErrorIndex = freshTask?.stageTiming ? freshTask.stageTiming.length - 1 - [...freshTask.stageTiming].reverse().findIndex((entry) =>
