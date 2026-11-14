@@ -45,7 +45,10 @@ if (!process.env.CI && resolve(root).toLowerCase() !== CANONICAL_ROOT.toLowerCas
 // install, as "Blocked: ... the native desktop helper is unavailable (deps is not defined)". `tsc --noEmit`
 // catches that class of error in seconds; nothing before this guard ever ran it as part of the build.
 {
-  const typecheck = spawnSync("npx", ["tsc", "--noEmit", "-p", "."], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  // shell: true -- on Windows, npx resolves to npx.cmd, which spawnSync cannot exec directly without a shell
+  // (confirmed live: "spawnSync npx ENOENT" on the very first run of this guard). Matches build-engine.mjs's
+  // existing `spawnSync("npm", ..., { shell: true })` for the identical reason.
+  const typecheck = spawnSync("npx", ["tsc", "--noEmit", "-p", "."], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, shell: true });
   if (typecheck.error) throw new Error(`Could not run the project typecheck (flow guard 3B): ${typecheck.error.message}`);
   if (typecheck.status !== 0) {
     throw new Error(`Refusing to build: the project does not typecheck (flow guard 3B).\n${typecheck.stdout}${typecheck.stderr}`);
