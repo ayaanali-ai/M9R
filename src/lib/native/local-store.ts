@@ -2481,6 +2481,18 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         const at = now();
         const atIso = at.toISOString();
         let changed = 0;
+        // Catch-up for every task this function already retired before the
+        // cleanup below existed: those tasks will never hit the main loop
+        // again (it skips anything with retiredAt already set), so without
+        // this pass their raw stageTiming would sit stale on disk forever.
+        // Confirmed live on 2026-11-13: 149 already-retired tasks out of 320
+        // still carried their full stageTiming array.
+        for (const task of s.tasks) {
+          if (task.retiredAt && task.stageTiming && task.stageTiming.length > 0) {
+            task.stageTiming = [];
+            changed += 1;
+          }
+        }
         for (const task of s.tasks) {
           if (task.retiredAt || task.resultSummary || task.receipt?.state === "completed"
             || isFreshInboxTask(task.createdAt, at.getTime(), maxAgeMs)) continue;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore } from "@/lib/native/local-store";
@@ -93,6 +93,40 @@ test("retiring a task drops its raw stageTiming detail but keeps the aggregate s
     const retired = store.getTask(task.id)!;
     assert.deepEqual(retired.stageTiming, [], "raw per-event detail is dropped on retirement");
     assert.deepEqual(retired.stageTimingSummary, summaryBefore, "the aggregate summary survives retirement unchanged");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a task retired before this cleanup existed gets its stale stageTiming caught up too", () => {
+  // The main retirement loop skips anything with retiredAt already set, so a
+  // task retired in a prior broker lifetime -- before the stageTiming-drop
+  // fix landed -- would never reach the new cleanup through the normal path.
+  // Simulated by writing that leftover shape directly to disk (retiredAt set,
+  // stageTiming still populated), exactly what a real pre-fix install's
+  // state.json looked like, rather than going through today's retirement
+  // path, which already clears it inline.
+  const fixture = join(process.cwd(), ".workcache", "native-test-fixtures");
+  mkdirSync(fixture, { recursive: true });
+  const root = mkdtempSync(join(fixture, "m9r-retire-catchup-"));
+  const clock = new Date("2026-10-01T12:00:00Z");
+  try {
+    const store = createLocalStore(root, { now: () => clock });
+    const { task } = store.addTask({ from: "you", to: "codex", goal: "already retired", origin: "human_typed", idempotencyKey: "retire-catchup" });
+    const at = clock.toISOString();
+    store.recordStageTiming(task.id, { phase: "action", startedAt: at, endedAt: at, durationMs: 5, status: "ok" });
+    store.flushStageTiming();
+
+    const statePath = join(root, "state.json");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    const stored = state.tasks.find((candidate: { id: string }) => candidate.id === task.id);
+    assert.ok(stored.stageTiming?.length > 0, "the fixture must carry stageTiming on disk to prove the catch-up pass is needed");
+    stored.retiredAt = at;
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const reopened = createLocalStore(root, { now: () => clock });
+    assert.ok((reopened.getTask(task.id)!.stageTiming?.length ?? 0) > 0, "confirms the simulated pre-fix leftover actually loaded");
+
+    assert.equal(reopened.retireStaleTasks(60_000), 1, "the catch-up pass must report the cleanup it performed");
+    assert.deepEqual(reopened.getTask(task.id)!.stageTiming, []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
