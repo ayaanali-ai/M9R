@@ -187,7 +187,28 @@ export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | 
   | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "cursor-overlay" | "foreground-lease" | "background-dispatch"
   | "window-capture" | "accessibility-read" | "target-resolution" | "input-dispatch" | "post-action-observation"
   | "launch-discovery"
-  | "provider-acceptance" | "first-visible-action" | "completion" | "post-action-wrapup";
+  | "provider-acceptance" | "first-visible-action" | "completion" | "post-action-wrapup" | "inter-action-think";
+
+/**
+ * The single source of truth for every valid phase name, used by local-store's
+ * recordStageTiming to validate incoming events. A hand-duplicated literal list
+ * there previously had to be updated in lockstep with the type above and
+ * silently fell behind twice -- "post-action-wrapup" and "inter-action-think"
+ * were both valid StageTimingPhase values that recordStageTiming rejected
+ * outright, so every call recording them returned false and the event was
+ * dropped before ever reaching pendingStageTiming, with no error surfaced
+ * anywhere (timing writes are deliberately best-effort/silent). Deriving the
+ * validator from this one array instead of a second list closes that class of
+ * bug for any phase added from here on.
+ */
+export const ALL_STAGE_TIMING_PHASES: readonly StageTimingPhase[] = [
+  "queue_wait", "prepare", "launch", "action", "close", "stop",
+  "launch-preflight", "stage-recovery",
+  "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "cursor-overlay", "foreground-lease", "background-dispatch",
+  "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation",
+  "launch-discovery",
+  "provider-acceptance", "first-visible-action", "completion", "post-action-wrapup", "inter-action-think",
+];
 
 /**
  * Timing is deliberately kept on the task record so a later result or audit can reconcile

@@ -548,3 +548,60 @@ test("explicit resume starts a new turn with durable M9R context and no provider
     gated!.release();
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test("a mid-turn gap between two tool calls is recorded, not left as silence indistinguishable from a stuck broker", async () => {
+  // Before this phase existed, stageTiming only covered the edges of a turn:
+  // dispatch-to-first-action ("first-visible-action") and last-action-to-completion
+  // ("post-action-wrapup"). A real, confirmed provider-side stall -- the model
+  // still generating between two ordinary mid-turn actions, with nothing on
+  // M9R's side to explain it -- showed up as a flat multi-second gap in
+  // stageTiming with no phase covering it at all, indistinguishable from the
+  // broker itself being stuck (item #20, live 2026-11-13: an unexplained
+  // 56-second Codex turn with no evidence of where the time went).
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-think-"));
+  const store = createLocalStore(root);
+  const THINK_GAP_MS = 60;
+  const owner = createManagedProviderOwner({
+    agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {},
+    createConnection: (profile) => {
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* () {
+          yield { kind: "accepted" };
+          yield { kind: "tool", name: "read_file" };
+          await new Promise((resolve) => setTimeout(resolve, THINK_GAP_MS));
+          yield { kind: "tool", name: "write_file" };
+          yield { kind: "result", text: "done", isError: false };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    },
+  });
+  try {
+    assert.equal(owner.deliver("codex", "Read the file, then update it.").ok, true);
+    for (let attempt = 0; attempt < 200 && store.getTask("T1")?.receipt?.state !== "uncertain"; attempt++) await new Promise((done) => setTimeout(done, 10));
+    const task = store.getTask("T1")!;
+    const thinkEvents = task.stageTiming?.filter((event) => event.phase === "inter-action-think") ?? [];
+    assert.equal(thinkEvents.length, 1, "exactly one mid-turn gap exists, between the two tool calls");
+    assert.equal(thinkEvents[0]!.status, "ok");
+    assert.ok((thinkEvents[0]!.durationMs ?? 0) >= THINK_GAP_MS - 5,
+      `the recorded gap (${thinkEvents[0]!.durationMs}ms) should be at least the real delay (${THINK_GAP_MS}ms)`);
+    const firstActionIndex = task.stageTiming!.findIndex((event) => event.phase === "first-visible-action");
+    const thinkIndex = task.stageTiming!.findIndex((event) => event.phase === "inter-action-think");
+    assert.ok(firstActionIndex >= 0 && thinkIndex > firstActionIndex,
+      "the gap before the FIRST tool call stays attributed to first-visible-action only");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});

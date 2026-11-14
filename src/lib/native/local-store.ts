@@ -11,7 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import { isProtectedAction, lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
-import { MAX_AGENT_REPLY_DEPTH, MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, addStageTimingToSummary, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, summarizeStageTimingEvents, transitionTaskReceipt, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle, type TaskReceiptSource, type TaskReceiptState } from "./inbox-core";
+import { ALL_STAGE_TIMING_PHASES, MAX_AGENT_REPLY_DEPTH, MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, addStageTimingToSummary, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, summarizeStageTimingEvents, transitionTaskReceipt, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle, type TaskReceiptSource, type TaskReceiptState } from "./inbox-core";
 import { canQueue, normCwd } from "./codex-delivery-core";
 import { issueIdentity, verifyToken, type IdentityToken, type VerifiedIdentity } from "./identity-core";
 import { CONNECTION_CLAIM_TTL_MS, MAX_CONNECTION_RECORDS, PROVIDER_SESSION_RECOVERY_TTL_MS, PROVIDER_TURN_TTL_MS, newConnectionId, sameConnectionCwd, sameConnectionProvider, usableConnectionClaim, validConnectionProcessId, type ConnectionBinding, type ConnectionClaim, type ConnectionClaimInput, type BindConnectionInput } from "./mcp-connection-core";
@@ -1116,7 +1116,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
      */
     recordStageTiming(taskId: string, event: StageTimingEvent): boolean {
       if (!/^T[0-9]{1,12}$/.test(taskId)
-        || !["queue_wait", "prepare", "launch", "launch-preflight", "launch-discovery", "stage-recovery", "action", "close", "stop", "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "cursor-overlay", "foreground-lease", "background-dispatch", "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation", "provider-acceptance", "first-visible-action", "completion"].includes(event.phase)
+        || !(ALL_STAGE_TIMING_PHASES as readonly string[]).includes(event.phase)
         || !["ok", "error"].includes(event.status)
         || !Number.isFinite(event.durationMs) || event.durationMs < 0
         || Number.isNaN(Date.parse(event.startedAt)) || Number.isNaN(Date.parse(event.endedAt))) return false;

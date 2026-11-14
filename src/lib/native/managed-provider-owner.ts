@@ -715,6 +715,18 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
             const firstEventTick = performance.now();
             recordTurnTiming(taskId, "first-visible-action", dispatchStart, Date.now(), "ok", undefined, firstEventTick - dispatchStartTick);
             latencyTelemetry.record({ kind: "dispatch_to_first_action", temperature: latencyTemperature, durationMs: firstEventTick - dispatchStartTick, status: "ok" });
+          } else if (lastToolEventMs !== undefined && lastToolEventTick !== undefined) {
+            // The dispatch-to-first-action and last-action-to-completion gaps were
+            // already visible; a gap between two tool calls in the *middle* of the
+            // same turn had no timing phase at all -- just silence in stageTiming,
+            // indistinguishable from the broker itself being stuck. This is where a
+            // real, confirmed provider-side stall (a multi-second gap between two
+            // ordinary actions, with nothing on M9R's side to explain it -- the
+            // model is simply still generating) actually shows up. M9R cannot see
+            // or shorten that time; this only makes it visible as what it is
+            // instead of leaving it unaccounted for.
+            const thinkEventTick = performance.now();
+            recordTurnTiming(taskId, "inter-action-think", lastToolEventMs, Date.now(), "ok", undefined, thinkEventTick - lastToolEventTick);
           }
           lastToolEventMs = Date.now();
           lastToolEventTick = performance.now();
