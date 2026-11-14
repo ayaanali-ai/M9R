@@ -2001,7 +2001,12 @@ function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: n
       }
       terminatingPid = undefined;
     }
-    const spawned = spawn(executable, ["--desktop-stage-server"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    // deps.env already gates the JS-side assertOwner() check above (isAgentContext(deps.env ?? process.env));
+    // without also passing it here, the spawned helper always inherited the real process.env regardless of
+    // deps.env, so the native host's own agent-context guard (main.rs has_agent_context) saw this process's
+    // real CLAUDECODE/CODEX_*/OPENCODE* markers even when a caller explicitly overrode deps.env to avoid that.
+    const spawned = spawn(executable, ["--desktop-stage-server"],
+      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, ...(deps.env ?? {}) } });
     child = spawned;
     trackPid?.(spawned.pid, true);
     spawned.stdout.on("data", (chunk: Buffer | string) => {
