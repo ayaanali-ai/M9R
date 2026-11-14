@@ -805,7 +805,17 @@ export function pruneTasks(tasks: readonly Task[], input: { maxCount: number; ma
     if (!t.deliveredAt || t.approval === "pending") return false;
     const hasResult = t.resultSummary !== undefined;
     const terminalWithoutResult = t.approval === "denied" || t.approval === "expired";
-    return (hasResult && Boolean(t.resultShownAt)) || (!hasResult && terminalWithoutResult);
+    // Item #22, live 2026-11-13: of 169 real completed tasks in state.json, 165 had
+    // never been marked shown -- some 17+ days old -- because resultShownAt is an
+    // agent-to-agent inbox-read cursor (set when a SENDER agent later checks its own
+    // outbox for a reply), which has no equivalent step for an owner-typed task: the
+    // owner watches it complete live, there is no separate "read the result" action
+    // to wait for. Without this, every one of those 134 owner tasks (from "you") was
+    // permanently unprunable the moment it completed, regardless of age -- the exact
+    // unbounded growth this function exists to prevent. An agent-initiated task still
+    // requires the real read, since its sender may genuinely come back for the answer later.
+    const seen = Boolean(t.resultShownAt) || t.from === "you";
+    return (hasResult && seen) || (!hasResult && terminalWithoutResult);
   };
   const prunable = (t: Task): boolean => resolved(t) && input.now - Date.parse(t.createdAt) > input.maxAgeMs;
   const kept = tasks.filter((t) => !prunable(t));

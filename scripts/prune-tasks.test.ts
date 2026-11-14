@@ -61,6 +61,19 @@ test("a resolved task with an answer is not prunable until the sender has actual
   assert.deepEqual(pruneTasks(tasks, { maxCount: 100, maxAgeMs: DAY, now: NOW }), []);
 });
 
+test("an owner-typed task's result needs no separate 'shown' step to become prunable, unlike an agent-to-agent reply", () => {
+  // Item #22, live 2026-11-13: 165 of 169 real completed tasks in state.json had
+  // never been marked resultShownAt, 134 of them owner-typed ("you" -> agent) and
+  // some over 17 days old -- permanently unprunable under the old rule, since an
+  // owner task has no equivalent "sender reads the reply later" step: the owner
+  // watches it complete live. An agent-initiated delegation still needs the real
+  // read, since its sending agent may genuinely come back for the answer.
+  const ownerTask = task({ id: "T1", from: "you", createdAt: new Date(NOW - 10 * DAY).toISOString(), resultSummary: "done", resultShownAt: undefined });
+  const agentTask = task({ id: "T2", from: "claude", createdAt: new Date(NOW - 10 * DAY).toISOString(), resultSummary: "done", resultShownAt: undefined });
+  const kept = pruneTasks([ownerTask, agentTask], { maxCount: 100, maxAgeMs: DAY, now: NOW });
+  assert.deepEqual(kept.map((t) => t.id), ["T2"], "the owner task is pruned without ever being marked shown; the agent-to-agent reply still waits for a real read");
+});
+
 test("even under budget pressure (too many resolved tasks are still too young to age out), unresolved tasks are never sacrificed to make room, and the most recent resolved ones win the remaining budget", () => {
   const tasks = [
     task({ id: "unresolved", createdAt: new Date(NOW - 1 * DAY).toISOString(), approval: "pending", deliveredAt: undefined }),
