@@ -627,6 +627,16 @@ export function createTaskDesktopStageService(input: {
     const key = cursorIdentityKey(target.identity);
     const priorCursor = activeAgentCursors.get(key);
     const primedAt = priorCursor && priorCursor.taskId === target.taskId ? priorCursor.primedAt : Date.now();
+    if (process.env.M9R_DEBUG_CURSOR_LIFECYCLE && priorCursor?.taskId !== target.taskId) {
+      // One key per agent identity means every prime overwrites whatever taskId was
+      // there before -- if that new taskId is an ephemeral/internal one that never
+      // reaches a terminal state in the task store, the reaper (below) can never fire
+      // for it again, and the marker/bubble sticks on screen indefinitely even though
+      // the task the owner actually sees as "done" already finished. Confirmed live:
+      // a Claude cursor stayed on screen long after its real task completed. Log every
+      // handoff so a stuck marker's actual owning taskId is visible, not guessed.
+      console.error(`[cursor-lifecycle] prime key=${key} from-task=${priorCursor?.taskId ?? "(none)"} to-task=${target.taskId}`);
+    }
     activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId, primedAt });
     if (cursorPresentationTask.get(key) === target.taskId) return { shown: true, agent: target.identity.handle };
     if (cursorPresentationPending.has(key)) return { shown: false, reason: "The local cursor surface is already starting." };
@@ -1777,6 +1787,9 @@ export function createTaskDesktopStageService(input: {
         // canceled) would otherwise hold its cursor indefinitely -- taskActive() alone never goes false
         // for it. Force the same cleanup once the cursor has clearly outlived any legitimate task.
         const expired = Date.now() - active.primedAt >= CURSOR_MAX_LIFETIME_MS;
+        if (process.env.M9R_DEBUG_CURSOR_LIFECYCLE) {
+          console.error(`[cursor-lifecycle] reap-check key=${key} task=${active.taskId} taskActive=${taskActive(active.taskId)} expired=${expired} ageMs=${Date.now() - active.primedAt}`);
+        }
         if (!taskActive(active.taskId) || expired) {
           ownerWorkPolicy.revokeTask({ agent: active.identity.handle, provider: active.identity.handle,
             sessionId: active.identity.sessionId, taskId: active.taskId });
