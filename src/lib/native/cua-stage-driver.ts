@@ -1493,6 +1493,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         // Sample and restore the owner pointer only if the target-message route
         // proved unavailable and we are about to use global SendInput.
         saved = await ownerPointer.get().catch(() => undefined);
+        if (process.env.M9R_DEBUG_CHILD_EDIT_LOOKUP) {
+          const foreground = await manager.currentForegroundWindow().catch((error) => `<error: ${error instanceof Error ? error.message : error}>`);
+          console.error(`[deliverForeground] about to SendInput targetPid=${targetPid} targetWindowId=${targetWindowId} currentForeground=${JSON.stringify(foreground)}`);
+        }
         await options.nativeForeground.send();
         // Native SendInput reports only OS-level delivery. The caller's
         // refreshed UIA capture is the separate semantic verification signal.
@@ -1635,6 +1639,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }
     }
 
+    if (process.env.M9R_DEBUG_CHILD_EDIT_LOOKUP) {
+      console.error(`[deliverTextToExactWindow] pid=${input.pid} windowId=${windowId} no headless route matched; falling through to foreground type_text (bringToFront + SendInput)`);
+    }
     return driverInputAction("type_text", {
       pid: input.pid,
       window_id: Number.parseInt(windowId, 10),
