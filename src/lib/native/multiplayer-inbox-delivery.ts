@@ -7,10 +7,15 @@ export interface MultiplayerInboxAgent {
   readonly agentId: string;
 }
 
-/** Mirrors task-desktop-stage.ts's taskActive(): a task is still "in flight" until it reaches a terminal state. */
+/**
+ * Mirrors task-desktop-stage.ts's taskActive(): a task is still "in flight" until it reaches a
+ * terminal state -- "failed"/"uncertain"/"paused" receipts included, since RECEIPT_TRANSITIONS
+ * (inbox-core.ts) never lets any of those three move back into active work. Keep both in sync.
+ */
 function isTaskActive(task: Task): boolean {
-  return task.resultSummary === undefined && task.receipt?.state !== "canceled"
-    && task.lifecycle?.state !== "completed" && task.lifecycle?.state !== "failed";
+  return task.resultSummary === undefined
+    && task.lifecycle?.state !== "completed" && task.lifecycle?.state !== "failed"
+    && !["canceled", "failed", "uncertain", "paused"].includes(task.receipt?.state ?? "");
 }
 
 /** The two A2A kinds that hand a recipient brand-new work, as opposed to a reply or status update. */

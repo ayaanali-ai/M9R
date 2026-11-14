@@ -315,8 +315,17 @@ export function createTaskDesktopStageService(input: {
   // already uses to decide whether a task may still receive a delivered agent cursor.
   const taskActive = (taskId: string): boolean => {
     const task = input.store.getTask(taskId);
-    return Boolean(task) && task!.resultSummary === undefined && task!.receipt?.state !== "canceled"
-      && task!.lifecycle?.state !== "completed" && task!.lifecycle?.state !== "failed";
+    // "failed"/"uncertain"/"paused" are receipt outcomes the system itself has already decided
+    // are done -- RECEIPT_TRANSITIONS (inbox-core.ts) only ever lets "uncertain" and "paused" move
+    // on to "completed"/"canceled", never back to active work, and retireStaleTasks closes an
+    // unresolved receipt out as "uncertain" for exactly this reason ("it can no longer ever be
+    // resolved"). Confirmed live on 2026-11-13 (task T296): none of those three stopped this check
+    // from returning true, so a task left in one of them kept its cursor/window claim until the
+    // unrelated 30-minute CURSOR_MAX_LIFETIME_MS backstop, not when the task actually stopped
+    // progressing. "retryable" is deliberately left out -- it can still be re-dispatched.
+    return Boolean(task) && task!.resultSummary === undefined
+      && task!.lifecycle?.state !== "completed" && task!.lifecycle?.state !== "failed"
+      && !["canceled", "failed", "uncertain", "paused"].includes(task!.receipt?.state ?? "");
   };
   const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, taskActive, ...input.stage, root, terminal: true };
   const ownsManager = !input.manager;

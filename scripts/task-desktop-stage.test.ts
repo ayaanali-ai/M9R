@@ -206,6 +206,24 @@ test("a cursor is force-reaped once it outlives the safety-net bound even if its
   } finally { await f.service.close(); f.cleanup(); }
 });
 
+test("a cursor is reaped promptly once its receipt is paused/failed/uncertain, without waiting for the age safety net", async () => {
+  // Before this fix, taskActive() only excluded a "canceled" receipt, so a task whose receipt moved to
+  // "paused"/"failed"/"uncertain" (none of which RECEIPT_TRANSITIONS ever lets resume active work --
+  // inbox-core.ts) kept its cursor until the unrelated age-based safety net fired. The safety-net bound
+  // here is deliberately huge so only the receipt-state check below can explain a prompt reap.
+  const f = fixture(true, undefined, undefined, false, undefined, 10_000_000);
+  const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 600));
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 12, y: 15 }, "owner-preview");
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+    f.store.pauseTask(f.task.id);
+    await waitForReaperTick();
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"],
+      "a paused receipt alone must reap the cursor well before the huge age safety net could ever fire");
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("re-priming the same still-running task does not reset the safety-net age, but a genuinely new task does", async () => {
   const f = fixture(true, undefined, undefined, false, undefined, 300);
   const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
