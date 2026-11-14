@@ -2754,14 +2754,14 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       });
     },
 
-    setResult(id: string, summary: string): Task | undefined {
+    setResult(id: string, summary: string, completionReport?: TaskCompletionReport): Task | undefined {
       return update((s) => {
         const t = s.tasks.find((x) => x.id === id);
         if (!t) return undefined;
         if (t.receipt?.state === "completed" || t.receipt?.state === "canceled" || t.receipt?.state === "paused" || t.receipt?.state === "failed" || t.delivery?.state === "failed" || t.lifecycle?.state === "failed") return t;
         const clean = redactSecrets(summary.trim());
         const at = now().toISOString();
-        const report = taskCompletionReport(clean);
+        const report = taskCompletionReport(clean, completionReport);
         t.completion = { ...report, summary: clean.slice(0, MAX_RESULT_SUMMARY_CHARS), updatedAt: at };
         if (report.status === "incomplete") {
           t.logicalContext ??= nextLogicalTaskContext(t);

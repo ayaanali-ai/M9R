@@ -229,7 +229,13 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
       state: "queued", threadId, queuedAt: new Date().toISOString(), error: undefined,
     });
     if (result.done) {
-      store.setResult(task.id, resultSummary(task.id, result.message));
+      // Codex's own explicit "done" marker in the rollout is itself the
+      // confirmation that would otherwise come from a structured m9r_result
+      // call. Without passing it through here, setResult's no-report default
+      // (added 2026-11-01, task-completion-contract.ts) treated every one of
+      // these as an unconfirmed outcome -- a Codex answer could never reach
+      // "completed", only ever "uncertain", regardless of what it actually said.
+      store.setResult(task.id, resultSummary(task.id, result.message), { status: "completed", remainingWork: [] });
       collected += 1;
     }
   }

@@ -476,7 +476,13 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       if (!task || !ctx.lastAnswer) return null;
       const text = ctx.lastAnswer(input);
       if (!text) return null;
-      ctx.store.setResult(task.id, text);
+      // This is a direct A2A question-and-answer, not a multi-step work item
+      // with a notion of partial completion -- the finished turn's prose IS
+      // the whole answer. Pass the explicit "completed" report so setResult's
+      // no-report default (task-completion-contract.ts, 2026-11-01) does not
+      // classify a plain-text answer as unconfirmed/incomplete; without this,
+      // no Stop-hook answer could ever reach resultSummary, only "uncertain".
+      ctx.store.setResult(task.id, text, { status: "completed", remainingWork: [] });
       ctx.answerBack?.(task.id);
       return null;
     }
