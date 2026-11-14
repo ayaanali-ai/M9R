@@ -1041,9 +1041,14 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // Calculator, or any other target cannot be focused by two workers at once.
   const foregroundLease = deps.foregroundLease ?? createForegroundInputLease({ lockPath: join(root, "foreground-input-lease") });
   const cursorOverlayExecutable = deps.stage?.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe");
+  // Build this unconditionally on Windows rather than gating it on an
+  // existsSync() check taken once, right now: the host itself rechecks the
+  // exe's presence on every spawn attempt, so a broker that starts slightly
+  // ahead of an in-progress install can still pick up cursor presentation
+  // once the exe lands, instead of staying permanently without it for its
+  // whole lifetime.
   const cursorOverlayHost = deps.cursorOverlayHost
-    ?? (process.platform === "win32" && existsSync(cursorOverlayExecutable)
-      ? createAgentCursorOverlayHost({ executablePath: cursorOverlayExecutable }) : undefined);
+    ?? (process.platform === "win32" ? createAgentCursorOverlayHost({ executablePath: cursorOverlayExecutable }) : undefined);
   // The renderer is transparent and non-activating before it receives a
   // marker. Warm it during broker startup so the first task avoids cold spawn.
   void cursorOverlayHost?.warm?.().catch(() => undefined);

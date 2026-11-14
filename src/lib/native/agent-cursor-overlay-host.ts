@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { defaultStoreRoot } from "./local-store";
@@ -84,8 +84,10 @@ function debugLog(event: string, detail: Record<string, unknown> = {}): void {
 export function createAgentCursorOverlayHost(input: {
   executablePath: string;
   spawnProcess?: SpawnOverlay;
+  pathExists?: (path: string) => boolean;
 }): AgentCursorOverlayHost {
   const spawnProcess = input.spawnProcess ?? spawn;
+  const pathExists = input.pathExists ?? existsSync;
   let child: OverlayChild | undefined;
   let ready: Promise<boolean> | undefined;
   let nextRequestId = 1;
@@ -127,6 +129,17 @@ export function createAgentCursorOverlayHost(input: {
   }
 
   async function attemptStart(timeoutMs: number): Promise<boolean> {
+    // The exe's presence was previously checked once, by the caller, before this
+    // host was even constructed -- a broker that started slightly ahead of an
+    // in-progress install (or one racing a binary swap) got a permanently
+    // undefined host for its entire lifetime, with no later cursor action ever
+    // able to self-heal even once the exe showed up. Recheck it on every real
+    // attempt instead, so a startup race only costs the presentations that
+    // land in that narrow window, not the rest of that broker's life.
+    if (!pathExists(input.executablePath)) {
+      debugLog("executable-missing", { executablePath: input.executablePath });
+      return false;
+    }
     let resolveReady!: (value: boolean) => void;
     const readiness = new Promise<boolean>((resolve) => { resolveReady = resolve; });
     let settled = false;

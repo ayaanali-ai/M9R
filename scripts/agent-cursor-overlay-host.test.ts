@@ -7,7 +7,7 @@ import { createAgentCursorOverlayHost } from "../src/lib/native/agent-cursor-ove
 class FakeOverlayChild extends EventEmitter {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
-  readonly stderr = null;
+  readonly stderr = new PassThrough();
   readonly pid = 12345;
   readonly commands: Array<Record<string, unknown>> = [];
   exitCode: number | null = null;
@@ -45,7 +45,7 @@ test("serializes acknowledged cursor frames and closes the renderer process on s
     child = new FakeOverlayChild();
     return child;
   }) as never;
-  const host = createAgentCursorOverlayHost({ executablePath: "C:\\M9R\\m9r-native-input-host.exe", spawnProcess });
+  const host = createAgentCursorOverlayHost({ executablePath: "C:\\M9R\\m9r-native-input-host.exe", spawnProcess, pathExists: () => true });
 
   assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: -1200, y: 80 }), true);
   assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: -1190, y: 95 }), true);
@@ -59,6 +59,38 @@ test("serializes acknowledged cursor frames and closes the renderer process on s
   assert.equal(child?.killed, false, "normal shutdown does not require process termination");
 });
 
+test("a renderer that was missing at startup is picked up once it shows up, instead of staying off forever", async () => {
+  // Regression for a real, recurring cursor-presentation failure: the exe's
+  // presence used to be checked once, by the caller, before this host was
+  // even built -- a broker that started slightly ahead of an in-progress
+  // install got a permanently undefined host for the rest of its life, with
+  // every later cursor action failing identically and silently (no spawn
+  // attempt at all, so nothing in the overlay's own debug log either) even
+  // after the exe was fully in place. Confirmed against the live
+  // cursor-overlay-debug.log: several real tasks show many repeated
+  // "did not acknowledge" failures in a row with zero matching spawn/
+  // ready-timeout/exit entries for that whole window -- consistent with the
+  // host never even attempting to start, not with a slow or crashing start.
+  const launched: FakeOverlayChild[] = [];
+  const spawnProcess = ((..._args: unknown[]) => {
+    const child = new FakeOverlayChild();
+    launched.push(child);
+    return child;
+  }) as never;
+  let exists = false;
+  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess, pathExists: () => exists });
+
+  assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: 10, y: 10 }), false,
+    "no renderer exists yet, so presentation fails without ever spawning one");
+  assert.equal(launched.length, 0, "a missing exe is never attempted");
+
+  exists = true;
+  assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: 10, y: 10 }), true,
+    "the exact same host picks up the renderer once it exists, without needing a new broker session");
+  assert.equal(launched.length, 1);
+  await host.close();
+});
+
 test("warming starts the transparent renderer once before the first task marker", async () => {
   const launched: FakeOverlayChild[] = [];
   const spawnProcess = ((..._args: unknown[]) => {
@@ -66,7 +98,7 @@ test("warming starts the transparent renderer once before the first task marker"
     launched.push(child);
     return child;
   }) as never;
-  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess });
+  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess, pathExists: () => true });
 
   assert.equal(await host.warm?.(), true);
   assert.equal(launched.length, 1);
@@ -83,7 +115,7 @@ test("A2A bubbles require an acknowledged visible sender and sanitize bounded te
     launched.push(child);
     return child;
   }) as never;
-  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess });
+  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess, pathExists: () => true });
 
   assert.equal(await host.say({ id: "agent-codex", to: "Claude", toColor: [230, 120, 70], text: "hello" }), false,
     "an invisible sender cannot produce a free-floating bubble");
