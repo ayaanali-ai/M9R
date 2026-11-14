@@ -3513,7 +3513,27 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           throw new DesktopInputNotDispatchedError("The field at the given point could not be confirmed as the same one you observed; no text was sent.");
         }
         if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, options.x, options.y, before);
-        const selected = await elementByToken(element.elementToken, { role: element.role, label: element.label });
+        let selected = await elementByToken(element.elementToken, { role: element.role, label: element.label });
+        if (!selected?.nativeElement) {
+          // A host app can reflow its own UI tree (e.g. Notepad adding a tab)
+          // in the moments between the point lookup above and this token
+          // re-check, rolling the field's token over even though the exact
+          // same control -- by role and label, at the same point -- is still
+          // there. That is real, ordinary app churn, not a wrong target, and
+          // failing on it here cost a full extra agent turn (re-observe,
+          // re-decide, re-issue) every time Notepad's tab bar changed. Take
+          // one fresh look at the same point before giving up: if a control
+          // matching the same expected role/label is still there, its token
+          // is already current, so there's nothing stale to retry against.
+          // If it is not -- a different control, or none -- this still fails
+          // exactly as before; the identity requirement itself is unchanged.
+          const reobserved = await elementAtPoint(options.x, options.y, "set_value");
+          if (reobserved?.elementToken && reobserved.enabled !== false && reobserved.actions?.includes("set_value")
+            && (options.expectedRole === undefined || reobserved.role === options.expectedRole)
+            && (options.expectedLabel === undefined || reobserved.label === options.expectedLabel)) {
+            selected = await elementByToken(reobserved.elementToken, { role: reobserved.role, label: reobserved.label });
+          }
+        }
         if (!selected?.nativeElement) {
           throw new DesktopInputNotDispatchedError("The observed text field changed before replacement; no text was sent. Re-observe the field and retry.", "target-identity");
         }
