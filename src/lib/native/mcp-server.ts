@@ -620,15 +620,17 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         && (inRoom(identity) || (task.targetSession ?? task.deliveredSession ?? task.delivery?.threadId) === identity.sessionId));
     if (candidates.length === 0) throw new Error("No single open M9R work item is currently delivered to this session.");
     if (candidates.length > 1) {
-      // A provider-bound session is serial even when the owner sends a new
-      // instruction before an earlier turn reports its result. Resolve the
-      // same active/newest work item policy used by the action tools instead
-      // of making every later result fail behind an abandoned turn. Room-wide
-      // delivery is genuinely multi-agent, so it remains explicit-only.
+      // Unlike resolveTaskId (which defaults an *action* call, and is correctly biased toward
+      // "whichever task this session most recently dispatched a real stage operation against" --
+      // the turn actually in progress), a result call reports the outcome of the current turn,
+      // which is always whichever task was most recently *delivered* to this session, regardless
+      // of how much or little desktop activity that turn generated. Reusing the activity-recency
+      // heuristic here let a busy, older task "win" a completion that belonged to a newer,
+      // quieter one (e.g. a teammate-only turn with no desktop ops yet) -- confirmed live and in
+      // an isolated reproduction, 2026-11-14. Room-wide delivery is genuinely multi-agent, so it
+      // remains explicit-only.
       if (roomScoped) throw new Error("This room has multiple open M9R work items; report the exact taskId for the result.");
-      const active = deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, candidates.map((task) => task.id));
-      if (active) return active;
-      candidates.sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+      candidates.sort((left, right) => Date.parse(right.deliveredAt!) - Date.parse(left.deliveredAt!));
     }
     return candidates[0]!.id;
   }

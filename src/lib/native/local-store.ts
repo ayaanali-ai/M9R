@@ -2967,6 +2967,16 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         }
         rememberDelivery(task);
         if (task.delivery) task.delivery = { ...task.delivery, state: "done" };
+        // A real completion must not leave behind a stale "paused" state/remainingWork from an
+        // earlier incomplete report on this same task -- nextLogicalTaskContext() falls back to
+        // prior.remainingWork whenever a later continuation's own completion.remainingWork is
+        // empty, which would otherwise hand a future continuation task the old, already-resolved
+        // remaining work. There is no "completed" logicalContext state; "active" with an emptied
+        // remainingWork correctly signals nothing is left outstanding.
+        if (task.logicalContext) {
+          task.logicalContext.state = "active";
+          task.logicalContext.remainingWork = [];
+        }
         setCoordinationCompletion(task, "completed");
         recordTaskReceipt(task, { state: "completed", at, source: "provider-session", sessionId: identity.sessionId });
         applyTaskLifecycle(task, { state: "completed", sessionId: identity.sessionId, source: task.deliverySource, completedAt: at });

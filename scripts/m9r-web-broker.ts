@@ -222,11 +222,32 @@ async function main(): Promise<void> {
   }, 1000);
   // One pill at a time: the desktop pill beats a heartbeat file; while it is running the in-page pill steps aside.
   const presenceTimer = setInterval(() => ui.setDesktopPill(readDesktopPillRunning(root)), 2000);
+  // No execution-progress watchdog existed anywhere on the managed-provider path before this --
+  // only receipt-transition history, which says a task entered a state, never whether it has
+  // stalled since. Log-only for now (repair priority per the 2026-11-14 audit put result binding
+  // first): flag, never kill, any still-open task whose receipt has not advanced in a while, so a
+  // real stall is visible in broker.log instead of indistinguishable from a long legitimate turn.
+  const PROGRESS_STALL_MS = 10 * 60_000;
+  const progressWatchdog = setInterval(() => {
+    try {
+      const now = Date.now();
+      for (const task of store.snapshot().tasks) {
+        if (task.resultSummary || !task.receipt) continue;
+        if (task.lifecycle?.state === "completed" || task.lifecycle?.state === "failed") continue;
+        if (task.receipt.state === "completed" || task.receipt.state === "canceled" || task.receipt.state === "failed" || task.receipt.state === "paused") continue;
+        const ageMs = now - Date.parse(task.receipt.updatedAt);
+        if (Number.isFinite(ageMs) && ageMs >= PROGRESS_STALL_MS) {
+          process.stderr.write(`[progress-watchdog] task=${task.id} receiptState=${task.receipt.state} staleMs=${ageMs}\n`);
+        }
+      }
+    } catch { /* diagnostic only; must never affect broker uptime */ }
+  }, 60_000);
+  progressWatchdog.unref();
   let stopPromise: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     if (stopPromise) return stopPromise;
     stopPillStartup();
-    clearInterval(webTimer); clearInterval(presenceTimer); clearInterval(pillStateTimer); ui.close(); clearDesktopPillState(root);
+    clearInterval(webTimer); clearInterval(presenceTimer); clearInterval(pillStateTimer); clearInterval(progressWatchdog); ui.close(); clearDesktopPillState(root);
     // Keep the broker listener alive until stage/runtime cleanup finishes. The authenticated
     // shutdown caller uses listener closure as its signal that owned resources have drained.
     stopPromise = (async () => {
