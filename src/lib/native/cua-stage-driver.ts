@@ -1651,11 +1651,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     if (!input.signal?.aborted && !input.preferForeground && input.nativeInput && await input.nativeInput()) {
       return { status: "unverifiable", summary: "Posted text to the selected native edit control; application effect requires verification." };
     }
-    // Background mode must never fall through to SendInput (see the fail-closed guard in
-    // driverInputAction below), but a plain Win32 control that lacks a UIA value pattern still
-    // has a real headless route: WM_CHAR posted straight to its own message queue, which never
-    // requires and never steals OS foreground. Try it before giving up as unavailable.
-    if (!input.signal?.aborted && !input.preferForeground && input.deliveryMode === "background") {
+    // A plain Win32 control that lacks a UIA value pattern still has a real
+    // headless route: WM_CHAR posted straight to its own message queue, which
+    // never requires and never steals OS foreground. This used to be tried
+    // only in "background" delivery mode, so every ordinary (non-background)
+    // type-into-a-focused-field call skipped straight to foreground SendInput
+    // -- moving the owner's real cursor to focus the field even when WM_CHAR
+    // could have reached it headlessly (confirmed live: a new Sticky Note).
+    // Try it first regardless of delivery mode; only background mode keeps
+    // its original fail-closed rule of never escalating to SendInput itself.
+    if (!input.signal?.aborted && !input.preferForeground) {
       // Some real apps (e.g. Windows 11 Notepad) host their actual classic
       // Edit-class text surface as a CHILD window of the top-level frame
       // we're given, rather than being an Edit control themselves; posting
@@ -1698,9 +1703,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       } catch (error) {
         // The native helper explicitly proved zero WM_CHAR delivery. Only that
         // typed pre-dispatch result may move to the owner-approved foreground
-        // route; an uncertain outcome must never be replayed.
+        // route; an uncertain outcome must never be replayed. Background mode
+        // keeps its original fail-closed rule (never escalate without
+        // explicit permission); every other delivery mode already ends at
+        // foreground SendInput today regardless of this flag, so a proven
+        // WM_CHAR miss there falls through exactly as it always has.
+        const backgroundLocked = input.deliveryMode === "background" && !input.allowForegroundEscalation;
         if (!(error instanceof DesktopInputNotDispatchedError)
-          || error.code !== "native-dispatch-unavailable" || !input.allowForegroundEscalation) throw error;
+          || error.code !== "native-dispatch-unavailable" || backgroundLocked) throw error;
       }
     }
 

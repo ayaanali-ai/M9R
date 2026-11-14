@@ -1239,13 +1239,37 @@ pub mod win {
                     }
                     if let Some(r) = &renderer {
                         // Any failure (e.g. D2DERR_RECREATE_TARGET after a
-                        // display change) drops the renderer; it is rebuilt
-                        // on the next tick.
+                        // display change) drops the renderer. This previously
+                        // just `continue`d silently and waited for the next
+                        // tick to rebuild it -- but a tick only fires its
+                        // render step when something is dirty/animating
+                        // (see the empty-snapshot and !command_dirty &&
+                        // !blink_changed && !still_animating skips above), so
+                        // a renderer that fails while idle could stay broken
+                        // indefinitely with zero visible symptom and zero log
+                        // line: upstream upsert/say commands still ack
+                        // successfully (that only proves the state map
+                        // updated, not that a frame was painted). Log it and
+                        // rebuild immediately, in the same tick, instead of
+                        // hoping a future tick notices.
                         if r.render(dib.hdc, w, h, &snapshot, now).is_err() {
-                            renderer = None;
-                            continue;
+                            eprintln!("[cursor_overlay] render failed; rebuilding Direct2D target");
+                            renderer = Renderer::new().ok();
+                            match &renderer {
+                                Some(r) if r.render(dib.hdc, w, h, &snapshot, now).is_ok() => {}
+                                Some(_) => {
+                                    eprintln!("[cursor_overlay] render failed again immediately after rebuild");
+                                    renderer = None;
+                                    continue;
+                                }
+                                None => {
+                                    eprintln!("[cursor_overlay] failed to recreate Direct2D renderer");
+                                    continue;
+                                }
+                            }
                         }
                     } else {
+                        eprintln!("[cursor_overlay] no renderer available for this tick");
                         continue;
                     }
 
