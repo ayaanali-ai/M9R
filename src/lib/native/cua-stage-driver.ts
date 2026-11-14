@@ -1900,8 +1900,18 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
 
     const readNativeElements = async () => {
       const timing = timingContext.getStore();
-      const structure = await timed("accessibility-read", () => manager.windowStructure(pid, windowId.toString(), { maxElements: 4096, maxDepth: 64 }),
-        { detail: `scope=window;point=${timing?.afterDispatch ? "post-dispatch" : "pre-dispatch"}` });
+      // Item #21 (live, 2026-11-13): every action pays for a full UIA tree read
+      // twice -- once pre-dispatch to resolve the click/type target, once
+      // post-dispatch to observe the result -- at ~1.4s average each, the
+      // single biggest contributor to per-action latency (avg 7.16s/action
+      // across 851 real actions). The pre-dispatch read must stay full
+      // fidelity: it is what target resolution and the money-gate actually
+      // reconcile against. The post-dispatch read only needs to show the
+      // agent what changed, not re-resolve anything -- trimmed here instead.
+      const afterDispatch = timing?.afterDispatch === true;
+      const structure = await timed("accessibility-read", () => manager.windowStructure(pid, windowId.toString(),
+        afterDispatch ? { maxElements: 2048, maxDepth: 40 } : { maxElements: 4096, maxDepth: 64 }),
+        { detail: `scope=window;point=${afterDispatch ? "post-dispatch" : "pre-dispatch"}` });
       const indexByPath = new Map<string, bigint>();
       structure.elements.forEach((element, index) => indexByPath.set(JSON.stringify(element.path), BigInt(index)));
       const elements = structure.elements.map((element, index) => {

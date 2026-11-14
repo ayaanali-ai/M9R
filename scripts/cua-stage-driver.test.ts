@@ -960,6 +960,25 @@ test("native action timings separate observation, targeting, dispatch, and the r
   await driver.shutdown();
 }));
 
+test("a click's post-dispatch UIA read is trimmed to cut per-action latency", async () => withRoot(async (root) => {
+  // Item #21 (live, 2026-11-13): 1731 real accessibility-read events across
+  // 851 real actions (~1.4s average each) -- the single biggest contributor
+  // to the 7.16s/action average. A raw-point click's only UIA tree read is
+  // this post-dispatch one (its pre-dispatch step only needs window
+  // geometry, never the element tree -- see the timings test above). It
+  // never re-resolves a target, so it can be trimmed without weakening the
+  // money-gate/target-resolution reads elsewhere that must stay full
+  // fidelity.
+  await registerStage(root);
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [] }) as never });
+  await driver.click("stage", 42, 24);
+  const structureCalls = nativeFixture(root).calls.filter((call) => call.op === "inspectWindowStructure");
+  assert.equal(structureCalls.length, 1, "a raw-point click's only UIA read is its post-dispatch observation");
+  assert.deepEqual([structureCalls[0]!.maxElements, structureCalls[0]!.maxDepth], [2048, 40],
+    "the post-dispatch read is trimmed from the old 4096/64 -- it only shows the agent what changed, never re-resolves a target");
+  await driver.shutdown();
+}));
+
 test("moves the M9R cursor to the exact screen point without starting a CUA cursor session", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
