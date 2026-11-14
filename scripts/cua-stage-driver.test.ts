@@ -1915,6 +1915,38 @@ test("native input dispatch uses exact HWND routes instead of Cua action calls",
   assert.equal(calls.some((call) => ["click", "typeText", "scroll"].includes(call.method)), false);
 }));
 
+test("typeText re-clicks the last clicked point for real before SendInput, even when the click found no UIA field", async () => withRoot(async (root) => {
+  // Regression for Paint's Text tool (T324): a coordinate click that lands on
+  // something UIA doesn't expose as a known text-control role (a raw canvas,
+  // or a transient text-entry overlay) used to leave no remembered target at
+  // all, so the keyboard-focus-establishing step before typing was skipped --
+  // the later SendInput typed into whatever already had OS focus, not
+  // necessarily the just-clicked spot. The fix remembers the plain clicked
+  // point regardless of role and re-clicks it for real immediately before
+  // the foreground keystroke dispatch.
+  await registerStage(root);
+  const nativeCalls: Record<string, unknown>[] = [];
+  const base = stageDependencies(root);
+  const calls: Array<{ method: string; value?: unknown }> = [];
+  const driver = createCuaStageDriver({ stage: { ...base, invokeNative: async (request) => {
+    if (["bringToForeground", "sendClick", "postClickToWindow", "sendText"].includes(String(request.op))) nativeCalls.push(request);
+    return base.invokeNative!(request);
+  } }, loadSdk: async () => makeSdk({ testRoot: root, calls, state: {
+    pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 0, y: 0, width: 200, height: 100 }, images: [{ mimeType: "image/png", dataBase64: imageData }],
+  } }) as never });
+  const identity = { handle: "codex", sessionId: "paint-text-tool" };
+  await driver.click("stage", 42, 24, identity);
+  await driver.typeText("stage", "hello", identity);
+  const dispatched = nativeCalls.filter((call) => ["sendClick", "postClickToWindow", "sendText"].includes(String(call.op)));
+  assert.deepEqual(dispatched.map((call) => call.op), ["postClickToWindow", "sendClick", "sendText"],
+    "typeText re-clicks the remembered point for real before sending keystrokes");
+  const refocus = dispatched.find((call) => call.op === "sendClick");
+  assert.equal(refocus?.pid, 4321);
+  assert.equal(refocus?.windowId, windowId);
+  await driver.shutdown();
+}));
+
 test("desktop coordinate clicks use UIA ElementFromPoint for overlapping controls, not the smallest tree rectangle", async () => withRoot(async (root) => {
   const identity = { handle: "codex", sessionId: "desktop-session" };
   await registerOwnerPreview(root, identity);

@@ -977,11 +977,12 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
    * separate Windows virtual desktop.
    */
   function nativeStageInput(pid: number, windowId: string | bigint,
-    send: () => Promise<void>) {
+    send: () => Promise<void>, refocus?: () => Promise<void>) {
     const target = windowId.toString();
     return {
       bringToFront: () => manager.bringToForeground(pid, target),
       send: () => timedInputDispatch("native", send),
+      ...(refocus ? { refocus: () => timedInputDispatch("native-refocus", refocus) } : {}),
     };
   }
 
@@ -1440,7 +1441,7 @@ function backgroundRefusalMessage(value: unknown): string {
 async function driverInputAction(name: string, args: Record<string, unknown>, fallback: string,
   options: { preferForeground?: boolean; signal?: AbortSignal; deliveryMode?: "background" | "owner-preview"; allowForegroundEscalation?: boolean;
     nativeHeadless?: { route: string; send: () => Promise<{ route: string; target: string; dispatched: true }> };
-    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void> } } = {}) {
+    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void>; refocus?: () => Promise<void> } } = {}) {
   assertNotAbortedBeforeInput(options.signal);
   // Omitted mode follows the owner-visible stage contract. Background is an
   // explicit request and may only use a semantic caller path that does not
@@ -1493,6 +1494,25 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         // Sample and restore the owner pointer only if the target-message route
         // proved unavailable and we are about to use global SendInput.
         saved = await ownerPointer.get().catch(() => undefined);
+        // bringToFront only activates the top-level HWND; it does not establish
+        // *where inside* that window keyboard focus lands. For a window hosting a
+        // modern XAML/WinUI island (e.g. the Store Paint app), that distinction
+        // matters: the posted (PostMessageW) click that placed the caret earlier
+        // dispatches through the window's message queue, not the real hardware
+        // input pipeline WinUI's own pointer/focus routing listens to, so it can
+        // leave logical focus wherever it already was (e.g. a ribbon button)
+        // instead of the just-placed text field. Confirmed live (T324, Paint
+        // Text tool): both text entries used this exact foreground route with
+        // identical PostMessageW clicks beforehand, but only the first -- which
+        // happened to coincide with the window's first real activation -- landed
+        // in the text field; the second typed into whatever already had focus
+        // and the text never appeared. A real SendInput click at the remembered
+        // field point, right before SendInput keystrokes, re-establishes focus
+        // through the same input pipeline WinUI itself relies on.
+        if (options.nativeForeground.refocus) {
+          try { await options.nativeForeground.refocus(); }
+          catch { /* best-effort: typing still proceeds against whatever currently has focus */ }
+        }
         if (process.env.M9R_DEBUG_CHILD_EDIT_LOOKUP) {
           const foreground = await manager.currentForegroundWindow().catch((error) => `<error: ${error instanceof Error ? error.message : error}>`);
           console.error(`[deliverForeground] about to SendInput targetPid=${targetPid} targetWindowId=${targetWindowId} currentForeground=${JSON.stringify(foreground)}`);
@@ -1572,7 +1592,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     deliveryMode?: "background" | "owner-preview";
     allowForegroundEscalation?: boolean;
     delayMs?: number;
-    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void> };
+    nativeForeground?: { bringToFront: () => Promise<void>; send: () => Promise<void>; refocus?: () => Promise<void> };
     signal?: AbortSignal;
   }): Promise<CuaStageActionOutcome> {
     const windowId = input.windowId.toString();
@@ -2392,11 +2412,26 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // that HWND so a subsequent key/type action can independently revalidate
       // it and acquire the normal foreground lease. Never infer that the app
       // changed state from this bookkeeping.
-      const editable = point.element?.actions?.includes("set_value")
-        && /^(?:Document|Edit|TextField|TextArea|ComboBox)$/i.test(point.element.role ?? "");
-      rememberDesktopInputTarget(name, identity, editable ? { ...point.target, field: {
+      //
+      // This used to only attach `.field` when the clicked element's role matched
+      // a narrow allowlist (Document/Edit/TextField/TextArea/ComboBox with
+      // set_value). That gate meant the refocus-before-type step in typeText()/
+      // pressKey()/hotkey() (which only fires when `.field` is set) silently did
+      // nothing whenever a click landed on something UIA didn't classify that way
+      // -- confirmed live via Paint's Text tool (T324): the click that placed a
+      // *new* text box on Paint's raw canvas wasn't recognized as one of those
+      // roles (no stable UIA element exists for a transient canvas text-entry
+      // overlay), so no `.field` was stored, the refocus click before typing was
+      // skipped, and the subsequent raw-foreground SendInput typed into whatever
+      // already had OS focus instead of the just-clicked spot -- the text never
+      // appeared. `.field` is documented as "an exact accessibility field [that]
+      // does not depend on system keyboard focus", not as "a field we're sure is
+      // a text input" -- always remember the click's exact point so the refocus
+      // step runs for every click, not just the ones UIA happens to label a
+      // known text-control role.
+      rememberDesktopInputTarget(name, identity, { ...point.target, field: {
         ...point.screenPoint, label: point.element?.label, role: point.element?.role,
-      } } : point.target);
+      } });
       return outcome;
     });
     invalidateDesktopCaptures();
@@ -2703,7 +2738,6 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const before: CuaStageWindowFrame = { dataUrl: "", width: rect.width, height: rect.height, windowBounds: rect };
       if (!validPoint(x, y, before)) throw new DesktopInputNotDispatchedError("Click coordinates must fall inside the current stage window snapshot.");
       if (cursorIdentity) await moveAndVerifyCursor({ session, pid, windowId }, x, y, before);
-      if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
       // A coordinate click means the observed point, not the smallest
       // accessibility rectangle that overlaps it. Overlapping UIA siblings
       // (autocomplete popups, menus, embedded browser views) can make a tree
@@ -2761,10 +2795,19 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
             });
           }),
       });
-      // A coordinate click has no stable semantic field identity. Do not infer
-      // one from an overlapping UIA rectangle: keyboard delivery follows the
-      // OS focus established by the click, and ref-based field actions retain
-      // their exact identity through clickElement/replaceElement.
+      // A coordinate click has no stable semantic field identity -- never infer
+      // one from an overlapping UIA rectangle, and ref-based field actions keep
+      // their exact identity through clickElement/replaceElement regardless.
+      // But the plain screen point this click just landed on IS worth keeping:
+      // "keyboard delivery follows the OS focus established by the click" does
+      // not hold for a window hosting a modern XAML/WinUI island (confirmed
+      // live, T324, Paint's Text tool) -- the posted click that places a new
+      // text field there doesn't reliably move focus through WinUI's own
+      // pointer/focus routing the way real hardware input does, so a later
+      // typeText() for the SAME click can silently land wherever focus already
+      // was. Remembering the point (not a semantic field/role) lets typeText()
+      // re-click it for real immediately before sending keystrokes.
+      if (cursorIdentity) rememberDesktopInputTarget(name, cursorIdentity, { pid, windowId, field: { x: targetScreenPoint.x, y: targetScreenPoint.y } });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
   }
@@ -3459,14 +3502,20 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const selected = cursorIdentity
         ? fieldStillInThisWindow(desktopInputTargets.get(desktopInputKey(name, cursorIdentity)), pid, windowId)
         : undefined;
+      let refocusScreenPoint: { x: number; y: number } | undefined;
       if (cursorIdentity && selected?.field) {
         const point = desktopPointInWindow(selected.field, before);
         await moveAndVerifyCursor({ session, pid, windowId }, point.x, point.y, before);
+        // Re-derive the screen point from the reprojected local point (not
+        // selected.field directly) so a window that moved between the click
+        // and this type action still gets refocused at the right spot.
+        refocusScreenPoint = await localToScreenPoint(pid, windowId, point.x, point.y, before.width, before.height, before.windowBounds);
       }
       const outcome = await deliverTextToExactWindow({ session, pid, windowId,
         text, selected, allowForegroundEscalation: options.allowForegroundEscalation,
         delayMs, preferForeground: options.confirmFocusForeground, deliveryMode: options.deliveryMode,
-        nativeForeground: nativeStageInput(pid, windowId, () => manager.sendText(pid, windowId.toString(), text)),
+        nativeForeground: nativeStageInput(pid, windowId, () => manager.sendText(pid, windowId.toString(), text),
+          refocusScreenPoint ? () => manager.sendClick(pid, windowId.toString(), refocusScreenPoint!.x, refocusScreenPoint!.y, {}) : undefined),
         signal: options.signal });
       return { capture: stageCapture(await captureWindow(), now), outcome };
     }, cursorIdentity);
