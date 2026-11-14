@@ -183,16 +183,28 @@ export function createForegroundInputLease(options: ForegroundInputLeaseOptions 
           item.reject(cancellationReason(item.signal));
           continue;
         }
+        if (process.env.M9R_DEBUG_FOREGROUND_LEASE) {
+          console.error(`[foreground-lease] acquiring owner=${item.owner} at=${new Date(now()).toISOString()} queueDepthAfter=${pending.length}`);
+        }
         let releaseSharedLease: (() => void) | undefined;
         try {
           releaseSharedLease = await acquireSharedLease(options.lockPath, item.owner, item.signal, pollMs, staleMs, now);
         } catch (error) {
+          if (process.env.M9R_DEBUG_FOREGROUND_LEASE) {
+            console.error(`[foreground-lease] acquire FAILED owner=${item.owner} error=${error instanceof Error ? error.message : error}`);
+          }
           item.reject(new ForegroundInputLeaseError("The foreground input lease could not be acquired; no input was sent.", { cause: error }));
           continue;
+        }
+        if (process.env.M9R_DEBUG_FOREGROUND_LEASE) {
+          console.error(`[foreground-lease] acquired owner=${item.owner} at=${new Date(now()).toISOString()}; running operation`);
         }
         try { item.resolve(await item.operation()); }
         catch (error) { item.reject(error); }
         finally {
+          if (process.env.M9R_DEBUG_FOREGROUND_LEASE) {
+            console.error(`[foreground-lease] releasing owner=${item.owner} at=${new Date(now()).toISOString()}`);
+          }
           // Release does synchronous filesystem work and can throw (sharing
           // violation, permission error). This loop runs detached from any
           // caller via pump()'s `void drain()`, so an uncaught throw here
@@ -234,6 +246,9 @@ export function createForegroundInputLease(options: ForegroundInputLeaseOptions 
         // Keep the owner on the queued record for local debugger inspection
         // without exposing it in provider-facing errors or telemetry.
         pending.push(item);
+        if (process.env.M9R_DEBUG_FOREGROUND_LEASE) {
+          console.error(`[foreground-lease] queued owner=${owner} at=${new Date(now()).toISOString()} queueDepth=${pending.length}`);
+        }
         pump();
       });
     },
