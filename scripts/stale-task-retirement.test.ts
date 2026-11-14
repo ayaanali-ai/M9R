@@ -64,6 +64,38 @@ test("a task already paused, retryable, failed, or canceled when it ages out kee
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("retiring a task drops its raw stageTiming detail but keeps the aggregate summary", () => {
+  // stageTiming is live diagnostic detail for a task still in flight; once
+  // retired it never serves that purpose again, but nothing previously
+  // stopped it from being written to disk forever. Confirmed live on
+  // 2026-11-13: it alone accounted for ~59% of a 5.9 MB state.json, and
+  // every write to this store pays for the whole file's size -- the direct
+  // cause of that night's multi-minute lock-contention failures.
+  const fixture = join(process.cwd(), ".workcache", "native-test-fixtures");
+  mkdirSync(fixture, { recursive: true });
+  const root = mkdtempSync(join(fixture, "m9r-retire-stagetiming-"));
+  let clock = new Date("2026-10-01T12:00:00Z");
+  try {
+    const store = createLocalStore(root, { now: () => clock });
+    const { task } = store.addTask({ from: "you", to: "codex", goal: "draw a shape", origin: "human_typed", idempotencyKey: "retire-stagetiming" });
+    store.setDelivery(task.id, { state: "deferred" });
+    const at = clock.toISOString();
+    store.recordStageTiming(task.id, { phase: "action", startedAt: at, endedAt: at, durationMs: 5, status: "error", detail: "a real action error" });
+    store.flushStageTiming();
+    const beforeRetirement = store.getTask(task.id)!;
+    assert.ok(beforeRetirement.stageTiming && beforeRetirement.stageTiming.length > 0, "the fixture must actually have raw stageTiming to prove it gets dropped");
+    const summaryBefore = beforeRetirement.stageTimingSummary;
+    assert.ok(summaryBefore?.action?.errorCount === 1, "the aggregate summary must already hold the same evidence the raw array holds");
+
+    clock = new Date(clock.getTime() + 120_000);
+    assert.equal(store.retireStaleTasks(60_000), 1);
+
+    const retired = store.getTask(task.id)!;
+    assert.deepEqual(retired.stageTiming, [], "raw per-event detail is dropped on retirement");
+    assert.deepEqual(retired.stageTimingSummary, summaryBefore, "the aggregate summary survives retirement unchanged");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("invalid and future task timestamps never enter the generic inbox", () => {
   const base = { id: "T1", seq: 1, from: "you", to: "codex", goal: "do work", origin: "human_typed", approval: "not_needed" };
   for (const createdAt of ["invalid", "2030-01-01T00:00:00Z"]) {

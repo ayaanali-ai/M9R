@@ -2494,6 +2494,18 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
             recordTaskReceipt(task, { state: "uncertain", at: atIso, source: "system",
               error: "This task aged out of live delivery before any result was ever recorded for it." });
           }
+          // The raw per-event stageTiming array is live diagnostic detail for a
+          // task still in flight; once retired it never serves that purpose
+          // again, but it never stopped being written to disk -- confirmed
+          // live on 2026-11-13: it alone accounted for ~59% of a 5.9 MB
+          // state.json, and every write to this store does a full
+          // clone+serialize+atomic-rewrite of the whole file, so an
+          // ever-growing file means an ever-growing lock-hold time on every
+          // single write (the direct cause of that night's multi-minute
+          // "store is busy" failures). stageTimingSummary already preserves
+          // the aggregate (count/duration/error totals per phase) forever;
+          // only the raw per-event detail is dropped here.
+          if (task.stageTiming && task.stageTiming.length > 0) task.stageTiming = [];
           task.retiredAt = atIso;
           task.dismissedAt ??= task.retiredAt;
           pushEvent(s, { kind: "task.retired", taskId: task.id, handle: task.to, text: task.id + " was retired from live delivery; its history is preserved" });

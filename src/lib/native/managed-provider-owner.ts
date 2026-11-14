@@ -976,6 +976,20 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
   // task-write call site and is tracked separately.
   const bridgeTimer = setInterval(() => { void bridgeOnce().catch(() => undefined); }, 150);
   bridgeTimer.unref?.();
+  // retireStaleTasks/reconcileStaleDeliveries previously only ran once, at
+  // owner.start() -- fine for the claims-left-behind-by-a-dead-broker case
+  // that was their original purpose, but it meant every task created during
+  // a long-running session (this one included) stayed un-retired, and so
+  // un-trimmed (see retireStaleTasks' own stageTiming cleanup above), until
+  // the next full broker restart. Confirmed live on 2026-11-13: state.json
+  // had grown to 5.9 MB over one long session with zero periodic retirement,
+  // and every write to the store pays for the whole file's size. A slow,
+  // infrequent interval is enough -- this is bounded cleanup, not anything
+  // latency-sensitive.
+  const retirementTimer = setInterval(() => {
+    try { deps.store.retireStaleTasks?.(); deps.store.reconcileStaleDeliveries?.(); } catch { /* best-effort; next tick tries again */ }
+  }, 5 * 60_000);
+  retirementTimer.unref?.();
   let shutdownPromise: Promise<void> | undefined;
 
   function capabilitySnapshot(handle?: string): readonly ManagedProviderCapabilities[] {
@@ -1136,6 +1150,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       closed = true;
       halted.value = true;
       clearInterval(bridgeTimer);
+      clearInterval(retirementTimer);
       shutdownPromise = (async () => {
         // Shutdown is also a task-wide stop boundary. Fence and cancel the
         // durable task before draining provider transports so no late event
