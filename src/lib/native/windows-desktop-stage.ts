@@ -494,7 +494,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   };
   if (!deps.invokeNative && !deps.nativeHostFactory) reapOrphanStageChildren(root);
   const hostFactory = deps.nativeHostFactory ?? (() => createPersistentWindowsStageHost(
-    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), trackStageChildPid));
+    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), trackStageChildPid, deps.env));
   const persistentHost = deps.invokeNative ? undefined : hostFactory();
   const streamHosts = new Map<string, ReturnType<typeof hostFactory>>();
   const foregroundMonitorLeases = new Map<string, Set<string>>();
@@ -1813,7 +1813,7 @@ export function recordStageChildPids(root: string, pids: readonly number[]): voi
   catch { /* best-effort: worst case a future manager instance finds a stale pid to skip */ }
 }
 
-function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: number | undefined, alive: boolean) => void) {
+function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: number | undefined, alive: boolean) => void, hostEnv?: Record<string, string | undefined>) {
   let child: ChildProcessWithoutNullStreams | undefined;
   // The pid of a helper we have told to die but have not yet confirmed exited. `failAll()` drops `child`
   // to `undefined` as soon as a kill is issued, not when the OS confirms the process is actually gone
@@ -2001,12 +2001,14 @@ function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: n
       }
       terminatingPid = undefined;
     }
-    // deps.env already gates the JS-side assertOwner() check above (isAgentContext(deps.env ?? process.env));
-    // without also passing it here, the spawned helper always inherited the real process.env regardless of
-    // deps.env, so the native host's own agent-context guard (main.rs has_agent_context) saw this process's
-    // real CLAUDECODE/CODEX_*/OPENCODE* markers even when a caller explicitly overrode deps.env to avoid that.
+    // hostEnv already gates the JS-side assertOwner() check in the enclosing manager (isAgentContext(deps.env
+    // ?? process.env)); without also passing it here, the spawned helper always inherited the real process.env
+    // regardless of deps.env, so the native host's own agent-context guard (main.rs has_agent_context) saw this
+    // process's real CLAUDECODE/CODEX_*/OPENCODE* markers even when a caller explicitly overrode deps.env to
+    // avoid that. This function has no `deps` in scope -- it is a standalone top-level factory, not a closure
+    // inside createWindowsDesktopStageManager -- so the override must be threaded in as its own parameter.
     const spawned = spawn(executable, ["--desktop-stage-server"],
-      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, ...(deps.env ?? {}) } });
+      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, ...(hostEnv ?? {}) } });
     child = spawned;
     trackPid?.(spawned.pid, true);
     spawned.stdout.on("data", (chunk: Buffer | string) => {
