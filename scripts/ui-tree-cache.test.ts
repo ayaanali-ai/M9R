@@ -48,6 +48,7 @@ function fixtureInvokeNative(elementsRef: { current: ReturnType<typeof oneElemen
       };
     }
     if (request.op === "sendClick") return { ok: true };
+    if (request.op === "setWindowFrame") return { ok: true, rect: { x: Number(request.x), y: Number(request.y), width: Number(request.width), height: Number(request.height) } };
     return { ok: false, error: `unhandled op ${request.op}` };
   };
 }
@@ -118,5 +119,23 @@ test("a click on the same window invalidates its cache, so the next trusted read
   const second = await manager.windowStructure(4321, "0x99");
 
   assert.equal(calls.filter((op) => op === "inspectWindowStructure").length, 2, "the click must invalidate the cache entry so the post-click read is a real fetch");
+  assert.equal(second.elements[0]?.label, "After");
+}));
+
+test("resizing a window invalidates its cache, so the next trusted read reflects the new layout", () => withRoot(async (root) => {
+  // setWindowFrame changes every cached element's rect exactly like a click changes content --
+  // it was the one UI-mutating dispatch path that never called invalidateWindowStructureCache,
+  // harmless under the shadow-mode default (every call already does a real fetch) but a real
+  // stale-rect bug the moment M9R_TRUST_UI_TREE_CACHE=1 is turned on.
+  const calls: string[] = [];
+  const elementsRef = { current: [oneElement({ label: "Before" })] };
+  const manager = createWindowsDesktopStageManager({ platform: "win32", root, terminal: true, env: { M9R_TRUST_UI_TREE_CACHE: "1" }, invokeNative: fixtureInvokeNative(elementsRef, calls) });
+
+  await manager.windowStructure(4321, "0x99");
+  await manager.setWindowFrame(4321, "0x99", { x: 0, y: 0, width: 800, height: 600 });
+  elementsRef.current = [oneElement({ label: "After" })];
+  const second = await manager.windowStructure(4321, "0x99");
+
+  assert.equal(calls.filter((op) => op === "inspectWindowStructure").length, 2, "the resize must invalidate the cache entry so the post-resize read is a real fetch");
   assert.equal(second.elements[0]?.label, "After");
 }));

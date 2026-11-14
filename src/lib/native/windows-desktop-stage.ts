@@ -1632,6 +1632,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!inspected.anchor) throw new Error("No exact selected window.");
     const result = await invokeNative({ op: "setWindowState", ...inspected.anchor, state });
     if (!result.ok || result.state !== state) throw new Error(result.error ?? "Window state was not verified.");
+    // Minimizing/maximizing/restoring changes every cached element's bounds (and,
+    // for minimize, its visibility) exactly like a resize does -- same reasoning
+    // as setWindowFrame below, same missed invalidation.
+    invalidateWindowStructureCache(inspected.anchor.pid, inspected.anchor.windowId);
     return state;
   }
 
@@ -1648,6 +1652,12 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!result.ok || !rect || ![rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === "number" && Number.isFinite(n))) {
       throw new Error(result.error ?? "Windows did not confirm the requested window frame.");
     }
+    // A resize/move changes every cached element's rect. This was the one
+    // dispatch path that mutates the window's UI and never invalidated the
+    // cache -- harmless under the shadow-mode default (every call still does
+    // a real fetch regardless), but a real stale-rect bug the moment
+    // M9R_TRUST_UI_TREE_CACHE=1 is ever flipped on.
+    invalidateWindowStructureCache(pid, windowId);
     return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
   }
 
