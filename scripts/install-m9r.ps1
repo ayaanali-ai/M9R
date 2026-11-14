@@ -549,6 +549,30 @@ function Stop-InstalledM9rPill {
     }
 }
 
+function Assert-NoStaleM9rProcesses {
+    # Stop-InstalledM9rPill stops the pill and, per its own comment, "the engine child it
+    # owns" -- one lineage. Invoke-ManagedBrokerUpdate 'stop' stops the Web Broker -- a second
+    # lineage. Anything still named m9r-engine.exe or m9r-native-input-host.exe and running
+    # from this install's own bin path after both of those have already run is neither: the
+    # only other way either binary gets launched is a coding tool's own MCP bridge connecting
+    # to M9R independently (confirmed live, repeatedly: a Claude Code/Codex session that has
+    # m9r-engine configured as an MCP server starts its own long-lived instance, outside the
+    # pill's and the broker's lifecycle entirely, and neither of the stops above can see or
+    # touch it). NTFS lets this installer rename the file out from under a process that still
+    # has it open, so the copy below would otherwise "succeed" while that stale process keeps
+    # running the OLD binary in memory -- a real fix that was genuinely installed, silently not
+    # actually running. Hard-refuse instead of risking a Force-kill against a process some other
+    # tool may be mid-conversation with.
+    $binDir = [IO.Path]::GetFullPath((Join-Path (Get-M9rHome) 'bin'))
+    $stale = @(Get-Process -Name 'm9r-engine', 'm9r-native-input-host' -ErrorAction SilentlyContinue | Where-Object {
+        try { ([IO.Path]::GetFullPath($_.Path)).StartsWith($binDir, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+    })
+    if ($stale.Count -gt 0) {
+        $names = ($stale | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+        throw "M9R found still-running process(es) this installer does not own: $names. These are almost always a coding tool's own MCP bridge to M9R (e.g. an open Claude Code or Codex session with m9r-engine configured as an MCP server) -- close that session, or otherwise stop these processes yourself, then retry. No installed files were replaced."
+    }
+}
+
 function Invoke-ManagedBrokerUpdate([string]$EnginePath, [ValidateSet('stop', 'start')][string]$Phase) {
     if (-not (Test-Path -LiteralPath $EnginePath -PathType Leaf)) {
         throw "The M9R engine required to manage the broker update is missing: $EnginePath"
@@ -764,6 +788,7 @@ try {
     $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
     $brokerNeedsResume = $brokerStop.managedTask
     Stop-InstalledM9rPill
+    Assert-NoStaleM9rProcesses
     # Native setup registers the owned broker task; this installer starts it
     # only after the new broker image and its ownership record are installed.
     $previousBrokerDefer = $env:M9R_DEFER_BROKER_START
