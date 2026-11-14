@@ -1685,6 +1685,19 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           } catch (error) { console.error(`[deliverTextToExactWindow] listChildWindowClasses also failed: ${error instanceof Error ? error.message : error}`); }
         }
       }
+      // Background mode already accepted the risk below (posting to the
+      // top-level frame itself on the chance it IS an Edit control) for its
+      // existing known-good apps. Outside background mode, that same
+      // "untouched, hope it's an Edit control" case is no longer safe to
+      // trust silently: a modern XAML/UWP app (Sticky Notes, confirmed live)
+      // has no Edit-class window anywhere in its tree, yet PostMessage still
+      // succeeds and `sendTextToWindow` reports "acknowledged" even though
+      // the text never reaches the real text surface -- a false positive
+      // that used to be impossible here simply because this branch never ran
+      // outside background mode. Require an actual found child before
+      // trusting this route; with none, skip straight to the exact same
+      // foreground fallback this delivery mode already used before.
+      if (target !== windowId || input.deliveryMode === "background") {
       try {
         const receipt = await manager.sendTextToWindow(input.pid, target, input.text);
         const targetMismatch = receipt.targetMatches === false;
@@ -1711,6 +1724,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         const backgroundLocked = input.deliveryMode === "background" && !input.allowForegroundEscalation;
         if (!(error instanceof DesktopInputNotDispatchedError)
           || error.code !== "native-dispatch-unavailable" || backgroundLocked) throw error;
+      }
       }
     }
 
