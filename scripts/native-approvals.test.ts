@@ -115,10 +115,15 @@ test("a standing rule lets one agent hand work to another for a while, but prote
   const send = (text: string) => runNativeCommand("send", ["@codex", text, "--from", "claude"], agent);
   await send("Review lease.ts");
   assert.equal(s.store.getTask("T1")?.approval, "approved", "covered by the rule");
-  assert.equal(s.calls.length, 1, "an approved agent task is pushed");
+  // Delivery is pump-driven, not a synchronous push from `send` itself (see
+  // task-delivery-pump.ts): an approved, queueable task is left "deferred"
+  // for the pump's own tick to pick up, which is why nothing reaches
+  // s.calls here even though the task is fully approved.
+  assert.equal(s.store.getTask("T1")?.delivery?.state, "deferred", "an approved task is queued for the delivery pump");
+  assert.equal(s.calls.length, 0, "send() itself never pushes directly; only the pump's adapter call does");
   await send("Deploy to production");
   assert.equal(s.store.getTask("T2")?.approval, "pending", "protected: the rule does not cover it");
-  assert.equal(s.calls.length, 1);
+  assert.equal(s.store.getTask("T2")?.delivery, undefined, "a pending task is never queued for delivery");
   assert.equal(await s.run("revoke", ["R1"]), 0);
   assert.equal(await s.run("standing"), 0);
   await send("Review the parser");
@@ -139,7 +144,7 @@ test("pending approvals lapse after a day instead of waiting forever, and the se
   const store = createLocalStore(mkdtempSync(join(tmpdir(), "m9r-n5-clock-")), { now: () => clock });
   store.addTask({ from: "claude", to: "codex", goal: "Review lease.ts", origin: "agent_initiated", idempotencyKey: "a" });
   assert.equal(store.pendingApprovals().length, 1);
-  assert.match(renderSessionCard({ handle: "claude", others: [], pendingCount: 0, awaitingApproval: 1 }), /1 task\(s\) are waiting for the user's approval/);
+  assert.match(renderSessionCard({ handle: "claude", others: [], pendingCount: 0, awaitingApproval: 1 }), /awaiting owner approval; do not act until M9R delivers it as authorized/);
   assert.doesNotMatch(renderSessionCard({ handle: "claude", others: [], pendingCount: 0 }), /approval/);
   clock = new Date("2026-09-21T13:00:00Z");
   assert.equal(store.pendingApprovals().length, 0);
@@ -218,6 +223,12 @@ test("task-log exports only the selected task's retained evidence for the owner"
     cached: false,
     detail: "route=native",
   });
+  // recordStageTiming debounces non-terminal phases to disk (STAGE_TIMING_FLUSH_MS,
+  // added 2026-11-11 for write-volume reasons); this test predates that and reads
+  // through a brand-new store instance (the CLI's own, inside `s.run`), which only
+  // ever sees what's actually on disk. Flush first, exactly as recordStageTiming's
+  // own doc comment tells a synchronous caller like this to do.
+  s.store.flushStageTiming();
 
   assert.equal(await s.run("task-log", ["t1"]), 0);
   const report = JSON.parse(s.out[0] ?? "null") as {

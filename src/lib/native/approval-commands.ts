@@ -117,6 +117,11 @@ export function runTaskLog(io: ApprovalIo, storeRoot: string, rawId: string | un
   }
 
   const store = createLocalStore(storeRoot);
+  // recordStageTiming debounces most phases to disk (see its own doc comment);
+  // only "completion"/"stop" flush eagerly. Reading the snapshot straight
+  // away silently missed every other phase recorded moments earlier --
+  // exactly the evidence an owner reaches for task-log to see.
+  store.flushStageTiming();
   const snapshot = store.snapshot();
   const task = snapshot.tasks.find((candidate) => candidate.id === id);
   if (!task) {
