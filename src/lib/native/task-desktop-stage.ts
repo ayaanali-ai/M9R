@@ -627,7 +627,7 @@ export function createTaskDesktopStageService(input: {
     const key = cursorIdentityKey(target.identity);
     const priorCursor = activeAgentCursors.get(key);
     const primedAt = priorCursor && priorCursor.taskId === target.taskId ? priorCursor.primedAt : Date.now();
-    if (process.env.M9R_DEBUG_CURSOR_LIFECYCLE && priorCursor?.taskId !== target.taskId) {
+    if (priorCursor?.taskId !== target.taskId) {
       // One key per agent identity means every prime overwrites whatever taskId was
       // there before -- if that new taskId is an ephemeral/internal one that never
       // reaches a terminal state in the task store, the reaper (below) can never fire
@@ -635,6 +635,10 @@ export function createTaskDesktopStageService(input: {
       // the task the owner actually sees as "done" already finished. Confirmed live:
       // a Claude cursor stayed on screen long after its real task completed. Log every
       // handoff so a stuck marker's actual owning taskId is visible, not guessed.
+      // Unconditional (no env-var gate): a debug flag that isn't threaded through
+      // the real install path never actually gets set on a properly-installed
+      // broker, so the only honest way to get this evidence is to ship it baked
+      // into the build and go through the real build/tag/install flow once.
       console.error(`[cursor-lifecycle] prime key=${key} from-task=${priorCursor?.taskId ?? "(none)"} to-task=${target.taskId}`);
     }
     activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId, primedAt });
@@ -1787,9 +1791,7 @@ export function createTaskDesktopStageService(input: {
         // canceled) would otherwise hold its cursor indefinitely -- taskActive() alone never goes false
         // for it. Force the same cleanup once the cursor has clearly outlived any legitimate task.
         const expired = Date.now() - active.primedAt >= CURSOR_MAX_LIFETIME_MS;
-        if (process.env.M9R_DEBUG_CURSOR_LIFECYCLE) {
-          console.error(`[cursor-lifecycle] reap-check key=${key} task=${active.taskId} taskActive=${taskActive(active.taskId)} expired=${expired} ageMs=${Date.now() - active.primedAt}`);
-        }
+        console.error(`[cursor-lifecycle] reap-check key=${key} task=${active.taskId} taskActive=${taskActive(active.taskId)} expired=${expired} ageMs=${Date.now() - active.primedAt}`);
         if (!taskActive(active.taskId) || expired) {
           ownerWorkPolicy.revokeTask({ agent: active.identity.handle, provider: active.identity.handle,
             sessionId: active.identity.sessionId, taskId: active.taskId });
