@@ -7,6 +7,7 @@
  * point. Browser automation goes through the native desktop/UIA route
  * (nativeDesktopRoute) against the owner's own signed-in window.
  */
+import { createWriteStream } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
@@ -52,6 +53,26 @@ async function main(): Promise<void> {
   const runtimeBuildFingerprint = verifiedRuntimeBuildId;
   const managedEnvironment: Record<string, string | undefined> = { ...process.env };
   const root = defaultStoreRoot(homedir(), process.env);
+  // The broker is normally started by its own hidden Scheduled Task
+  // (conhost --headless), which has no stdout/stderr redirection of its
+  // own -- every console.log/console.error line, including this process's
+  // own uncaughtException/unhandledRejection handlers below and every
+  // diagnostic log anywhere in the broker's dependency tree, previously
+  // went nowhere durable and was unrecoverable after the fact (confirmed
+  // live: a manual ad-hoc relaunch was the only way anyone had ever
+  // actually captured this process's own output to a file). Tee both
+  // streams to a durable, append-only log here, independent of how this
+  // process was launched, so that is never true again.
+  try {
+    const logStream = createWriteStream(join(root, "broker.log"), { flags: "a" });
+    for (const stream of [process.stdout, process.stderr] as const) {
+      const originalWrite = stream.write.bind(stream);
+      stream.write = ((chunk: unknown, ...rest: unknown[]) => {
+        try { logStream.write(chunk as never); } catch { /* the console output itself is unaffected */ }
+        return (originalWrite as (...args: unknown[]) => boolean)(chunk, ...rest);
+      }) as typeof stream.write;
+    }
+  } catch { /* logging to a file is best-effort; the broker must still start without it */ }
   const colorStore = createLocalStore(root);
   const key = loadOrCreateBrokerKey(brokerKeyPath(root));
   const ownerId = process.env.M9R_OWNER_ID?.trim() || "local-machine";
