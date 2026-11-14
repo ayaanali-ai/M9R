@@ -1140,11 +1140,41 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   const desktopInputTargets = new Map<string, DesktopInputTarget>();
   // Keep the semantics from the observation that issued each raw UIA ref.
   // Native token prefixes rotate on every walk, including the money-gate read.
-  const observedElements = new Map<string, Map<string, CuaWindowElement>>();
+  //
+  // Each key used to hold only its single latest generation, replaced wholesale
+  // on every read -- including a window's own routine pre/post-dispatch reads,
+  // which run on every action, not just ones that call read_structure directly.
+  // That meant a ref handed to the agent from one observation could stop
+  // resolving the instant *any* later, unrelated read ran for the same window,
+  // even with no real UI change (confirmed live, T324: a click_element call
+  // using a ref from an earlier read failed instantly, with the control still
+  // present and unchanged). Retaining a short, bounded history of recent
+  // generations lets a ref be reconciled against one it actually belongs to,
+  // not just whichever read happened to run most recently.
+  const MAX_OBSERVATION_GENERATIONS = 4;
+  function pushObservationGeneration<V>(store: Map<string, Map<string, V>[]>, key: string, generation: Map<string, V>): void {
+    const history = store.get(key) ?? [];
+    history.push(generation);
+    while (history.length > MAX_OBSERVATION_GENERATIONS) history.shift();
+    store.set(key, history);
+  }
+  function findInObservationHistory<V>(store: Map<string, Map<string, V>[]>, key: string, token: string): V | undefined {
+    const history = store.get(key);
+    if (!history) return undefined;
+    for (let index = history.length - 1; index >= 0; index--) {
+      const found = history[index]!.get(token);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  function latestObservationGeneration<V>(store: Map<string, Map<string, V>[]>, key: string): Map<string, V> | undefined {
+    return store.get(key)?.at(-1);
+  }
+  const observedElements = new Map<string, Map<string, CuaWindowElement>[]>();
   // Native UIA refs belong to the native tree, never to Cua Driver's opaque
   // element-token namespace. Keep the exact observation identity locally so
   // the native dispatcher can re-resolve and validate the same control.
-  const nativeObservedElements = new Map<string, Map<string, NativeWindowStructureElement>>();
+  const nativeObservedElements = new Map<string, Map<string, NativeWindowStructureElement>[]>();
   const nativeObservedComplete = new Map<string, boolean>();
 
   function emitTiming(event: CuaStageTimingEvent): void {
@@ -1888,8 +1918,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         } as unknown as CuaWindowElement;
         return { native: element, mapped };
       });
-      observedElements.set(observationKey, new Map(elements.map(({ native, mapped }) => [native.ref, mapped])));
-      nativeObservedElements.set(observationKey, new Map(structure.elements.map((element) => [element.ref, element])));
+      pushObservationGeneration(observedElements, observationKey, new Map(elements.map(({ native, mapped }) => [native.ref, mapped])));
+      pushObservationGeneration(nativeObservedElements, observationKey, new Map(structure.elements.map((element) => [element.ref, element])));
       nativeObservedComplete.set(observationKey, structure.status === "complete" && !structure.truncated);
       while (observedElements.size > 64) observedElements.delete(observedElements.keys().next().value!);
       while (nativeObservedElements.size > 64) {
@@ -2021,7 +2051,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     }, { detail: `source=accessibility-tree;action=${action ?? "point"}` });
 
     const elementByToken = async (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => {
-      const observed = nativeObservedElements.get(observationKey)?.get(token);
+      const observed = findInObservationHistory(nativeObservedElements, observationKey, token);
       if (!observed) return undefined;
       const normalizedLabel = normalizeAccessibleLabel(observed.label) ?? "";
       if ((expected?.role !== undefined && observed.role !== expected.role)
@@ -2042,13 +2072,13 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
 
     const elementAt = async (x: number, y: number) => (await hitTarget(x, y))?.elementToken;
     const observedElementByToken = (token: string, expected?: { role?: string; label?: string }) => {
-      const observed = observedElements.get(observationKey)?.get(token);
+      const observed = findInObservationHistory(observedElements, observationKey, token);
       if (!observed || (expected?.role !== undefined && observed.role !== expected.role)
         || (expected?.label !== undefined && normalizeAccessibleLabel(observed.label) !== expected.label)) return undefined;
       return observed;
     };
     const observedNativeElementByToken = (token: string, expected?: { role?: string; label?: string }) => {
-      const observed = nativeObservedElements.get(observationKey)?.get(token);
+      const observed = findInObservationHistory(nativeObservedElements, observationKey, token);
       if (!observed || (expected?.role !== undefined && observed.role !== expected.role)
         || (expected?.label !== undefined && normalizeAccessibleLabel(observed.label) !== expected.label)) return undefined;
       return observed;
@@ -2092,7 +2122,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       captureFrame: captureNativeFrame, capture, readStructure, elementAt, elementAtPoint: hitTarget,
       observedElementByToken, observedNativeElementByToken,
       observedNativeElements: () => nativeObservedComplete.get(observationKey)
-        ? [...(nativeObservedElements.get(observationKey)?.values() ?? [])] : [],
+        ? [...(latestObservationGeneration(nativeObservedElements, observationKey)?.values() ?? [])] : [],
       elementByToken, captureTarget }));
   }
 

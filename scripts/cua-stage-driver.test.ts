@@ -65,6 +65,43 @@ test("native refs survive token-prefix rotation and revalidate changed control i
   await driver.shutdown();
 }));
 
+test("a ref survives a few intervening reads of the same window, not just the single latest one", async () => withRoot(async root => {
+  // Regression for a real click-target-resolution refusal (T324): refs are
+  // snapshot-local, and each window's observation cache used to hold only its
+  // single latest generation, replaced wholesale on every accessibility-read
+  // -- including the routine pre/post-dispatch reads every other action does
+  // on its own, not just an explicit read_structure call. A ref the agent is
+  // still holding from one capture would stop resolving the instant any
+  // later, unrelated read ran for that same window, even with the control
+  // completely unchanged -- confirmed live: a click_element call failed
+  // instantly, "no input was sent," with nothing in that task's record
+  // showing any real UI change. A short bounded history of recent
+  // generations lets the ref be reconciled against the generation it
+  // actually came from, instead of only ever the most recent one.
+  await registerStage(root);
+  const calls: Array<{method: string; value?: unknown}> = [];
+  const element = { elementIndex: BigInt(0), elementToken: "walk1:0", role: "Button", depth: 1, label: "Search", enabled: true,
+    actions: ["invoke"], frame: { x: 120, y: 70, w: 40, h: 20 } };
+  const state = { pid: 4321, windowId: BigInt(windowId), screenshotFrameValid: true, screenshotWidth: 200, screenshotHeight: 100,
+    windowBounds: { x: 100, y: 50, width: 400, height: 200 }, elements: [element], images: [{mimeType:"image/png", dataBase64:imageData}] };
+  const driver = createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({ testRoot: root,calls,state}) as never});
+  const snapshot = await driver.readStructure("stage");
+  const ref = snapshot.elements[0]!.ref;
+  // Two later, unrelated observations (as any other action's own pre/post-
+  // dispatch reads would trigger) each issue a brand new snapshot-local
+  // token for the exact same, unchanged control.
+  element.elementToken = "walk2:0";
+  await driver.readStructure("stage");
+  element.elementToken = "walk3:0";
+  await driver.readStructure("stage");
+  assert.equal((await driver.describeElementTarget("stage", ref, {}))?.label, "Search",
+    "the money gate still describes the same real control after two later, unrelated observations");
+  await driver.clickElement("stage", ref, undefined, { expectedRole: "Button", expectedLabel: "Search" });
+  assert.ok(nativeFixture(root).calls.some((call) => call.op === "invokeWindowElement"),
+    "the real click dispatch also still resolves the same ref");
+  await driver.shutdown();
+}));
+
 test("explicit background click uses the exact-window message route without the owner's physical pointer", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{method:string;value?:unknown}> = [];
