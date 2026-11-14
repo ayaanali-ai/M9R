@@ -683,6 +683,25 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
               }));
             });
           }
+        } else if (started) {
+          // Any item kind other than commandExecution/fileChange -- notably Codex's
+          // own item kind for calling an MCP server tool, which is exactly how M9R's
+          // desktop-dispatch tools (m9r_stage_action, m9r_computer_action, ...) are
+          // invoked -- fell through both branches above with no event at all. That
+          // silently dropped every "tool" event for a Codex turn whose actions are
+          // MCP tool calls rather than shell commands or file edits, which is why
+          // first-visible-action/inter-action-think never recorded for such a turn
+          // despite the dispatch itself succeeding. Emit a best-effort generic
+          // activity instead of discarding the item, regardless of its exact kind
+          // string, which this protocol does not document locally.
+          const name = typeof item.name === "string" && item.name.trim()
+            ? item.name
+            : typeof item.tool === "string" && item.tool.trim()
+              ? item.tool
+              : typeof item.title === "string" && item.title.trim()
+                ? item.title
+                : item.type;
+          session.queue?.push(this.activity(session, `${item.type}.started`, "started", text(name, 512)));
         }
         return;
       }
