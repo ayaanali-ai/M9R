@@ -35,6 +35,21 @@ guard on a live build/install run.
   content-aware dirty check of its own — see §3 below — with a short,
   deliberate exclusion list for retained local evidence; that list is not the
   same regex as 3A's, and both have been tripped and verified for real.)
+- **3B**, enforced in `scripts/build-candidate.mjs`, immediately after 3A and
+  before any compile step: runs `npx tsc --noEmit -p .` across the whole
+  project and hard-refuses the build if it does not pass clean. 3A only
+  proves the tree is clean and on trunk; it says nothing about whether the
+  source is actually valid. A real regression shipped past that gap on
+  2026-11-11: a fix referenced `deps` inside a function that does not close
+  over it (`createPersistentWindowsStageHost`, a standalone factory, not a
+  closure inside `createWindowsDesktopStageManager`), compiled fine under
+  the bundler (no cross-file type resolution there), and only surfaced
+  **after a real install**, live, as `Blocked: M9R could not launch Notepad
+  because the native desktop helper is unavailable (deps is not defined)`.
+  `tsc --noEmit` catches that class of error in seconds; nothing before this
+  guard ever ran it as part of the build. 3B runs first, before the ~10
+  minute from-source compile, so a typecheck failure fails fast instead of
+  burning a full build first.
 
 ## 2. The pill is always built from source (guard 4A)
 
@@ -114,6 +129,11 @@ Each guard was confirmed by deliberately tripping it, not just by reading the
 code:
 - 3A: ran `build-candidate.mjs` against a dirty tree (refused), then against
   a clean one (proceeded).
+- 3B: `npx tsc --noEmit -p .` confirmed clean on the current tree (the fix
+  for the 2026-11-11 `deps`-out-of-scope regression, see above). Tripping it
+  for real (a deliberately broken reference, full `build-candidate.mjs` run,
+  confirm the hard refusal, then revert) is still open — left for the next
+  full build/install pass rather than run here.
 - 4A: read the real build output and confirmed `overlay/src-tauri` was
   actually compiled, not copied.
 - 5B: ran `install-m9r.ps1 -AllowLocalCandidate` against an untagged commit's

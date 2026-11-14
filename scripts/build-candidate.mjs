@@ -38,6 +38,20 @@ if (!process.env.CI && resolve(root).toLowerCase() !== CANONICAL_ROOT.toLowerCas
   }
 }
 
+// Flow guard 3B: a project-wide typecheck, before any compile step. 3A only proves the tree is clean and on
+// trunk -- it says nothing about whether the source itself is valid. A real regression shipped past this gap
+// on 2026-11-14: a reference to a variable out of scope (`deps` used inside a function that does not close
+// over it) compiled fine under the bundler (no cross-file type resolution) and only surfaced live, after
+// install, as "Blocked: ... the native desktop helper is unavailable (deps is not defined)". `tsc --noEmit`
+// catches that class of error in seconds; nothing before this guard ever ran it as part of the build.
+{
+  const typecheck = spawnSync("npx", ["tsc", "--noEmit", "-p", "."], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (typecheck.error) throw new Error(`Could not run the project typecheck (flow guard 3B): ${typecheck.error.message}`);
+  if (typecheck.status !== 0) {
+    throw new Error(`Refusing to build: the project does not typecheck (flow guard 3B).\n${typecheck.stdout}${typecheck.stderr}`);
+  }
+}
+
 const engineDir = join(root, "engine");
 const candidatesRoot = resolve(engineDir, "candidates");
 const resumeIndex = process.argv.indexOf("--resume");
