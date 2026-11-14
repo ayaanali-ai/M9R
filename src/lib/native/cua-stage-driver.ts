@@ -1483,7 +1483,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   // reach this physical sender.
   const deliveryMode = options.deliveryMode ?? "owner-preview";
   const ownerPointer = deps.ownerPointer ?? { get: () => manager.getOwnerCursorPosition(), restore: (x: number, y: number) => manager.restoreOwnerCursorPosition(x, y) };
-  const deliverForeground = async (): Promise<CuaStageActionOutcome> => {
+  const deliverForeground = async (headlessAlreadyAttempted: boolean): Promise<CuaStageActionOutcome> => {
     const pid = args.pid;
     const windowId = args.window_id;
     if (!Number.isSafeInteger(pid) || (pid as number) < 1 || typeof windowId !== "number" || !Number.isFinite(windowId)
@@ -1513,7 +1513,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         );
       }
       assertNotAbortedBeforeInput(options.signal);
-      if (options.nativeHeadless) {
+      // When preferForeground is false, the caller already tried this exact
+      // headless route moments ago (see the top-level attempt below) and it
+      // already failed -- bringToFront() in between does not change whether
+      // the target exposes a same-process child window at this point (that
+      // is a structural property of the app, e.g. a WinUI-hosted control
+      // such as Calculator, not a transient foreground/visibility state).
+      // Retrying it here was a second guaranteed-failing native call on
+      // every single such dispatch. Only attempt it here when it genuinely
+      // has not been tried yet (preferForeground skipped the earlier block).
+      if (options.nativeHeadless && !headlessAlreadyAttempted) {
         try {
           const dispatched = await timedInputDispatch(options.nativeHeadless.route, options.nativeHeadless.send,
             (result) => result.dispatched === true);
@@ -1569,12 +1578,12 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return { ...outcome!, foregroundConfirmed: true,
       ...(restoreError ? { summary: "Native input was delivered. Restoring the owner's pointer was unavailable; this presentation detail did not affect delivery." } : {}) };
   };
-  const runForeground = async () => {
+  const runForeground = async (headlessAlreadyAttempted: boolean) => {
     // The owner-work policy inside the native manager gates the foreground
     // activation. The target-message route stays off the user's global pointer;
     // pointer preservation is needed only if the authorized action must fall
     // back to SendInput.
-    return timed("foreground-lease", () => foregroundLease.run(name, options.signal, deliverForeground), {
+    return timed("foreground-lease", () => foregroundLease.run(name, options.signal, () => deliverForeground(headlessAlreadyAttempted)), {
     detail: `action=${name};delivery=foreground`,
   }).catch((error) => {
     if (error instanceof ForegroundInputLeaseError) {
@@ -1587,7 +1596,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   // or SendInput path. Windows accepting PostMessage proves only queueing, so
   // the caller must still refresh the app and verify the requested effect.
   // An uncertain result is never replayed through foreground input.
-  if (!options.preferForeground && options.nativeHeadless) {
+  const headlessAttemptedHere = !options.preferForeground && Boolean(options.nativeHeadless);
+  if (headlessAttemptedHere && options.nativeHeadless) {
     try {
       const dispatched = await timedInputDispatch(options.nativeHeadless.route, options.nativeHeadless.send,
         (result) => result.dispatched === true);
@@ -1611,7 +1621,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       "background-unavailable",
     );
   }
-  if (options.nativeForeground) return runForeground();
+  if (options.nativeForeground) return runForeground(headlessAttemptedHere);
   throw new DesktopInputNotDispatchedError(
     `${fallback} Native foreground delivery is unavailable for this target and no input was sent.`, "native-dispatch-unavailable");
 }
