@@ -890,3 +890,19 @@ test("a persisted ApplicationFrameHost HWND is not reused after Windows changes 
       "the launch reuses the exact live Settings HWND, never the stale frame now hosting Calculator");
   } finally { f.cleanup(); }
 });
+
+test("an unconfirmed cursor remains tracked for terminal-task cleanup", async () => {
+  const f = fixture(true);
+  try {
+    f.store.registerEndpoint({ provider: "codex", sessionId: "session-one" });
+    f.store.markDelivered([f.task.id], f.identity.sessionId);
+    f.driver.showAgentCursor = (async () => {
+      f.cursorEvents.push("show:session-one");
+      return { label: "Codex", visible: false };
+    }) as never;
+    assert.equal((await f.service.primeCursor(f.identity.token, f.task.id)).shown, false);
+    f.store.pauseTask(f.task.id);
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"]);
+  } finally { await f.service.close(); f.cleanup(); }
+});

@@ -658,7 +658,10 @@ export function createTaskDesktopStageService(input: {
       // delivery time instead of waiting for app discovery or a long action.
       const result = await showAgentCursor(target.stageName, target.identity);
       if (result && typeof result === "object" && "visible" in result && result.visible !== true) {
-        if (activeAgentCursors.get(key)?.taskId === target.taskId) activeAgentCursors.delete(key);
+        // The renderer may have accepted a marker whose presentation ACK was
+        // lost or late. Keep cleanup ownership, including after a concurrent
+        // terminal-task reap, until an explicit hide confirms its removal.
+        if (!activeAgentCursors.has(key)) activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId, primedAt });
         return { shown: false, reason: "The local cursor surface did not confirm its first frame." };
       }
       // The entry was added to activeAgentCursors optimistically, before this
@@ -678,7 +681,7 @@ export function createTaskDesktopStageService(input: {
       cursorPresentationTask.set(key, target.taskId);
       return { shown: true, agent: target.identity.handle };
     } catch {
-      if (activeAgentCursors.get(key)?.taskId === target.taskId) activeAgentCursors.delete(key);
+      if (!activeAgentCursors.has(key)) activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId, primedAt });
       return { shown: false, reason: "The local cursor surface could not be shown." };
     } finally {
       cursorPresentationPending.delete(key);

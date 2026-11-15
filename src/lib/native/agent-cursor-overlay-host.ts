@@ -94,11 +94,25 @@ export function createAgentCursorOverlayHost(input: {
   let closing: Promise<void> | undefined;
   const pending = new Map<number, { resolve: (ok: boolean) => void; timer: NodeJS.Timeout }>();
   const visible = new Set<string>();
+  // A missing ACK leaves presentation uncertain; it does not prove absence.
+  const possiblyVisible = new Set<string>();
+  const markerQueues = new Map<string, Promise<void>>();
+  async function forMarker<T>(id: string, run: () => Promise<T>): Promise<T> {
+    const previous = markerQueues.get(id) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>(resolve => { release = resolve; });
+    markerQueues.set(id, tail);
+    await previous;
+    try { return await run(); }
+    finally { release(); if (markerQueues.get(id) === tail) markerQueues.delete(id); }
+  }
   const hide = async (id: string): Promise<boolean> => {
-    if (!visible.has(id)) return true;
-    const ok = await send({ cmd: "hide", id });
-    if (ok) visible.delete(id);
-    return ok;
+    if (!visible.has(id) && !possiblyVisible.has(id)) return true;
+    return forMarker(id, async () => {
+      const ok = await send({ cmd: "hide", id });
+      if (ok) { visible.delete(id); possiblyVisible.delete(id); }
+      return ok;
+    });
   };
 
   const failPending = () => {
@@ -185,6 +199,7 @@ export function createAgentCursorOverlayHost(input: {
         child = undefined;
         ready = undefined;
         visible.clear();
+        possiblyVisible.clear();
       }
     });
     const timer = setTimeout(() => {
@@ -205,7 +220,7 @@ export function createAgentCursorOverlayHost(input: {
 
   async function ensureStarted(): Promise<boolean> {
     if (child && ready) return ready;
-    if (closing) await closing;
+    if (closing) return false;
     if (await attemptStart(READY_TIMEOUT_MS)) return true;
     // One retry with a much longer timeout absorbs a one-time Defender scan of the freshly-written exe
     // instead of leaving no cursor marker on screen until some unrelated later action retries.
@@ -250,9 +265,14 @@ export function createAgentCursorOverlayHost(input: {
       if (!point.id || point.id.length > 72 || !point.label || point.label.length > 28
         || !Number.isFinite(point.x) || !Number.isFinite(point.y)
         || point.color.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)) return false;
-      const ok = await send({ cmd: "upsert", id: point.id, label: point.label, color: point.color, x: point.x, y: point.y });
-      if (ok) visible.add(point.id);
-      return ok;
+      // Register before startup awaits so a concurrent close cannot mistake
+      // an in-flight initial marker for one that was never requested.
+      possiblyVisible.add(point.id);
+      return forMarker(point.id, async () => {
+        const ok = await send({ cmd: "upsert", id: point.id, label: point.label, color: point.color, x: point.x, y: point.y });
+        if (ok) visible.add(point.id);
+        return ok;
+      });
     },
     async say(message) {
       // Bubbles are presentation for an accepted A2A summary, never the
@@ -270,12 +290,13 @@ export function createAgentCursorOverlayHost(input: {
     async close() {
       if (closing) return closing;
       closing = (async () => {
-        await Promise.all([...visible].map((id) => hide(id).catch(() => undefined)));
+        await Promise.all([...new Set([...visible, ...possiblyVisible])].map((id) => hide(id).catch(() => undefined)));
         const process = child;
+        visible.clear();
+        possiblyVisible.clear();
         if (!process) return;
         child = undefined;
         ready = undefined;
-        visible.clear();
         const exited = new Promise<void>((resolve) => {
           if (process.exitCode !== null) { resolve(); return; }
           process.once("exit", () => resolve());

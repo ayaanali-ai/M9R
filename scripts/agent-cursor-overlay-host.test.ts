@@ -13,13 +13,13 @@ class FakeOverlayChild extends EventEmitter {
   exitCode: number | null = null;
   killed = false;
 
-  constructor() {
+  constructor(acknowledge: (message: { requestId: number; cmd: string }) => boolean = () => true) {
     super();
     this.stdin.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString("utf8").split("\n").filter(Boolean)) {
         const message = JSON.parse(line) as { requestId: number; cmd: string };
         this.commands.push(message);
-        queueMicrotask(() => this.stdout.write(`${JSON.stringify({ event: "ack", requestId: message.requestId, ok: true })}\n`));
+        if (acknowledge(message)) queueMicrotask(() => this.stdout.write(`${JSON.stringify({ event: "ack", requestId: message.requestId, ok: true })}\n`));
       }
     });
     this.stdin.on("end", () => {
@@ -132,4 +132,38 @@ test("A2A bubbles require an acknowledged visible sender and sanitize bounded te
   await host.hide("agent-codex");
   assert.equal(await host.say({ id: "agent-codex", to: "Claude", toColor: [230, 120, 70], text: "after hide" }), false);
   await host.close();
+});
+
+test("a timed-out upsert still sends a real hide and cannot speak as a confirmed marker", async () => {
+  const child = new FakeOverlayChild(message => message.cmd !== "upsert");
+  const host = createAgentCursorOverlayHost({ executablePath: "fixture.exe", pathExists: () => true, spawnProcess: (() => child) as never });
+  try {
+    assert.equal(await host.upsert({ id: "uncertain", label: "Codex", x: 10, y: 10, color: [1, 2, 3] }), false);
+    assert.equal(await host.say({ id: "uncertain", to: "Claude", toColor: [1, 2, 3], text: "hello" }), false);
+    assert.equal(await host.hide("uncertain"), true);
+    assert.deepEqual(child.commands.map(command => command.cmd), ["upsert", "hide"],
+      "lost acknowledgement does not prove the renderer never displayed the marker");
+  } finally { await host.close(); }
+});
+
+test("hide during initial startup follows its upsert instead of preceding it", async () => {
+  const child = new FakeOverlayChild();
+  const host = createAgentCursorOverlayHost({ executablePath: "fixture.exe", pathExists: () => true, spawnProcess: (() => child) as never });
+  try {
+    const placing = host.upsert({ id: "startup", label: "Codex", x: 10, y: 10, color: [1, 2, 3] });
+    const hiding = host.hide("startup");
+    assert.equal(await placing, true);
+    assert.equal(await hiding, true);
+    assert.deepEqual(child.commands.map(command => command.cmd), ["upsert", "hide"]);
+  } finally { await host.close(); }
+});
+
+test("shutdown while an initial marker is queued finishes without respawning it", async () => {
+  const launched: FakeOverlayChild[] = [];
+  const host = createAgentCursorOverlayHost({ executablePath: "fixture.exe", pathExists: () => true,
+    spawnProcess: (() => { const child = new FakeOverlayChild(); launched.push(child); return child; }) as never });
+  const placing = host.upsert({ id: "shutdown", label: "Codex", x: 10, y: 10, color: [1, 2, 3] });
+  await host.close();
+  await placing;
+  assert.ok(launched.every(child => child.exitCode !== null));
 });
