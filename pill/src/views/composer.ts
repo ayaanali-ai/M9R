@@ -90,10 +90,15 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
   // Replies arrive as "codex: text"; the handle becomes the provider's logo, never raw text in the bubble.
   const from = /^([A-Za-z0-9-]+):\s/.exec(message.content);
   const sender = from ? State.tasks.find((t) => t.name.toLowerCase() === from[1].toLowerCase()) : undefined;
-  const reply = h("div", { class: "bubble", text: sender ? message.content.slice(from![0].length) : message.content });
+  const reply = h("div", { class: "bubble", text: from ? message.content.slice(from[0].length) : message.content });
+  const speaker = sender ? displayName(sender) : message.from ?? from?.[1] ?? "M9R";
+  const recipient = message.to ? State.tasks.find((t) => t.name.toLowerCase() === message.to!.toLowerCase()) : undefined;
+  const heading = h("span", { class: "conversation-speaker", text: message.to
+    ? `${speaker} → ${recipient ? displayName(recipient) : message.to}` : speaker });
   if (sender) {
-    reply.prepend(h("span", { class: "reply-from", title: displayName(sender) }, providerLogo(sender.provider, 11)));
+    heading.prepend(providerLogo(sender.provider, 11));
   }
+  reply.prepend(heading);
   const clearNotice = message.dismissTaskId && actions.dismissTask
     ? h("button", { class: "save-note", type: "button", text: "Clear notice", title: "Hide this notice; keep its task record" })
     : null;

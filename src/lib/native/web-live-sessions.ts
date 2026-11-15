@@ -1219,7 +1219,7 @@ export function createWebLiveSessions(deps: WebLiveSessionsDeps) {
           const text = ask.a2a
             ? `@${from.handle} sent one message in M9R conversation ${ask.a2a.conversationId} (${ask.id}; message ${ask.a2a.messageId}${ask.a2a.replyToMessageId ? `, replying to ${ask.a2a.replyToMessageId}` : ""}): ${ask.goal}
 
-Treat this as one peer turn, not an invitation to keep a chat loop running. If it asks for work or a decision, do the requested part and answer once with m9r_result for ${ask.id}. Do not poll or send a second message just to acknowledge. If continuing the shared task truly needs another peer turn, send one concise m9r_team_message with the same taskId and conversationId, replyToMessageId set to ${ask.a2a.messageId}, and a progress witness showing what changed; otherwise continue your own work.`
+This is part of your ongoing group conversation. Discuss the plan, ask useful questions, and share discoveries naturally. A conversation message is not permission to repeat work a teammate already owns or completed. If it asks for work or a decision, do the requested part and answer once with m9r_result for ${ask.id}. Do not poll or send a second message just to acknowledge. If continuing the shared task truly needs another peer turn, send one concise m9r_team_message with the same taskId and conversationId, replyToMessageId set to ${ask.a2a.messageId}, and a progress witness showing what changed; otherwise continue your own work.`
             : `@${from.handle} messaged you (${ask.id}): ${ask.goal}
 
 Answer with m9r_result for ${ask.id}, in a sentence or two, so @${from.handle} sees it right away. Do not poll or send a follow-up just to acknowledge.`;

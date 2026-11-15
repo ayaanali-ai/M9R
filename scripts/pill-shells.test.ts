@@ -194,7 +194,8 @@ test("the desktop transport persists settings through the overlay commands and r
   });
   transport.saveSettings!({ ...DEFAULT_SETTINGS, soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 });
   await new Promise((r) => setTimeout(r, 5));
-  assert.deepEqual(calls, [["save_settings", { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 }]]);
+  assert.deepEqual(calls, [["save_settings", { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30,
+    glowStyle: DEFAULT_SETTINGS.glowStyle, glowColor: DEFAULT_SETTINGS.glowColor }]]);
   const loaded = await transport.loadSettings!();
   assert.deepEqual(loaded, { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 }, "a fresh pill process reads back exactly what the last one saved");
 });
@@ -237,4 +238,15 @@ test("the desktop pill shows what a working terminal agent is doing, and never a
   assert.deepEqual(snap.agents.find((a) => a.handle === "claude")?.activity, ["Reading feed-core.ts"]);
   assert.deepEqual(snap.agents.find((a) => a.handle === "codex")?.activity, ["Working on a turn"]);
   assert.deepEqual(snap.agents.find((a) => a.handle === "opencode")?.activity, []);
+});
+
+test("teammate conversation preserves participants and line breaks through pill state", () => {
+  const snap = fromUiState({ agents: [], thread: [
+    { id: "peer-1", kind: "say", agent: "claude", to: "codex", text: "Let's make a checklist.\nI'll write it; please verify the saved file." },
+    { id: "peer-2", kind: "say", agent: "codex", to: "claude", text: "Agreed. I'll check it after you save." },
+  ] });
+  assert.equal(snap.thread[0].from, "claude");
+  assert.equal(snap.thread[0].to, "codex");
+  assert.ok(snap.thread[0].text.includes("\n"));
+  assert.equal(snap.thread[1].to, "claude");
 });

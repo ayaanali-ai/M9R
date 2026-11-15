@@ -385,7 +385,7 @@ test("a teammate delegation is suppressed when the recipient already has the sam
     store,
     agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
     sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
-    wakeRecipient: (handle, text, taskId) => { woken.push({ handle, text, taskId }); },
+    wakeRecipient: (handle, text, taskId) => { woken.push({ handle, text, taskId }); return { ok: true }; },
   });
   const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
   try {
@@ -426,14 +426,14 @@ test("a teammate delegation is suppressed when the recipient already has the sam
   }
 });
 
-test("a suppressed delegation's dedup result is unaffected when waking the recipient fails", () => {
+for (const failure of ["throws", "busy", "unconfirmed"] as const) test(`a delegation is durably queued when waking an existing assignment ${failure}`, () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-a2a-broadcast-wake-fails-"));
   const store = createLocalStore(root);
   const inboxDelivery = createMultiplayerInboxDelivery({
     store,
     agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
     sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
-    wakeRecipient: () => { throw new Error("provider connection is down"); },
+    wakeRecipient: () => { if (failure === "throws") throw new Error("provider connection is down"); return failure === "busy" ? { ok: false } : undefined; },
   });
   const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
   try {
@@ -452,10 +452,15 @@ test("a suppressed delegation's dedup result is unaffected when waking the recip
     });
     assert.equal(result.ok, true);
     if (result.ok) {
-      assert.equal(result.delivery.created, false);
-      assert.equal(result.delivery.taskId, codexBroadcastTask.task.id);
+      assert.equal(result.delivery.created, true);
+      assert.notEqual(result.delivery.taskId, codexBroadcastTask.task.id);
+      assert.equal(result.delivery.state, "queued");
+      const queued = store.getTask(result.delivery.taskId!);
+      assert.equal(queued?.delivery?.state, "deferred");
+      assert.ok(queued?.goal.includes("Please pick a number."));
+      assert.equal(queued?.a2a?.messageId, result.message.messageId);
     }
-    assert.equal(store.tasksFor("codex").length, 1);
+    assert.equal(store.tasksFor("codex").length, 2, "existing work plus one durable conversation message");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

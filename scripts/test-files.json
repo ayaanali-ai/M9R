@@ -213,5 +213,11 @@
   "mission-relay-deployment.test.ts",
   "test-suite-runner-core.test.mjs",
   "public-error.test.ts",
-  "web-live-sessions.test.ts"
+  "web-live-sessions.test.ts",
+  "agent-cursor-overlay-host.test.ts",
+  "cua-stage-driver.test.ts",
+  "mcp-inbox.test.ts",
+  "multiplayer-runtime.test.ts",
+  "pill-shells.test.ts",
+  "pill-state.test.ts"
 ]

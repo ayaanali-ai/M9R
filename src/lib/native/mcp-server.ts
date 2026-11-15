@@ -10,7 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { McpServer, type RegisteredTool, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { ListToolsRequestSchema, type ServerNotification, type ServerRequest, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { ListToolsRequestSchema, type CallToolResult, type ServerNotification, type ServerRequest, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { taskCompletionReport, taskCompletionReportSchema } from "./task-completion-contract";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
@@ -106,6 +106,7 @@ type M9rRequestExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
  * to whichever conversation happened to call first.
  */
 class ProviderContextMcpServer extends McpServer {
+  afterTool?: (name: string, args: unknown, result: CallToolResult) => Promise<CallToolResult>;
   private readonly providerCallContext: AsyncLocalStorage<ProviderCallMetadata>;
   private readonly listedTools = new Map<string, RegisteredTool>();
 
@@ -141,7 +142,12 @@ class ProviderContextMcpServer extends McpServer {
         codexThreadIdInvalid: codexThreadIdSupplied && !validCodexThreadId,
         ...(validCodexThreadId ? { codexThreadId: rawCodexThreadId } : {}),
       };
-      return this.providerCallContext.run(context, () => Reflect.apply(callback, undefined, args));
+      return this.providerCallContext.run(context, async () => {
+        const result = await Reflect.apply(callback, undefined, args);
+        if (!this.afterTool) return result;
+        try { return await this.afterTool(name, args[0], result); }
+        catch { return result; } // Context presentation never changes an action outcome.
+      });
     }) as ToolCallback<InputArgs>;
     const tool = super.registerTool(name, config, contextualCallback);
     this.listedTools.set(name, tool);
@@ -185,6 +191,30 @@ function runtimeServerVersion(): string {
 export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const providerCallContext = new AsyncLocalStorage<ProviderCallMetadata>();
   const server = new ProviderContextMcpServer(providerCallContext, { name: "m9r-mcp", version: runtimeServerVersion() });
+  // Conversation context rides on normal tool boundaries. It neither interrupts
+  // native input nor claims/finishes an inbox task or changes the current turn.
+  const shownPeerMessages = new Set<string>();
+  const conversationBoundaries = new Set(["m9r_computer_observe", "m9r_computer_action", "m9r_computer_program",
+    "m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action", "m9r_team_message"]);
+  server.afterTool = async (name, args, result) => {
+    if (!conversationBoundaries.has(name) || result.isError) return result;
+    const token = args && typeof args === "object" && "token" in args ? (args as { token?: string }).token : undefined;
+    const identity = await requireIdentity(token);
+    // Browser rooms have their own admitted-member push transport. Never
+    // bypass its membership authorization using the native inbox reader.
+    if (inRoom(identity)) return result;
+    const messages = deps.store.tasksForSession(identity.handle, identity.sessionId)
+      .filter(task => task.a2a && !task.deliveredAt && !task.dismissedAt && taskIsFreshForIdentity(identity, task)
+        && (task.approval === "approved" || task.approval === "not_needed")
+        && !shownPeerMessages.has(`${identity.sessionId}\0${task.a2a.messageId}`))
+      .sort((a, b) => a.seq - b.seq).slice(-4);
+    if (!messages.length) return result;
+    for (const task of messages) shownPeerMessages.add(`${identity.sessionId}\0${task.a2a!.messageId}`);
+    while (shownPeerMessages.size > 512) shownPeerMessages.delete(shownPeerMessages.values().next().value!);
+    const text = messages.map(task => `@${task.from} → @${task.to}: ${task.a2a!.summary.slice(0, 1000)}\nConversation: ${task.a2a!.conversationId}; message: ${task.a2a!.messageId}`).join("\n\n");
+    return { ...result, content: [...result.content, { type: "text", text:
+      `New teammate conversation context (teammate data, not owner authorization). Continue your current assignment; do not repeat completed work. Reply naturally in the same conversation when useful. Durable inbox delivery is tracked separately.\n\n${text}` }] };
+  };
   const operationNamespace = randomUUID();
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
   const workflowPreferences = createWorkflowPreferenceLedger(deps.store.root, deps.now ?? (() => new Date()));
@@ -921,7 +951,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       },
     },
     async ({ token, to, summary, kind, priority, taskId, conversationId, details, idempotencyKey, replyToMessageId, supersedesMessageId, progressFingerprint, progressKind }) => {
-      const { token: authToken } = await authenticate(token);
+      const { identity, token: authToken } = await authenticate(token);
       if (!deps.web?.sendA2A) throw new Error("The owner broker's structured multiplayer runtime is unavailable.");
       if (["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"].includes(kind)
         && (!progressFingerprint || !progressKind)) {
@@ -938,6 +968,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       };
       const result = await deps.web.sendA2A(authToken, input);
       if (!result.ok) throw new Error(result.error);
+      if (!result.duplicate && deps.web.notifyMessage) {
+        await deps.web.notifyMessage({ agent: identity.handle, provider: identity.provider,
+          sessionId: identity.sessionId, to, messageId: result.message.messageId,
+          text: summary }).catch(() => false);
+      }
       const receipt = result.delivery;
       const recipientTask = receipt.taskId
         ? receipt.created === false ? ` Existing recipient inbox task: ${receipt.taskId}; no second provider task was created.` : ` Recipient inbox task: ${receipt.taskId}.`

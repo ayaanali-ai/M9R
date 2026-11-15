@@ -30,10 +30,9 @@ export function createMultiplayerInboxDelivery(input: {
   store: Pick<LocalStore, "addTask" | "setDelivery" | "setApproval" | "tasksFor">;
   agents: readonly MultiplayerInboxAgent[];
   sessionIdOf?: (handle: string) => string | undefined;
-  /** Best-effort: push this A2A content as a fresh provider turn on an existing task (the recipient's
-   * session may be idle after already pausing/finishing). Never affects this function's own return value --
-   * a wake failure never turns a legitimate dedup/"already-present" result into an error. */
-  wakeRecipient?: (handle: string, text: string, taskId: string) => void;
+  /** Inline delivery is only established by an explicit successful outcome.
+   * Otherwise persist the message for normal delivery after the current turn. */
+  wakeRecipient?: (handle: string, text: string, taskId: string) => { ok: boolean } | void;
 }): MultiplayerDelivery {
   const profiles = new Map(input.agents.map((agent) => [agent.agentId, agent]));
 
@@ -65,9 +64,11 @@ export function createMultiplayerInboxDelivery(input: {
           // the recipient may already have paused/finished its own turn waiting for exactly this (e.g. "wait
           // for Claude's explicit delegation" from the shared broadcast), and nothing else would ever wake
           // it back up. Push the content as a fresh turn on the existing task instead of a second task.
-          try { input.wakeRecipient?.(recipient.handle, goal, existing.id); }
-          catch { /* best-effort: the dedup result below is correct regardless */ }
-          return { ok: true, taskId: existing.id, created: false, state: "already-present" };
+          try {
+            if (input.wakeRecipient?.(recipient.handle, goal, existing.id)?.ok) {
+              return { ok: true, taskId: existing.id, created: false, state: "already-present" };
+            }
+          } catch { /* Persist below; no content is lost when the recipient is busy/offline. */ }
         }
       }
     }

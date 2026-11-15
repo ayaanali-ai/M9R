@@ -18,3 +18,12 @@ export async function resolve(specifier, context, nextResolve) {
   }
   return nextResolve(specifier, context);
 }
+
+// Vite turns imported provider artwork into URLs. Match that contract in
+// Node tests so importing the real pill views does not fail on .svg files.
+export async function load(url, context, nextLoad) {
+  if (url.startsWith("file:") && url.endsWith(".svg")) {
+    return { format: "module", source: `export default ${JSON.stringify(url)};`, shortCircuit: true };
+  }
+  return nextLoad(url, context);
+}

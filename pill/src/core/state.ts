@@ -53,7 +53,7 @@ export interface PillSnapshot {
   models?: PillModelState;
   approvals: Array<{ id: string; agent: string; title: string; detail: string }>;
   /** Replies and notices from agents, newest last. */
-  thread: Array<{ id: string; from: string; text: string; link?: LinkOffer; dismissTaskId?: string }>;
+  thread: Array<{ id: string; from: string; to?: string; text: string; link?: LinkOffer; dismissTaskId?: string }>;
   /** Browser-broker connection health, when the host can observe it. */
   connection?: "connecting" | "connected" | "disconnected";
   /** A connection-only update must not replace the last provider snapshot. */
@@ -112,6 +112,8 @@ export interface ChatMessage {
   sourceId?: string;
   role: "user" | "assistant";
   content: string;
+  from?: string;
+  to?: string;
   link?: LinkOffer;
   dismissTaskId?: string;
 }
@@ -318,6 +320,8 @@ class AppState {
         sourceId: message.id,
         role: own(message) ? "user" : "assistant",
         content: content(message),
+        from: message.from,
+        to: message.to,
         link: message.link,
         dismissTaskId: message.dismissTaskId,
       }));
@@ -332,6 +336,8 @@ class AppState {
         const existing = this.chatHistory.find((entry) => entry.sourceId === message.id);
         if (existing) {
           existing.content = content(message);
+          existing.from = message.from;
+          existing.to = message.to;
           existing.link = message.link;
           existing.dismissTaskId = message.dismissTaskId;
         }
@@ -347,6 +353,8 @@ class AppState {
           sourceId: message.id,
           role: own(message) ? "user" : "assistant",
           content: content(message),
+          from: message.from,
+          to: message.to,
           link: message.link,
           dismissTaskId: message.dismissTaskId,
         });

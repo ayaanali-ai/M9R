@@ -51,6 +51,13 @@ guard on a live build/install run.
   minute from-source compile, so a typecheck failure fails fast instead of
   burning a full build first.
 
+- **3C**, immediately after the typecheck: runs `node scripts/run-test-suite.mjs all`
+  and refuses compilation if the aggregate behavioral suite fails. Its explicit
+  manifest is `scripts/test-files.json`; real-desktop side-effect tests remain
+  separate from this build gate. Passing it does not establish live acceptance.
+  Native renderer tests are also run separately with `cargo test` before a
+  cursor change is released; compilation alone is not a renderer test.
+
 ## 2. The pill is always built from source (guard 4A)
 
 There is no committed, "owner-accepted" `m9r-overlay.exe` and no manual

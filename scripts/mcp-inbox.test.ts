@@ -588,3 +588,52 @@ test("governed Git child environment omits provider and M9R credentials", async 
   assert.deepEqual({ ...env }, { PATH: "C:/tools", SystemRoot: "C:/Windows", TEMP: "C:/temp" });
   assert.equal(Object.values(env).some((value) => value?.includes("fixture")), false);
 });
+
+test("structured teammate messages publish participant-labelled pill activity once", async () => {
+  let duplicate = false;
+  const notices: Array<{ agent: string; to: string; text: string }> = [];
+  const t = setup({ web: {
+    sendA2A: async (_token, input) => ({ ok: true, duplicate,
+      message: { messageId: "message-visible", conversationId: "conversation-visible" },
+      delivery: { state: "queued", taskId: "T100", created: !duplicate }, recipientAgentIds: ["codex"] }) as never,
+    notifyMessage: async message => { notices.push(message); return true; },
+  } });
+  try {
+    const args = { token: t.claude, to: "codex", summary: "I'll write the checklist.\nPlease verify the saved result.",
+      kind: "delegate", priority: "normal", taskId: "T1", progressFingerprint: "plan-1", progressKind: "observation" };
+    await t.call("m9r_team_message", args);
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].agent, "claude");
+    assert.equal(notices[0].to, "codex");
+    assert.equal(notices[0].text, args.summary);
+    duplicate = true;
+    await t.call("m9r_team_message", args);
+    assert.equal(notices.length, 1, "idempotent replay must not add a second conversation bubble");
+  } finally { t.done(); }
+});
+
+test("native action boundaries include new peer context once without claiming another turn", async () => {
+  const dispatched: string[] = [];
+  const t = setup({ web: { taskStageAction: async (_token, taskId) => {
+    dispatched.push(taskId); return { ok: true, result: { actionExecuted: true } };
+  } } });
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Write the checklist", origin: "human_typed", idempotencyKey: "peer-work" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const peer = t.store.addTask({ from: "claude", to: "codex", goal: "I'll verify the file after you save.",
+      origin: "agent_initiated", standingRuleApplies: true, fromSession: "c1", idempotencyKey: "peer-context",
+      a2a: { conversationId: "conversation-checklist", messageId: "message-checklist", senderAgentId: "agent-claude",
+        recipientAgentId: "agent-codex", replyDepth: 0, kind: "help-result", summary: "I'll verify the file after you save." } }).task;
+    const handler = (t.server as unknown as ToolServer)._registeredTools.m9r_stage_action.handler as
+      (args: unknown, extra: { requestId: number }) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    const args = { token: t.codex, taskId: work.id, action: { kind: "cursor", x: 2, y: 3 } };
+    const first = await handler(args, { requestId: 501 });
+    assert.ok(first.content.some(block => block.text.includes("@claude → @codex")));
+    assert.ok(first.content.some(block => block.text.includes("not owner authorization")));
+    assert.equal(t.store.getTask(peer.id)?.deliveredAt, undefined, "context does not claim the queued peer task");
+    assert.equal(dispatched[0], work.id);
+    const second = await handler(args, { requestId: 502 });
+    assert.equal(second.content.some(block => block.text.includes("@claude → @codex")), false);
+    assert.equal(dispatched[1], work.id);
+  } finally { t.done(); }
+});

@@ -81,3 +81,15 @@ test("mention detection finds the @handle being typed at the caret and nothing i
   assert.equal(mentionAt("hello", 5), null);
   assert.equal(mentionAt("@claude hi", 10), null, "a finished mention followed by text is not being typed");
 });
+
+test("conversation speaker and recipient survive hydration and streamed updates", () => {
+  State.apply(snap({ thread: [{ id: "peer-participants", from: "claude", to: "codex", text: "Let's agree on a plan." }] }));
+  let message = State.chatHistory.find(entry => entry.sourceId === "peer-participants")!;
+  assert.equal(message.from, "claude");
+  assert.equal(message.to, "codex");
+  State.apply(snap({ thread: [{ id: "peer-participants", from: "claude", to: "codex", text: "Let's agree on a plan.\nI'll draft; you verify." }] }));
+  message = State.chatHistory.find(entry => entry.sourceId === "peer-participants")!;
+  assert.equal(State.chatHistory.filter(entry => entry.sourceId === "peer-participants").length, 1);
+  assert.ok(message.content.includes("\n"));
+  assert.equal(message.to, "codex");
+});

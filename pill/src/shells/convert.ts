@@ -22,7 +22,7 @@ const threadText = (text: unknown) => typeof text === "string" ? text.slice(0, M
 // ── Browser shell: the broker's `ui-state` as the extension delivers it ──────────────────────────────
 
 interface UiAgent { id: string; provider?: string; state?: string; doing?: string }
-interface UiThread { id: string; kind: string; agent?: string; text: string; phase?: string }
+interface UiThread { id: string; kind: string; agent?: string; to?: string; text: string; phase?: string }
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
 interface UiModelEffort { id?: unknown; label?: unknown }
 interface UiModelOption { id?: unknown; label?: unknown; efforts?: unknown; description?: unknown }
@@ -97,7 +97,8 @@ export function fromUiState(message: UiState): PillSnapshot {
   const replies = thread
     .filter((t) => t.kind === "say" || t.kind === "system" || t.kind === "block")
     .slice(-30)
-    .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: threadText(t.text) }));
+    .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: threadText(t.text),
+      ...(t.to && t.to !== "you" ? { to: String(t.to).replace(/^@/, "") } : {}) }));
   const collaboration = sanitizePillCollaboration(message.collaboration) ?? collaborationFromAgents(agents);
   const models = modelState(message.models);
   return { agents, collaboration, approvals, thread: replies, ...(message.ownerWorkMode === "working" || message.ownerWorkMode === "agents-free" ? { ownerWorkMode: message.ownerWorkMode } : {}), ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
