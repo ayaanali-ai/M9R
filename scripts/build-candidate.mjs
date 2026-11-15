@@ -55,6 +55,22 @@ if (!process.env.CI && resolve(root).toLowerCase() !== CANONICAL_ROOT.toLowerCas
   }
 }
 
+// Flow guard 3C: the real behavioral test suite, immediately after typechecking and before any
+// compile step. 3A/3B prove the tree is clean and the source typechecks -- neither proves the
+// source actually behaves correctly. Before this guard, a type-correct behavioral regression
+// could ship through this exact flow with nothing to catch it (confirmed gap, 2026-11-14 audit).
+// Uses the same aggregate "all" suite `npm test` runs -- it deliberately excludes real-desktop-
+// side-effect tests (background-input-phase0*, falsifying-test-*, native-same-window-streams),
+// so this gate never kills a real window or touches owner state as a side effect of a build.
+{
+  const tests = spawnSync(process.execPath, [join(root, "scripts", "run-test-suite.mjs"), "all"],
+    { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 600_000 });
+  if (tests.error) throw new Error(`Could not run the behavioral test suite (flow guard 3C): ${tests.error.message}`);
+  if (tests.status !== 0) {
+    throw new Error(`Refusing to build: the behavioral test suite failed (flow guard 3C).\n${tests.stdout}${tests.stderr}`);
+  }
+}
+
 const engineDir = join(root, "engine");
 const candidatesRoot = resolve(engineDir, "candidates");
 const resumeIndex = process.argv.indexOf("--resume");

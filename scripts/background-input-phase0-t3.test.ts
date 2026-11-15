@@ -18,12 +18,19 @@ import { setOwnerWorkMode } from "../src/lib/native/owner-work-mode";
 // foreground window via real SendInput the entire time -- proving that
 // background delivery to Notepad never steals the foreground, never moves
 // the owner's cursor, and never disturbs the independent foreground typer's
-// own keystrokes. Then the background agent provokes Notepad's "Do you want
-// to save changes?" dialog (via postCloseWindow, never SendInput/focus),
-// answers its plain Save button purely via UI Automation (the new
-// confirmDialogButton), and completes the resulting real Save-As dialog via
-// the existing, already-tested saveAs. The file's real on-disk content is
-// the final proof, alongside the independent typer's own self-report.
+// own keystrokes. The background-isolation assertions end there, before the
+// dialog phase below.
+//
+// After that, the test stops the independent typer, takes a real, confirmed
+// foreground lease on Notepad (manager.bringToForeground, verified via
+// currentForegroundWindow before proceeding), then provokes and answers
+// Notepad's "Do you want to save changes?" dialog with real SendInput
+// (Ctrl+W to close the tab, then Enter to confirm Save) -- not
+// postCloseWindow and not UI Automation's confirmDialogButton. This phase
+// is a foreground-lease test, not a second background-delivery test; it
+// does not exercise or prove anything about concurrent/contended foreground
+// use. The file's real on-disk content is the final proof, alongside the
+// independent typer's own self-report from the background-typing phase.
 //
 // This test must be run from a plain, non-agent terminal (never from inside
 // an agent session): native-input-host's own agent-context gate will refuse

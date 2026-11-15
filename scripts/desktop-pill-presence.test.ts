@@ -60,6 +60,19 @@ test("the ui-state carries desktopPill only while it is true, and a change is pu
   ui.close();
 });
 
+test("a running overlay process with no fresh heartbeat yet is reported pending, not running", () => {
+  if (process.platform !== "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "m9r-presence-ready-"));
+  try {
+    // No heartbeat file was written, so even if a CIM query found a matching
+    // process, launchDesktopOverlayIfNeeded must not trust process existence
+    // alone -- confirmed by this module's own readDesktopPillRunning check.
+    assert.equal(readDesktopPillRunning(root), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launchDesktopOverlayIfNeeded never throws when the overlay binary is missing, and is a no-op off Windows", () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-presence-launch-"));
   try {

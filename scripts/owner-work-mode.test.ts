@@ -92,7 +92,7 @@ test("global media keys require a distinct owner grant and cannot reuse a window
     assert.equal(dispatched.filter(request => request.op === "systemControl").length, 1);
     await turn(() => policy.authorize({ op: "restoreCursorPosition", x: 10, y: 20 }));
     assert.equal(approvals.length, 2, "media approval does not authorize unrelated pointer restoration");
-    assert.match(approvals[1]?.step ?? "", /foreground turn/);
+    assert.equal(approvals[1]?.action, "foreground_turn");
 
     accepted = false;
     await assert.rejects(turn(() => manager.systemControl({ control: "media", action: "next" })), /waiting for owner approval/);
@@ -108,11 +108,11 @@ test("foreground context restoration is limited to the exact approved HWND and c
   try {
     await policy.run({ agent: "codex", provider: "codex", sessionId: "one", taskId: "M2", signal: new AbortController().signal }, async () => {
       const grant = await policy.authorize({ op: "sendText", pid: 123, windowId: "456" });
-      assert.deepEqual(grant, { restoreOwnerContext: true });
+      assert.deepEqual(grant, { restoreOwnerContext: true, retainOwnerInputMonitor: false });
       assert.deepEqual(await policy.authorize({ op: "restoreForegroundContext", pid: 123, windowId: "0x1c8" }),
-        { restoreOwnerContext: true }, "decimal and hexadecimal spellings of the same HWND share the one target grant");
+        { restoreOwnerContext: true, retainOwnerInputMonitor: true }, "decimal and hexadecimal spellings of the same HWND share the one target grant");
       assert.deepEqual(await policy.authorize({ op: "restoreForegroundContext", pid: 123, windowId: "789" }),
-        { restoreOwnerContext: false }, "a different HWND is outside the approved foreground turn");
+        { restoreOwnerContext: false, retainOwnerInputMonitor: false }, "a different HWND is outside the approved foreground turn");
       setOwnerWorkMode(root, "agents-free");
       assert.deepEqual(await policy.authorize({ op: "restoreForegroundContext", pid: 123, windowId: "456" }),
         { restoreOwnerContext: false }, "switching to Agents Free invalidates the pending restore");
@@ -128,15 +128,24 @@ test("foreground denial, timeout and cancellation remove the real broker approva
   const run = (signal = new AbortController().signal) => policy.run({ agent: "codex", provider: "codex", sessionId: "s1", taskId: "T1", signal }, async () => {
     await policy.authorize({ op: "sendText", pid: 1, windowId: "2" }); sent++;
   });
+  const waitForApproval = async () => {
+    for (let attempt = 0; attempt < 200 && broker.pendingApprovals().length !== 1; attempt++) await delay(5);
+    assert.equal(broker.pendingApprovals().length, 1);
+  };
   try {
-    const denied = run(); assert.equal(broker.pendingApprovals().length, 1);
+    const denied = run();
+    const deniedCheck = assert.rejects(denied, /waiting for owner approval/);
+    await waitForApproval();
     broker.decideApproval(broker.pendingApprovals()[0]!.id, "deny");
-    await assert.rejects(denied, /waiting for owner approval/); assert.equal(sent, 0);
+    await deniedCheck; assert.equal(sent, 0);
     await assert.rejects(run(), /waiting for owner approval/); assert.equal(sent, 0); assert.equal(broker.pendingApprovals().length, 0);
     const canceled = new AbortController(); const canceledTurn = run(canceled.signal);
+    const canceledCheck = assert.rejects(canceledTurn, /owner stopped/);
+    await waitForApproval();
     canceled.abort(new Error("owner stopped"));
-    await assert.rejects(canceledTurn, /owner stopped/); assert.equal(sent, 0); assert.equal(broker.pendingApprovals().length, 0);
-    const freeTurn = run(); assert.equal(broker.pendingApprovals().length, 1);
+    await canceledCheck; assert.equal(sent, 0); assert.equal(broker.pendingApprovals().length, 0);
+    const freeTurn = run();
+    await waitForApproval();
     setOwnerWorkMode(root, "agents-free"); await freeTurn;
     assert.equal(sent, 1); assert.equal(broker.pendingApprovals().length, 0, "switching to Agents Free releases and removes the waiting prompt");
   } finally { broker.stopAll("owner"); rmSync(root, { recursive: true, force: true }); }

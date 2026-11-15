@@ -69,7 +69,17 @@ export function launchDesktopOverlayIfNeeded(root: string): "running" | "pending
     { encoding: "utf8", windowsHide: true, timeout: 5_000 });
     const state = classifyOverlayProcesses(output.trim() || "[]", exe);
     if (state === "conflict") throw new Error("Another overlay generation is running; canonical startup was not attempted");
-    if (state === "running") { report(state); return "running"; }
+    // A matching process existing is not the same as it having finished
+    // initializing: this used to return "running" from process existence
+    // alone, which let startDesktopOverlay's retry loop stop polling before
+    // the pill had ever actually become visible. Require the pill's own
+    // fresh, visible heartbeat (the same freshness check the broker uses
+    // elsewhere) before trusting "running".
+    if (state === "running") {
+      if (readDesktopPillRunning(root)) { report(state); return "running"; }
+      report("pending", "Canonical overlay process exists but has no fresh, visible heartbeat yet");
+      return "pending";
+    }
     const child = spawn(exe, [], { detached: true, stdio: "ignore", windowsHide: false, cwd: join(root, "bin") });
     child.once("error", (error) => report("failed", error.message));
     child.unref();
@@ -88,7 +98,11 @@ export function startDesktopOverlay(root: string): () => void {
   const attempt = () => {
     attempts += 1;
     const state = launchDesktopOverlayIfNeeded(root);
-    if ((state === "failed" || state === "pending") && attempts < 4) {
+    // "running" is now gated on a fresh heartbeat (see launchDesktopOverlayIfNeeded),
+    // not just process existence, so a freshly spawned process can legitimately
+    // report "pending" for a while after a slow fresh-boot startup. Give it a
+    // longer window before giving up than the old process-existence check needed.
+    if ((state === "failed" || state === "pending") && attempts < 12) {
       timer = setTimeout(attempt, 10_000);
       timer.unref();
     }
