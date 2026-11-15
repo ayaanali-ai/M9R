@@ -2350,10 +2350,14 @@ test("an independently fenced field refuses recreated UIA identity and never use
     error => error instanceof DesktopInputNotDispatchedError);
   assert.equal(nativeFixture(root).calls.some(call => call.op === "invokeWindowElement"), false);
   const fresh = await driver.readStructure("stage");
-  setNativeFixture(root, { responses: { invokeWindowElement: { ok: true, semanticAction: { dispatched: false, reason: "provider no longer supports value replacement" } } } });
+  setNativeFixture(root, { responses: {
+    invokeWindowElement: { ok: true, semanticAction: { dispatched: false, reason: "provider no longer supports value replacement" } },
+    findEditChildWindow: { ok: true, childWindowId: "777" },
+    sendTextToWindow: { ok: true, input: { dispatchState: "dispatched" } },
+  } });
   await assert.rejects(driver.replaceElement("stage", fresh.elements[0]!.ref, "no fallback", undefined, { semanticOnly: true }),
     error => error instanceof DesktopInputNotDispatchedError);
-  assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText"].includes(String(call.op))), false);
+  assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText", "findEditChildWindow", "sendTextToWindow"].includes(String(call.op))), false);
   await driver.shutdown();
 }));
 

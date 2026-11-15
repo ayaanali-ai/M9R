@@ -3855,34 +3855,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           };
         }
       }
-      // Some real controls (e.g. modern Notepad's RichEditD2DPT) do not
-      // actually honor UI Automation's ValuePattern even when the structural
-      // read reports it as available. Before refusing or escalating to a
-      // foreground fallback, try background WM_CHAR delivery straight to the
-      // window's real editable child surface -- foreground-independent and
-      // scoped to this exact registered window (confirmed working against
-      // both classic Edit controls and modern Notepad's child Edit window by
-      // the Phase 0 T3a/T3c proofs).
-      if (typeof manager.findEditChildWindow === "function" && typeof manager.sendTextToWindow === "function") {
-        const childWindowId = await manager.findEditChildWindow(pid, windowId.toString()).catch(() => undefined);
-        if (childWindowId) {
-          const receipt = await manager.sendTextToWindow(pid, childWindowId, text).catch(() => undefined);
-          if (receipt?.dispatchState === "dispatched") {
-            return {
-              capture: stageCapture(await captureWindow(), now),
-              outcome: {
-                status: "unverified",
-                summary: "Background WM_CHAR delivery reached the window's real editable child control; the refreshed window capture is the separate effect check.",
-                dispatch: {
-                  channel: "wm-char", state: "dispatched",
-                  ...(receipt.route ? { route: receipt.route } : {}),
-                  ...(receipt.targetMatches !== undefined ? { targetMatches: receipt.targetMatches } : {}),
-                },
-              },
-            };
-          }
-        }
-      }
+      // WM_CHAR inserts at an existing caret; it cannot implement replacement
+      // of this exact observed field. Use the verified replacement sequence
+      // below, or refuse when the caller only owns an independent UIA region.
       if (!identityUsable) {
         throw new DesktopInputNotDispatchedError("The accessibility element is stale, disabled, could not be confirmed as the same control, or does not support text replacement; no text was sent.");
       }
