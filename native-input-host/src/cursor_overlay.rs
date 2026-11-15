@@ -19,6 +19,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// A submitted command is not a presented frame. Retain work until the
+/// compositor accepts it, including the transparent frame after the last hide.
+struct PendingFrame(bool);
+
+impl PendingFrame {
+    fn invalidate(&mut self, changed: bool) { self.0 |= changed; }
+    fn needed(&self, animating: bool) -> bool { self.0 || animating }
+    fn presented(&mut self) { self.0 = false; }
+}
+
+fn presentation_snapshot(state: &SharedState, pending: &mut PendingFrame) -> HashMap<String, AgentState> {
+    let guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
+    let snapshot = guard.clone();
+    pending.invalidate(PRESENTATION_DIRTY.swap(false, Ordering::AcqRel));
+    snapshot
+}
+
 /// Set whenever a command actually changes presentation state (a new/moved
 /// marker, a chatter bubble, or a removal) and cleared after the tick that
 /// renders it. Lets the WM_TIMER loop below skip the render+blit entirely on
@@ -350,6 +367,8 @@ pub mod win {
         UpdateLayeredWindow, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN, ULW_ALPHA, WM_DESTROY, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
+        GetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOOWNERZORDER,
     };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows_numerics::{Matrix3x2, Vector2};
@@ -1097,6 +1116,7 @@ pub mod win {
     pub fn run() -> ! {
         let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
         let output = Arc::new(Mutex::new(std::io::stdout()));
+        let pending_acks = Arc::new(Mutex::new(Vec::<u64>::new()));
 
         unsafe {
             let class_name = w!("M9RCursorOverlay");
@@ -1136,6 +1156,7 @@ pub mod win {
             let ui_thread_id = GetCurrentThreadId();
             let reader_state = state.clone();
             let reader_output = output.clone();
+            let reader_acks = pending_acks.clone();
             std::thread::spawn(move || {
                 let stdin = stdin();
                 for line in stdin.lock().lines() {
@@ -1143,9 +1164,16 @@ pub mod win {
                     if line.trim().is_empty() { continue; }
                     let request_id = serde_json::from_str::<serde_json::Value>(&line).ok()
                         .and_then(|value| value.get("requestId").and_then(serde_json::Value::as_u64));
-                    let ok = apply_command(&reader_state, line.trim());
+                    // Lock order matches the presentation thread: requests,
+                    // then state. An ACK can only cover the snapshot it painted.
+                    let mut requests = reader_acks.lock().unwrap_or_else(|p| p.into_inner());
+                    let ok = requests.len() < 256 && apply_command(&reader_state, line.trim());
                     if let Some(request_id) = request_id {
-                        protocol_line(&reader_output, serde_json::json!({ "event": "ack", "requestId": request_id, "ok": ok }));
+                        if ok {
+                            requests.push(request_id);
+                        } else {
+                            protocol_line(&reader_output, serde_json::json!({ "event": "ack", "requestId": request_id, "ok": false }));
+                        }
                     }
                 }
                 let _ = PostThreadMessageW(ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
@@ -1153,6 +1181,8 @@ pub mod win {
 
             let mut message = MSG::default();
             let mut ready_sent = false;
+            let mut pending_frame = PendingFrame(true);
+            let mut last_foreground = HWND::default();
             loop {
                 let got = GetMessageW(&mut message, None, 0, 0);
                 if got.0 <= 0 {
@@ -1162,22 +1192,22 @@ pub mod win {
                 DispatchMessageW(&message);
                 if message.message == WM_TIMER {
                     let now = Instant::now();
-                    let guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let mut requests = pending_acks.lock().unwrap_or_else(|p| p.into_inner());
                     // Expire finished bubbles and advance blink timers without
                     // holding the lock across the (possibly slower) render.
-                    let mut snapshot = guard.clone();
-                    drop(guard);
-                    if snapshot.is_empty() && ready_sent {
-                        // No agents to show: skip the render/UpdateLayeredWindow
-                        // work entirely instead of repainting an empty frame
-                        // every tick. The timer still fires so a newly-added
-                        // agent is picked up on the next tick. Only safe once
-                        // ready_sent is true -- "ready" is emitted below from
-                        // the first successful presentation, and warm() always
-                        // spawns this process before any agent marker exists,
-                        // so skipping that very first empty-snapshot render
-                        // meant "ready" could never fire and every caller of
-                        // warm()/ensureStarted() timed out waiting for it.
+                    // Consume commands under the same lock as their snapshot.
+                    let mut snapshot = presentation_snapshot(&state, &mut pending_frame);
+                    let foreground = GetForegroundWindow();
+                    if !snapshot.is_empty() && foreground != last_foreground {
+                        // Reassert z-order only on a focus transition. This never
+                        // activates the overlay, moves it, or changes owner focus.
+                        if SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
+                            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER).is_ok() {
+                            last_foreground = foreground;
+                        }
+                    }
+                    if snapshot.is_empty() && !pending_frame.needed(false) {
+                        // Idle only after the empty clearing frame was presented.
                         continue;
                     }
                     // `AgentState` stores physical screen coordinates. The
@@ -1230,10 +1260,11 @@ pub mod win {
                             && now.saturating_duration_since(agent.anim_start).as_secs_f32() * 1000.0
                                 < agent.anim_duration_ms
                     }) || snapshot.values().any(|agent| agent.bubble.is_some());
-                    let command_dirty = PRESENTATION_DIRTY.swap(false, Ordering::AcqRel);
-                    if ready_sent && !command_dirty && !blink_changed && !still_animating {
+                    if !pending_frame.needed(blink_changed || still_animating) {
                         continue;
                     }
+                    // Animation frames must also survive renderer/blit failure.
+                    pending_frame.invalidate(true);
                     if renderer.is_none() {
                         renderer = Renderer::new().ok();
                     }
@@ -1292,15 +1323,42 @@ pub mod win {
                         Some(&blend as *const BLENDFUNCTION),
                         ULW_ALPHA,
                     ).is_ok();
-                    if presented && !ready_sent {
-                        protocol_line(&output, serde_json::json!({ "event": "ready" }));
-                        ready_sent = true;
+                    if presented {
+                        pending_frame.presented();
+                        for request_id in requests.drain(..) {
+                            protocol_line(&output, serde_json::json!({ "event": "ack", "requestId": request_id, "ok": true }));
+                        }
+                        if !ready_sent {
+                            protocol_line(&output, serde_json::json!({ "event": "ready" }));
+                            ready_sent = true;
+                        }
                     }
                 }
             }
             let _ = DestroyWindow(hwnd);
         }
         std::process::exit(0);
+    }
+
+    #[test]
+    fn final_hidden_marker_renders_a_transparent_bitmap() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let mut frame = PendingFrame(true);
+        let now = Instant::now();
+        let dib = create_dib(320, 200);
+        let renderer = Renderer::new().expect("Direct2D renderer");
+        assert!(apply_command_at(&state,
+            r#"{"cmd":"upsert","id":"a","label":"Codex","x":80,"y":80}"#, now));
+        let snapshot = presentation_snapshot(&state, &mut frame);
+        renderer.render(dib.hdc, 320, 200, &snapshot, now).unwrap();
+        let pixels = || unsafe { std::slice::from_raw_parts(dib.bits, 320 * 200 * 4) };
+        assert!(pixels().chunks_exact(4).any(|px| px[3] != 0));
+        frame.presented();
+        assert!(apply_command_at(&state, r#"{"cmd":"hide","id":"a"}"#, now));
+        let snapshot = presentation_snapshot(&state, &mut frame);
+        assert!(snapshot.is_empty() && frame.needed(false));
+        renderer.render(dib.hdc, 320, 200, &snapshot, now).unwrap();
+        assert!(pixels().chunks_exact(4).all(|px| px[3] == 0));
     }
 
     fn rand_u64() -> u64 {
@@ -1539,5 +1597,44 @@ mod movement_tests {
         upsert(&state, "a", 0.0, 0.0, now);
         assert!(apply_command_at(&state, r#"{"cmd":"hide","id":"a"}"#, now));
         assert!(!state.lock().unwrap().contains_key("a"));
+    }
+
+    #[test]
+    fn final_hide_requires_a_clear_frame_in_both_completion_orders() {
+        for order in [["a", "b"], ["b", "a"]] {
+            let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+            let now = Instant::now();
+            let mut frame = PendingFrame(true);
+            upsert(&state, "a", 10.0, 20.0, now);
+            upsert(&state, "b", 30.0, 40.0, now);
+            assert_eq!(presentation_snapshot(&state, &mut frame).len(), 2);
+            frame.presented();
+            for (index, id) in order.into_iter().enumerate() {
+                assert!(apply_command_at(&state,
+                    &serde_json::json!({"cmd": "hide", "id": id}).to_string(), now));
+                assert_eq!(presentation_snapshot(&state, &mut frame).len(), 1 - index);
+                assert!(frame.needed(false), "hide must submit a frame even with zero agents");
+                // A failed render/presentation must remain pending on idle ticks.
+                presentation_snapshot(&state, &mut frame);
+                assert!(frame.needed(false));
+                frame.presented();
+                assert!(!frame.needed(false));
+            }
+            assert!(state.lock().unwrap().is_empty());
+            // The next task wakes the renderer after the empty frame went idle.
+            upsert(&state, "c", 50.0, 60.0, now);
+            assert_eq!(presentation_snapshot(&state, &mut frame).len(), 1);
+            assert!(frame.needed(false));
+        }
+    }
+
+    #[test]
+    fn failed_animation_frame_remains_pending_after_animation_ends() {
+        let mut frame = PendingFrame(false);
+        assert!(frame.needed(true));
+        frame.invalidate(true);
+        assert!(frame.needed(false));
+        frame.presented();
+        assert!(!frame.needed(false));
     }
 }
