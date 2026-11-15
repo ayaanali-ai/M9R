@@ -367,6 +367,42 @@ test("a stalled cursor compositor cannot delay stage preparation or dispatch", a
   } finally { f.cleanup(); }
 });
 
+test("a cursor the reaper deletes while ensureCursorPrimed's own show() is still pending does not linger untracked forever", async () => {
+  // prepare()'s authorize() call adds the activeAgentCursors entry, then ensureCursorPrimed starts
+  // showAgentCursor without awaiting it to completion before prepare() itself returns. The 250ms
+  // reaper runs concurrently and, once taskActive() goes false, deletes that entry and hides the
+  // cursor -- even if showAgentCursor is still mid-flight. Before this fix, show()'s own completion
+  // handler only acted when an activeAgentCursors entry for this key still existed; with none left
+  // (the reaper already deleted it), it recorded nothing at all, leaving the cursor that just came
+  // back visible from this call with no entry anywhere and nothing to ever reap it again -- the
+  // reaper only iterates keys present in activeAgentCursors. Reproduce exactly that interleaving.
+  const f = fixture(true, undefined, undefined, false, undefined, 10_000_000);
+  let resolveShow: (() => void) | undefined;
+  f.driver.showAgentCursor = async (_stageName: string, cursorIdentity: { handle: string; sessionId: string }) => {
+    f.cursorEvents.push(`show:${cursorIdentity.sessionId}`);
+    await new Promise<void>((resolve) => { resolveShow = resolve; });
+    return { label: "", visible: true };
+  };
+  try {
+    // prepare() primes the cursor as an un-awaited background side effect (proven by the
+    // "a stalled cursor compositor cannot delay stage preparation or dispatch" test above,
+    // where prepare() itself resolves even though showAgentCursor hangs forever).
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+    // Task completes while showAgentCursor is still awaiting resolveShow above.
+    f.store.markDelivered([f.task.id], f.identity.sessionId);
+    assert.equal(f.store.recordTaskResult(f.identity.token, f.task.id, "Done", { status: "completed", remainingWork: [] }).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"],
+      "the reaper reaps the completed task's entry while show() is still in flight");
+    resolveShow?.();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one", "close:session-one"],
+      "the cursor that came back visible from the stale show() must still be reaped on the next tick, not left untracked");
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("state file replacement retries transient Windows sharing errors, but surfaces persistent failures", () => {
   let calls = 0;
   const waits: number[] = [];

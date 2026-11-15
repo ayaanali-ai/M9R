@@ -661,6 +661,20 @@ export function createTaskDesktopStageService(input: {
         if (activeAgentCursors.get(key)?.taskId === target.taskId) activeAgentCursors.delete(key);
         return { shown: false, reason: "The local cursor surface did not confirm its first frame." };
       }
+      // The entry was added to activeAgentCursors optimistically, before this
+      // await -- the 250ms cursorReaper (below) can run concurrently and,
+      // seeing taskActive() already false for a task that completed/failed
+      // fast, delete that entry and hide the cursor while showAgentCursor was
+      // still in flight. If this just set cursorPresentationTask unconditionally
+      // once show resolved, the cursor would come back visible with nothing
+      // left in activeAgentCursors to ever reap it again -- the reaper only
+      // iterates keys present in that map. Restore the entry only if nothing
+      // else has since claimed this identity key; if a newer task's prime call
+      // already overwrote it, that task now legitimately owns the key and must
+      // not be clobbered by this stale one.
+      const current = activeAgentCursors.get(key);
+      if (!current) activeAgentCursors.set(key, { identity: target.identity, taskId: target.taskId, primedAt });
+      else if (current.taskId !== target.taskId) return { shown: true, agent: target.identity.handle };
       cursorPresentationTask.set(key, target.taskId);
       return { shown: true, agent: target.identity.handle };
     } catch {
@@ -709,7 +723,20 @@ export function createTaskDesktopStageService(input: {
     void Promise.resolve().then(() => showAgentCursor(stageName, identity)).then((result) => {
       if (result && typeof result === "object" && "visible" in result && result.visible !== true) return;
       const active = activeAgentCursors.get(key);
-      if (active && taskActive(active.taskId)) cursorPresentationTask.set(key, active.taskId);
+      if (active) {
+        if (taskActive(active.taskId)) cursorPresentationTask.set(key, active.taskId);
+        return;
+      }
+      // Nothing currently owns this identity key: the 250ms cursorReaper (below) can run
+      // while showAgentCursor above was still in flight and, seeing taskActive(taskId)
+      // already false, delete the activeAgentCursors entry and hide the cursor before this
+      // call ever resolved. Leaving nothing recorded here (the prior behavior) made the
+      // cursor that just came back visible from this call untracked -- the reaper only
+      // iterates keys present in activeAgentCursors, so it could never reap this marker
+      // again. Restore the entry (for whichever taskId this call primed) so the very next
+      // reaper tick picks it up and correctly hides it, instead of leaving it on screen.
+      activeAgentCursors.set(key, { identity, taskId, primedAt: Date.now() });
+      cursorPresentationTask.set(key, taskId);
     }).catch(() => undefined).finally(() => {
       cursorPresentationPending.delete(key);
       const active = activeAgentCursors.get(key);
