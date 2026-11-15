@@ -345,11 +345,10 @@ pub mod win {
         HDC, HGDIOBJ,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow, GetMessageW,
-        GetSystemMetrics, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetTimer, SetWindowPos,
-        TranslateMessage, UpdateLayeredWindow, HWND_TOPMOST, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-        ULW_ALPHA, WM_DESTROY, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+        GetSystemMetrics, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage,
+        UpdateLayeredWindow, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN, ULW_ALPHA, WM_DESTROY, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE,
     };
     use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -1154,16 +1153,6 @@ pub mod win {
 
             let mut message = MSG::default();
             let mut ready_sent = false;
-            // WS_EX_TOPMOST is only applied once, at CreateWindowExW above.
-            // Windows does not keep a layered, non-activating window pinned
-            // above the z-order on its own -- a later window raised to the
-            // foreground (e.g. alt-tabbing into Notepad) can end up drawn
-            // over the overlay. Reassert topmost on every foreground-window
-            // change, and on a slow periodic cadence as a backstop, but only
-            // while an agent is actually shown -- never touch z-order for an
-            // empty overlay nobody is looking at.
-            let mut last_foreground: HWND = HWND::default();
-            let mut last_topmost_at = Instant::now();
             loop {
                 let got = GetMessageW(&mut message, None, 0, 0);
                 if got.0 <= 0 {
@@ -1190,21 +1179,6 @@ pub mod win {
                         // meant "ready" could never fire and every caller of
                         // warm()/ensureStarted() timed out waiting for it.
                         continue;
-                    }
-                    // Agents are visible this tick: reassert topmost if the
-                    // foreground window changed, or at least once a second
-                    // as a backstop against anything else silently stealing
-                    // the top of the z-order. SWP_NOACTIVATE/NOMOVE/NOSIZE
-                    // keep this a pure z-order poke -- it must never steal
-                    // focus, move, or resize the overlay.
-                    let foreground = GetForegroundWindow();
-                    if foreground != last_foreground || now.saturating_duration_since(last_topmost_at).as_secs_f32() >= 1.0 {
-                        let _ = SetWindowPos(
-                            hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-                        );
-                        last_foreground = foreground;
-                        last_topmost_at = now;
                     }
                     // `AgentState` stores physical screen coordinates. The
                     // layered window's backing DIB starts at the virtual
