@@ -454,8 +454,8 @@ test("helpers: codex JSONL parsing, cold-start args, and the agent prompt", () =
   assert.match(webAgentPrompt("claude", ["codex"]), /@codex/);
   const prompt = webAgentPrompt("claude", ["codex"], "project-test");
   assert.match(prompt, /m9r_note list[\s\S]*project-test/);
-  assert.match(prompt, /starts it cold every time/i);
-  assert.match(prompt, /continuity across pause\/stop\/restart comes only from M9R's own task state/i);
+  assert.match(prompt, /M9R owns your provider connection/i);
+  assert.match(prompt, /shared task state and durable room memory for authoritative continuity/i);
   assert.match(prompt, /both you and the recipient must be active room members/i);
   assert.doesNotMatch(prompt, /fresh paid run each turn/i);
 });
@@ -937,4 +937,15 @@ test("a queued room ask is not pushed after AWARE authorization is revoked", asy
     sessions.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("joint artifact guidance uses one observed window and explicit editor handoffs across apps", () => {
+  const prompt = webAgentPrompt("claude", ["codex"]);
+  assert.match(prompt, /one shared plan and separate contributions/);
+  assert.match(prompt, /one active editor until an explicit handoff/);
+  assert.match(prompt, /observe the shared window and send specific corrections/);
+  assert.match(prompt, /without clicking, changing tools, or taking focus/);
+  assert.match(prompt, /After a handoff, refresh the target/);
+  assert.match(prompt, /not a named app/);
+  assert.doesNotMatch(prompt, /starts it cold every time/);
 });
