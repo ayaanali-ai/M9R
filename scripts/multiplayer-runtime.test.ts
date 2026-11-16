@@ -177,6 +177,37 @@ test("task-scoped replies inherit their parent thread and taskless roots are ref
   if (!missingWitness.ok) assert.match(missingWitness.error, /progressFingerprint and progressKind/);
 });
 
+test("a reply stays bound to the thread's own task even when the replier passes its own different per-recipient task id", () => {
+  // M9R creates one inbox task per recipient from a single owner broadcast --
+  // there is no shared "room id" the model is told to use, so each agent only
+  // knows its own private task id (e.g. Claude's T448 vs Codex's T445 for the
+  // "same" conversation). Live repro: Codex's reply carried its own task id
+  // and M9R rejected it as bound to a different task, forcing Claude to take
+  // over Codex's half of the work instead of the handoff completing cleanly.
+  const runtime = createMultiplayerRuntime({ roster, now: () => 100 });
+  const first = runtime.sendFromHandle("claude", "claude-code", {
+    to: "codex", taskId: "T448", summary: "Proposal: Charleston, $700. Your take?",
+    progressFingerprint: "trip-proposal-1", progressKind: "observation",
+  });
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  const reply = runtime.sendFromHandle("codex", "codex", {
+    to: "claude",
+    taskId: "T445",
+    summary: "Agreed: Charleston, $700.",
+    replyToMessageId: first.message.messageId,
+    idempotencyKey: "trip-reply-1",
+    progressFingerprint: "trip-agreement-1",
+    progressKind: "observation",
+  });
+  assert.equal(reply.ok, true);
+  if (reply.ok) {
+    assert.equal(reply.message.taskId, "T448");
+    assert.equal(reply.message.conversationId, first.message.conversationId);
+    assert.equal(reply.message.replyDepth, 1);
+  }
+});
+
 test("legacy taskless messages can only continue through an exact known parent", () => {
   const runtime = createMultiplayerRuntime({
     roster,

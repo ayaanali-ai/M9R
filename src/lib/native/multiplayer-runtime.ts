@@ -309,7 +309,14 @@ export function createMultiplayerRuntime(input: {
     if (!recipient) return { ok: false, error: `@${safeHandle(inputValue.to)} is not part of the active M9R roster.` };
     if (recipient.agentId === sender.agentId) return { ok: false, error: "An agent cannot send a teammate message to itself." };
     const parentReference = inputValue.replyToMessageId ? router.referenceFor(inputValue.replyToMessageId) : undefined;
-    const taskId = inputValue.taskId?.trim() || parentReference?.taskId;
+    // Each agent only knows its own private per-recipient task id (M9R creates
+    // one inbox task per recipient from a single owner broadcast; there is no
+    // shared "room id" exposed to the model). A reply must stay bound to the
+    // task/conversation the thread was actually opened under -- the parent
+    // message's values -- never the replier's own, structurally different,
+    // task id, even if the caller happens to pass one. Only a thread's first
+    // message (no parent) gets to establish that shared value.
+    const taskId = parentReference?.taskId ?? inputValue.taskId?.trim();
     // New conversations must be task-scoped. Continue a previously durable
     // taskless thread only when the caller names its exact stored parent; the
     // existing depth and message bounds still apply to those legacy replies.
@@ -324,9 +331,8 @@ export function createMultiplayerRuntime(input: {
     let details: MultiplayerA2ASendInput["details"];
     try { details = normalizeDetails(inputValue.details); }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : "Structured teammate details are invalid." }; }
-    const conversationId = inputValue.conversationId?.trim()
-      || parentReference?.conversationId
-      || (taskId ? safeId("conversation", taskId) : undefined);
+    const conversationId = parentReference?.conversationId
+      ?? (inputValue.conversationId?.trim() || (taskId ? safeId("conversation", taskId) : undefined));
     const replyDepth = parentReference ? parentReference.replyDepth + 1 : 0;
     const progressFingerprint = inputValue.progressFingerprint ? storedProgressFingerprint(inputValue.progressFingerprint) : undefined;
     const canonicalDetails = details
