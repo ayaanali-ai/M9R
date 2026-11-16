@@ -598,17 +598,32 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // real concurrent work this call could be confused about -- refusing outright whenever more
   // than one candidate existed used to block every ordinary follow-up prompt behind the first
   // task in a session that ever failed to self-close, which is the common case, not an edge one.
+  // A provider action has no taskId field: it must retain the task explicitly
+  // selected by its observation instead of reverting to an older action receipt.
+  const selectedTaskBySession = new Map<string, string>();
   function resolveTaskId(identity: VerifiedIdentity, taskId?: string): string {
+    const sessionKey = `${identity.handle}\0${identity.sessionId}`;
     if (taskId) {
       // A new owner message pauses the running turn and carries its context into a fresh task. An agent that
       // still names the paused task is continuing the same work, so it acts under the owner's latest task;
       // honouring the stale id refused every action with "this task is paused". Canceled stays canceled.
       const named = deps.store.getTask(taskId);
-      if (named?.receipt?.state !== "paused") return taskId;
+      if (named?.receipt?.state !== "paused") {
+        if (pendingTasksFor(identity).some((task) => task.id === taskId)) selectedTaskBySession.set(sessionKey, taskId);
+        return taskId;
+      }
       const current = pendingTasksFor(identity);
-      return current.length ? (deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, current.map((task) => task.id)) ?? current[0].id) : taskId;
+      if (!current.length) return taskId;
+      const selected = selectedTaskBySession.get(sessionKey);
+      const resolved = current.some((task) => task.id === selected) ? selected!
+        : deps.store.mostRecentlyActiveTaskId(identity.handle, identity.sessionId, current.map((task) => task.id)) ?? current[0].id;
+      selectedTaskBySession.set(sessionKey, resolved);
+      return resolved;
     }
     const pending = pendingTasksFor(identity);
+    const selected = selectedTaskBySession.get(sessionKey);
+    if (selected && pending.some((task) => task.id === selected)) return selected;
+    selectedTaskBySession.delete(sessionKey);
     if (pending.length === 0) {
       throw new Error("A taskId is required: this session has no currently pending task. Pass the exact taskId you were given.");
     }

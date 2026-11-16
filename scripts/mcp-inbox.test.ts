@@ -648,3 +648,60 @@ test("native action boundaries include new peer context once without claiming an
     assert.equal(dispatched[1], work.id);
   } finally { t.done(); }
 });
+
+test("explicit task selection survives older operation activity and is invalidated by pause", async () => {
+  const dispatched: string[] = [];
+  const t = setup({ web: { taskStageAction: async (_token, taskId) => {
+    dispatched.push(taskId); return { ok: true, result: { actionExecuted: true } };
+  } } });
+  try {
+    const older = t.store.addTask({ from: "you", to: "codex", goal: "Start work", origin: "human_typed", idempotencyKey: "selection-old" }).task;
+    t.store.markDelivered([older.id], "x1");
+    t.store.claimStageOperation({ handle: "codex", sessionId: "x1", taskId: older.id, operationId: "prior-action", fingerprint: "a".repeat(64) });
+    const current = t.store.addTask({ from: "you", to: "codex", goal: "Continue handoff", origin: "human_typed", idempotencyKey: "selection-current" }).task;
+    t.store.markDelivered([current.id], "x1");
+    const args = { token: t.codex, operationId: "selection-cursor", action: { kind: "cursor", x: 2, y: 3 } };
+    await t.call("m9r_stage_action", { ...args, taskId: current.id });
+    await t.call("m9r_stage_action", args);
+    assert.deepEqual(dispatched, [current.id, current.id]);
+    t.store.pauseTask(current.id);
+    t.store.pauseTask(older.id);
+    const next = t.store.addTask({ from: "you", to: "codex", goal: "New owner instruction", origin: "human_typed", idempotencyKey: "selection-next" }).task;
+    t.store.markDelivered([next.id], "x1");
+    await t.call("m9r_stage_action", args);
+    assert.equal(dispatched[2], next.id, "a paused selection cannot retain control");
+  } finally { t.done(); }
+});
+
+test("a fresh explicitly selected observation can act despite an older task's operation receipt", async () => {
+  const dispatched: string[] = [];
+  const t = setup({ web: {
+    prepareTaskStage: async () => ({ ok: true }),
+    taskStageAction: async (_token, taskId, rawAction) => {
+      const action = rawAction as { kind: string };
+      if (action.kind === "read_structure") return { ok: true, result: {
+        status: "partial", elements: [{ ref: "uia:1", label: "Action", role: "Button", enabled: true,
+          actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }],
+        fallbackCapture: { dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString() }
+      } };
+      dispatched.push(taskId);
+      return { ok: true, result: { outcome: { status: "confirmed" }, operationReceipt: { status: "applied" }, actionExecuted: true } };
+    }
+  } });
+  try {
+    const older = t.store.addTask({ from: "you", to: "codex", goal: "Original work", origin: "human_typed", idempotencyKey: "observe-old" }).task;
+    t.store.markDelivered([older.id], "x1");
+    t.store.claimStageOperation({ handle: "codex", sessionId: "x1", taskId: older.id, operationId: "old-operation", fingerprint: "b".repeat(64) });
+    const current = t.store.addTask({ from: "you", to: "codex", goal: "Handoff", origin: "human_typed", idempotencyKey: "observe-current" }).task;
+    t.store.markDelivered([current.id], "x1");
+    const observed = JSON.parse(await t.call("m9r_computer_observe", { token: t.codex, taskId: current.id, target: "app-window" }));
+    const target = observed.target;
+    const result = JSON.parse(await t.call("m9r_computer_action", { token: t.codex, action: {
+      kind: "click", operationId: "handoff-click", targetId: target.targetId, targetRevision: target.revision,
+      locator: { kind: "element", ref: observed.observation.controls[0].ref, snapshotId: target.revision },
+      postcondition: { kind: "accessible-control-present", label: "Action" }
+    } }));
+    assert.notEqual(result.result?.error?.code, "task-context-changed");
+    assert.deepEqual(dispatched, [current.id]);
+  } finally { t.done(); }
+});

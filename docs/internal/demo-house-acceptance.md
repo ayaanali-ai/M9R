@@ -73,3 +73,15 @@ These source defects have regression coverage; the next installed build still
 requires a complete live run. The supervisor deliberately stopped both agents
 with an owner stop command; this was not a product crash or owner stop request.
 Passing complete rehearsals: **0 / 3**.
+
+### Demo handoff task-selection correction
+
+A fixture with an older task's stage-operation receipt reproduced an explicit
+new task followed by an implicit call resolving back to the older task:
+`expected T2,T2; observed T2,T1`. The computer-use action schema omits taskId,
+so this mismatch rejects an observation explicitly made under the new task.
+The MCP server now retains an explicitly selected eligible task per session;
+paused, canceled, completed, or otherwise ineligible tasks lose that selection.
+Regression coverage includes the fresh observation/action path and a paused
+selection yielding to a new owner instruction. This has not yet been verified
+live. The owner will submit rehearsal tasks; the supervisor must not send them.
