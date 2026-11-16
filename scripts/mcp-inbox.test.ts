@@ -94,6 +94,37 @@ test("desktop stage input derives a private one-shot receipt ID from the MCP req
   } finally { t.done(); }
 });
 
+test("m9r_stage_action tracks the mutation revision it last observed and feeds it back to the owner broker", async () => {
+  const receivedRevisions: Array<number | undefined> = [];
+  let nextRevision = 0;
+  const web: WebBrokerClient = {
+    taskStageAction: async (_token, _taskId, _action, _mode, _operationId, expectedMutationRevision) => {
+      receivedRevisions.push(expectedMutationRevision);
+      nextRevision += 1;
+      return { ok: true, result: { actionExecuted: true, mutationRevision: nextRevision } };
+    },
+  };
+  const t = setup({ web });
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Click the button", origin: "human_typed", idempotencyKey: "stage-revision" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const handler = (t.server as unknown as ToolServer)._registeredTools["m9r_stage_action"]!.handler as (
+      args: unknown, extra: { requestId: string | number }) => Promise<{ content: Array<{ type: string; text: string }> }>;
+    // A first action on a session's stage has nothing to compare against yet.
+    await handler({ token: t.codex, taskId: work.id, operationId: "stage-rev-1", action: { kind: "cursor", x: 1, y: 1 } }, { requestId: 1 });
+    assert.equal(receivedRevisions[0], undefined, "the first action on a fresh stage has no prior observation to carry forward");
+    // The second action must carry forward exactly the revision this session was
+    // just told about -- before this fix, every call omitted the revision entirely,
+    // so the owner broker's mutation fence could never tell this call apart from
+    // one made against stale, already-superseded state (e.g. after another agent
+    // took over a shared window in between).
+    await handler({ token: t.codex, taskId: work.id, operationId: "stage-rev-2", action: { kind: "cursor", x: 2, y: 2 } }, { requestId: 2 });
+    assert.equal(receivedRevisions[1], 1, "the second call must carry forward the revision reported by the first");
+    await handler({ token: t.codex, taskId: work.id, operationId: "stage-rev-3", action: { kind: "cursor", x: 3, y: 3 } }, { requestId: 3 });
+    assert.equal(receivedRevisions[2], 2, "each later call keeps carrying forward the most recently observed revision");
+  } finally { t.done(); }
+});
+
 test("an agent naming a task the owner's new message paused acts under the owner's latest task", async () => {
   let receivedTaskId = "";
   const web: WebBrokerClient = {
