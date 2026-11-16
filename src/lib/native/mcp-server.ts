@@ -195,7 +195,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // native input nor claims/finishes an inbox task or changes the current turn.
   const shownPeerMessages = new Set<string>();
   const conversationBoundaries = new Set(["m9r_computer_observe", "m9r_computer_action", "m9r_computer_program",
-    "m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action", "m9r_team_message"]);
+    "m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action", "m9r_team_message",
+    "m9r_agents", "m9r_task_state", "m9r_claim_work", "m9r_note"]);
   server.afterTool = async (name, args, result) => {
     if (!conversationBoundaries.has(name) || result.isError) return result;
     const token = args && typeof args === "object" && "token" in args ? (args as { token?: string }).token : undefined;
@@ -849,17 +850,17 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_agents",
     {
-      description: "List other M9R agents active recently. Use this before m9r_send if you don't already know who's around.",
+      description: "List configured teammates from the owner broker for an M9R-managed session. This roster is not a claim that a teammate is currently executing. Legacy unbound sessions use recent endpoint activity. Use this before messaging if you don't already know the team.",
       inputSchema: { ...AUTH_FIELD, activeWindowMinutes: z.number().int().min(1).max(1440).default(10) },
     },
     async ({ token, activeWindowMinutes }) => {
       const identity = await requireIdentity(token);
       // A web-room agent's teammates are its room roster, never an unrelated native Claude Code/Codex session that
       // happens to be open elsewhere on the machine -- checking the endpoint registry first could return those instead.
-      if (inRoom(identity) && deps.web?.listRoomAgents) {
+      if ((inRoom(identity) || identity.sessionId.startsWith("m9r-owner-")) && deps.web?.listRoomAgents) {
         const roster = (await deps.web.listRoomAgents()).filter((h) => h !== identity.handle && h !== roomHandle(identity, identity.handle));
         if (roster.length) return { content: [{ type: "text", text: roster.map((h) => `@${h}`).join(", ") }] };
-        return { content: [{ type: "text", text: "No other agents active recently." }] };
+        return { content: [{ type: "text", text: "The owner broker returned no other configured teammates; this does not establish provider availability." }] };
       }
       const now = Date.now();
       const others = deps.store.listEndpoints().filter((e) => e.handle !== identity.handle && now - Date.parse(e.lastSeenAt) < activeWindowMinutes * 60_000);

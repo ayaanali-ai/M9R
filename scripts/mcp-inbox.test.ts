@@ -12,6 +12,17 @@ import { createM9rMcpServer } from "@/lib/native/mcp-server";
 import { handleHookEvent } from "@/lib/native/hook-handler";
 import type { WebBrokerClient } from "@/lib/native/web-broker-client";
 
+test("managed agents discover broker teammates without legacy endpoint heartbeats", async () => {
+  const t = setup({ web: { listRoomAgents: async () => ["claude", "codex"] } });
+  try {
+    const managed = t.store.issueIdentity("codex", "codex", "m9r-owner-codex-roster-test");
+    assert.equal(t.store.listEndpoints().length, 0);
+    const text = await t.call("m9r_agents", { token: managed.token, activeWindowMinutes: 10 });
+    assert.match(text, /@claude/);
+    assert.doesNotMatch(text, /@codex|No other agents active/);
+  } finally { t.done(); }
+});
+
 type ToolServer = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }> }>; inputSchema: unknown; description?: string }> };
 
 function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStartedAt?: number; now?: () => Date } = {}) {
