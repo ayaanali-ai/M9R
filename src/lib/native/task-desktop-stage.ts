@@ -558,6 +558,7 @@ export function createTaskDesktopStageService(input: {
   };
   const ownedApps = new Map<string, OwnedStageApp>();
   const observedRegionRevisions = new Map<string, { surfaceId: string; surfaceRevision: number; regions: Map<string, number> }>();
+  const observedSurfaceRevisions = new Map<string, Map<string, number>>();
   const activeAgentCursors = new Map<string, { identity: CuaAgentCursorIdentity; taskId: string; primedAt: number }>();
   const cursorPresentationPending = new Set<string>();
   const cursorPresentationTask = new Map<string, string>();
@@ -1148,14 +1149,15 @@ export function createTaskDesktopStageService(input: {
             if (receiptInput) input.store.releaseStageOperation(receiptInput);
             throw new DesktopInputNotDispatchedError("Read the app structure before independently changing this control; no input was sent.", "mutation-revision");
           }
+          const observedRevision = expectedMutationRevision ?? observedSurfaceRevisions.get(name)?.get(fenceTarget.surfaceId)
+            ?? (mutationRegionId ? observedRegions?.surfaceRevision : undefined);
           const begun = input.mutationFence.begin({
             agent: identity.handle,
             provider: identity.provider,
             sessionId: identity.sessionId,
             operationId: operationId ?? `stage-${randomUUID()}`,
             target: fenceTarget,
-            ...((expectedMutationRevision ?? (mutationRegionId ? observedRegions?.surfaceRevision : undefined)) === undefined ? {}
-              : { expectedMutationRevision: expectedMutationRevision ?? observedRegions?.surfaceRevision }),
+            ...(observedRevision === undefined ? {} : { expectedMutationRevision: observedRevision }),
             ...(expectedRegionRevision === undefined ? {} : { expectedRegionRevision }),
           });
           if (!begun.ok) {
@@ -1213,6 +1215,14 @@ export function createTaskDesktopStageService(input: {
         } else if (mutationSurfaceId && input.mutationFence
           && (effectiveAction.kind === "capture" || effectiveAction.kind === "read_structure")) {
           mutationRevision = input.mutationFence.observeSurface(mutationSurfaceId);
+        }
+        if (mutationSurfaceId && mutationRevision !== undefined
+          && (fenceTransaction || effectiveAction.kind === "capture" || effectiveAction.kind === "read_structure")) {
+          let revisions = observedSurfaceRevisions.get(name);
+          if (!revisions) { revisions = new Map(); observedSurfaceRevisions.set(name, revisions); }
+          revisions.delete(mutationSurfaceId);
+          revisions.set(mutationSurfaceId, mutationRevision);
+          while (revisions.size > 64) revisions.delete(revisions.keys().next().value!);
         }
         if (effectiveAction.kind === "read_structure" && effectiveAction.view === "app" && selected
           && input.mutationFence && mutationSurfaceId && typeof driver.observedValueMutationRegions === "function") {
@@ -1908,6 +1918,7 @@ export function createTaskDesktopStageService(input: {
     activeAgentCursors.clear();
     cursorPresentationTask.clear();
     observedRegionRevisions.clear();
+    observedSurfaceRevisions.clear();
     try {
       await driver.shutdown();
     } finally {

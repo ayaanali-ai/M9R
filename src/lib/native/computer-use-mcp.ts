@@ -830,6 +830,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     logicalKey?: string;
     captureOverride?: Record<string, unknown>;
     inputSelectionConfirmed?: boolean;
+    confirmInputSelectionFromFocus?: boolean;
     bindForeground?: boolean;
     mutationRevision?: number;
   }): Promise<{ record: TargetRecord; observation: Record<string, unknown>; image?: ImageBlock }> {
@@ -979,7 +980,12 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     }
     const map = new Map(controls.map((control) => [control.ref, control]));
     const logicalKey = input.logicalKey ?? `desktop:${input.taskId}:${input.mode}:${input.view}`;
-    const inputSelectionConfirmed = input.inputSelectionConfirmed === true;
+    // A dispatched semantic click is not focus proof. Use the same fresh native
+    // tree already read for its result, restricted to a focused text control.
+    const inputSelectionConfirmed = input.inputSelectionConfirmed === true
+      || (input.view === "app" && input.confirmInputSelectionFromFocus === true && rawElements.some(element => element.focused === true
+        && element.enabled !== false && (/^(?:edit|textfield|textarea)$/i.test(String(element.role ?? ""))
+          || (element.canReplaceValue === true && /^(?:document|combo\s?box)$/i.test(String(element.role ?? ""))))));
     const kind = input.view === "app" ? "desktop-window" : "desktop";
     const contextRepresentation = input.representation;
     const rectByStageRef = new Map(controls.filter((control) => control.stageRef && control.rect).map((control) => [control.stageRef!, control.rect!]));
@@ -1828,8 +1834,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       // matching comment in cua-stage-driver.ts's click()/clickElement().
       const inputSelectionConfirmed = action.kind === "click"
         ? response.ok && (outcome?.status === "confirmed"
-          || outcome?.foregroundConfirmed === true
-          || (action.confirmFocusForeground === true && outcome?.status !== "suspected-noop"))
+          || outcome?.foregroundConfirmed === true)
         : (action.kind === "text" && action.mode === "insert" || action.kind === "key" || action.kind === "text_then_enter")
           ? response.ok && record.context.inputSelectionConfirmed
           : false;
@@ -1838,6 +1843,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         try {
           updated = await timing.measure("observationMs", () => observeDesktop({ token: authToken, identity, taskId: desktopContext.taskId, mode: desktopContext.mode, view: desktopContext.view,
             representation: desktopContext.representation, logicalKey: record.scopeKey, captureOverride: capture, inputSelectionConfirmed,
+            confirmInputSelectionFromFocus: response.ok && action.kind === "click" && !action.targetPopup,
             ...(responseMutationRevision === undefined ? {} : { mutationRevision: responseMutationRevision }) }));
           // The action response already contains this fresh capture; retain that exact observation as evidence.
           const recovery = recordOf(response.recovery);

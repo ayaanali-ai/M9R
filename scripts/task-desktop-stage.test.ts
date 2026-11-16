@@ -187,6 +187,34 @@ test("explicit background foreground-binding only observes and shares the exact 
   } finally { await f.service.close(); f.cleanup(); }
 });
 
+test("native stage revisions stay scoped to the observed surface and reject another agent's unseen edit", async () => {
+  const f = fixture(true, undefined, undefined, true, { processAlive: () => true });
+  let edits = 0;
+  const proof = () => ({ capture: { dataUrl: "data:image/png;base64,eA==", width: 1280, height: 720, capturedAt: new Date().toISOString() },
+    outcome: { status: "confirmed" as const } });
+  f.driver.typeText = async () => { edits++; return proof(); };
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview", { bindForeground: true });
+    const capture = () => f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "app" }, "owner-preview");
+    const edit = () => f.service.act(f.identity.token, f.task.id, { kind: "type", view: "app", text: "x" }, "owner-preview");
+    await capture();
+    await edit();
+    await f.service.act(f.identity.token, f.task.id, { kind: "capture", view: "desktop" }, "owner-preview");
+    await edit(); // the desktop's revision must not replace the app's revision
+    const peer = f.store.issueIdentity("codex", "codex", "revision-peer");
+    const task = f.store.addTask({ from: "you", to: "codex", goal: "Edit the shared app", origin: "human_typed",
+      targetSession: "revision-peer", idempotencyKey: "revision-peer" }).task;
+    await f.service.prepare(peer.token, task.id, "owner-preview", { bindForeground: true });
+    await f.service.act(peer.token, task.id, { kind: "capture", view: "app" }, "owner-preview");
+    await f.service.act(peer.token, task.id, { kind: "type", view: "app", text: "peer" }, "owner-preview");
+    await assert.rejects(edit(), /revision is stale/);
+    assert.equal(edits, 3, "the unseen peer edit must refuse before dispatch");
+    await capture();
+    await edit();
+    assert.equal(edits, 4, "a fresh app observation enables the next action");
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("transient cursor policy reads do not close the agent overlay until three consecutive failures", async () => {
   let policyUnavailable = false;
   const f = fixture(false, undefined, () => {

@@ -2214,6 +2214,18 @@ test("an exact UIA ref with no advertised activation pattern still uses native p
   await driver.shutdown();
 }));
 
+test("app accessibility observations retain native keyboard focus separately from dispatch success", async () => withRoot(async root => {
+  await registerStage(root);
+  const state = { elements: [{ role: "Edit", label: "Search", focused: true, enabled: true,
+    frame: { x: 120, y: 70, w: 60, h: 24 } }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [], state }) as never });
+  try {
+    assert.equal((await driver.readStructure("stage")).elements[0]!.focused, true);
+    state.elements[0].focused = false;
+    assert.equal((await driver.readStructure("stage")).elements[0]!.focused, false);
+  } finally { await driver.shutdown(); }
+}));
+
 test("UIA refs position the M9R cursor from fresh screen bounds without a pre-action screenshot", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

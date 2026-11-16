@@ -243,6 +243,7 @@ export interface CuaStageStructure {
     label?: string;
     enabled?: boolean;
     selected?: boolean;
+    focused?: boolean;
     actions?: string[];
     canReplaceValue?: boolean;
     canReadValue?: boolean;
@@ -2069,7 +2070,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           capturedAt,
           ...(frame.windowBounds ? { screenRect: frame.windowBounds } : {}),
           elements: elements.map(({ native, mapped }) => ({
-            ref: native.ref, depth: native.depth, role: native.role, label: normalizeAccessibleLabel(native.label) ?? "", enabled: native.enabled,
+            ref: native.ref, depth: native.depth, role: native.role, label: normalizeAccessibleLabel(native.label) ?? "", enabled: native.enabled, focused: native.focused,
             actions: mapped.actions, ...(native.actions?.setValue ? { canReplaceValue: true } : {}),
             ...(native.actions?.readValue ? { canReadValue: true } : {}),
             ...(native.scroll ? { scroll: native.scroll } : {}),

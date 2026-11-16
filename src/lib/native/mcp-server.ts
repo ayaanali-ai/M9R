@@ -614,21 +614,8 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // A provider action has no taskId field: it must retain the task explicitly
   // selected by its observation instead of reverting to an older action receipt.
   const selectedTaskBySession = new Map<string, string>();
-  // m9r_computer_action tracks the mutation revision it last observed server-side
-  // (computer-use-mcp.ts's per-target "record") and feeds it back into every
-  // dispatch, so the owner broker's mutation fence can refuse a stale action on a
-  // shared window. The legacy m9r_stage_action tool used to call taskStageAction()
-  // with no revision argument at all -- act()'s fence.begin() then defaults
-  // expectedMutationRevision to whatever the surface's CURRENT revision already is
-  // (task-desktop-stage.ts), which always "matches" and never refuses, regardless
-  // of what this session actually last observed. On a shared/fenced window handed
-  // off between two agents, that silently skipped the one check meant to force a
-  // fresh observation after a handoff. cursorStageName() derives the stage name
-  // purely from handle+sessionId+mode, so that same tuple keys this map.
-  const lastKnownStageMutationRevision = new Map<string, number>();
-  function stageRevisionKey(identity: VerifiedIdentity, mode: "background" | "owner-preview"): string {
-    return `${normalizeHandle(identity.handle)}\0${identity.sessionId}\0${mode}`;
-  }
+  // Native stage refs use the owner's per-stage, per-surface observation ledger.
+  // Structured refs retain their exact observation's explicit revision below.
   function resolveTaskId(identity: VerifiedIdentity, taskId?: string): string {
     const sessionKey = `${identity.handle}\0${identity.sessionId}`;
     if (taskId) {
@@ -872,18 +859,16 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     const { identity, token: authToken } = await authenticate(token);
     const taskId = resolveTaskId(identity, requestedTaskId);
     const operationId = requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
-    const revisionKey = stageRevisionKey(identity, mode);
     const reference = "ref" in action
       ? computerUseTools.resolveStageReference(identity, taskId, mode, action.view, action.ref)
       : undefined;
     const dispatchAction = reference ? { ...action, ref: reference.ref } : action;
     const response = deps.web?.taskStageAction
       ? await deps.web.taskStageAction(authToken, taskId, dispatchAction, mode, operationId,
-        reference ? reference.mutationRevision : lastKnownStageMutationRevision.get(revisionKey))
+        reference?.mutationRevision)
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     const result = response.result as { capture?: { dataUrl?: string; ownedPopups?: Array<{ dataUrl?: string }> };
       fallbackCapture?: { dataUrl?: string; ownedPopups?: Array<{ dataUrl?: string }> }; mutationRevision?: number } | undefined;
-    if (typeof result?.mutationRevision === "number") lastKnownStageMutationRevision.set(revisionKey, result.mutationRevision);
     const recovery = response.recovery as { kind?: string; capture?: { dataUrl?: string; ownedPopups?: Array<{ dataUrl?: string }> } } | undefined;
     const capture = result?.capture ?? result?.fallbackCapture ?? (recovery?.kind === "capture_refreshed" ? recovery.capture : undefined);
     const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [

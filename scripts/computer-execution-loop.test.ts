@@ -34,6 +34,7 @@ function fixture() {
   let structureScreenRect: Record<string, number> | undefined;
   let stageWindowFrame: { requested: { x: number; y: number; width: number; height: number }; actual: { x: number; y: number; width: number; height: number }; verified: boolean } | undefined;
   let activeTaskId = "T1";
+  let nativeFocus: boolean | undefined;
   let clockMs: number | undefined;
   const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString() });
   const web: Pick<WebBrokerClient, "prepareTaskStage" | "taskStageAction"> = {
@@ -46,7 +47,8 @@ function fixture() {
         ...(structureCoverage ? { coverage: structureCoverage } : {}),
         ...(structureScreenRect ? { screenRect: structureScreenRect } : {}),
         ...(desktopWindows ? { scope: "desktop", windows: desktopWindows } : {}),
-        elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: "Button", enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
+        elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: nativeFocus === undefined ? "Button" : "Edit", focused: nativeFocus,
+          enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
       if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched", gateCode: "foreground-lease" };
       if (failure === "uncertain") throw new Error("Response lost after input");
       if (action.kind === "type_then_enter") return { ok: true, result: { capture: capture(), outcome: { status: "confirmed" },
@@ -58,7 +60,7 @@ function fixture() {
         ? { status: stageWindowFrame.verified ? "confirmed" : "partial", windowFrame: stageWindowFrame }
         : action.kind === "click" && (input as { view?: string }).view === "popup"
           ? { status: "unverified", foregroundConfirmed: true }
-          : { status: "confirmed" };
+          : { status: nativeFocus === undefined ? "confirmed" : "unverified" };
       return { ok: true, result: { ...(popupCaptureFallback && (input as { view?: string }).view === "popup" ? { captureScope: "popup" } : {}),
         capture: capture(), outcome, operationReceipt: { status: "applied" }, actionExecuted: true } };
     },
@@ -67,7 +69,7 @@ function fixture() {
     { store, web: web as WebBrokerClient, requireIdentity: async () => identity, identityToken: async () => token, resolveTaskId: () => activeTaskId,
       resolveWorkIdentity: () => ({ workId: "work-original", planRevision: activeTaskId === "T1" ? 0 : 1 }),
       now: () => new Date(clockMs ?? Date.now()) });
-  return { calls, actionsSent, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
+  return { calls, actionsSent, setNativeFocus: (value: boolean) => { nativeFocus = value; }, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     setPopupCaptureFallback: () => { popupCaptureFallback = true; },
     setCoverage: (value: Record<string, unknown>) => { structureCoverage = value; },
     setDesktopWindows: (value: Array<Record<string, unknown>>) => { desktopWindows = value; },
@@ -291,6 +293,21 @@ test("observation refs expire on a new revision, not on wall-clock age", async (
     const result = await f.call("m9r_computer_action", { action: click(observed.target, "aged-but-current-ref", observed.observation.controls[0]!.ref) });
     assert.equal(result.result.dispatchStatus, "dispatched");
     assert.equal(f.calls.filter((call) => call.kind === "click_element").length, 1, "the still-current ref is dispatched instead of rejected and refreshed");
+  } finally { f.close(); }
+});
+
+test("an unverified semantic click uses fresh native keyboard focus, never a requested focus flag, to select text input", async () => {
+  const f = fixture(); try {
+    for (const focused of [false, true]) {
+      f.setNativeFocus(focused);
+      const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+      const selected = await f.call("m9r_computer_action", { action: { ...click(observed.target, `focus-${focused}`, observed.observation.controls[0]!.ref),
+        postcondition: undefined, confirmFocusForeground: !focused } });
+      const text = await f.call("m9r_computer_action", { action: { kind: "text_then_enter", operationId: `query-${focused}`,
+        targetId: selected.target.targetId, targetRevision: selected.target.revision, text: "A search query" } });
+      assert.equal(text.result.dispatchStatus, focused ? "dispatched" : "not-dispatched");
+    }
+    assert.equal(f.calls.filter(call => call.kind === "type_then_enter").length, 1);
   } finally { f.close(); }
 });
 
