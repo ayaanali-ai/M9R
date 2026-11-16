@@ -655,8 +655,18 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         && !task.resultSummary
         // A paused or explicitly canceled turn must not claim tools from a
         // later owner instruction. M9R task context remains durable, but only
-        // the fresh follow-up task is eligible for desktop work.
-        && task.receipt?.state !== "canceled" && task.receipt?.state !== "paused"
+        // the fresh follow-up task is eligible for desktop work. "uncertain"
+        // joins them here to line up with task-desktop-stage.ts's taskActive(),
+        // which already treats it as dead for window claims, the cursor
+        // reaper, and broadcast dedupe -- without this, action routing could
+        // disagree with every one of those about whether the same task is
+        // still live. Confirmed live: an owner turn ends with no completion
+        // report gets an automatic "uncertain" receipt to stay discoverable
+        // (189d0d34), and action routing then kept treating it as the pending
+        // task to dispatch against, misrouting a later agent's call into it.
+        // Only action routing changes here; resolveResultTaskId is separate,
+        // so a later m9r_result can still close the task out normally.
+        && task.receipt?.state !== "canceled" && task.receipt?.state !== "paused" && task.receipt?.state !== "uncertain"
         && task.approval !== "denied"
         && task.approval !== "expired"
         && task.delivery?.state !== "failed"

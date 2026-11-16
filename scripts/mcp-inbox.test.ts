@@ -401,6 +401,33 @@ test("incomplete teammate results are returned, while depth limits and missing s
   } finally { t.done(); }
 });
 
+test("an uncertain receipt stops acting as the pending task, matching the desktop stage's taskActive() exclusion", async () => {
+  const dispatched: string[] = [];
+  const t = setup({ web: { taskStageAction: async (_token, taskId) => {
+    dispatched.push(taskId); return { ok: true, result: { actionExecuted: true } };
+  } } });
+  try {
+    const stale = t.store.addTask({ from: "you", to: "codex", goal: "Start work", origin: "human_typed", idempotencyKey: "uncertain-stale" }).task;
+    t.store.markDelivered([stale.id], "x1");
+    // An incomplete self-reported result leaves the receipt "uncertain" (see the
+    // assertion above), not "paused" or "canceled" -- before this fix, pendingTasksFor
+    // still offered this task to a caller that omitted taskId, letting a later
+    // unrelated action silently dispatch against stale, already-abandoned work.
+    t.store.recordTaskResult(t.codex, stale.id, "Partial check.", { status: "incomplete", remainingWork: ["Finish."] });
+    assert.equal(t.store.getTask(stale.id)?.receipt?.state, "uncertain");
+    await assert.rejects(
+      t.call("m9r_stage_action", { token: t.codex, operationId: "uncertain-op-1", action: { kind: "cursor", x: 2, y: 3 } }),
+      /no currently pending task/,
+    );
+    assert.equal(dispatched.length, 0, "the uncertain task must never be the implicit dispatch target");
+
+    const fresh = t.store.addTask({ from: "you", to: "codex", goal: "New owner instruction", origin: "human_typed", idempotencyKey: "uncertain-fresh" }).task;
+    t.store.markDelivered([fresh.id], "x1");
+    await t.call("m9r_stage_action", { token: t.codex, operationId: "uncertain-op-2", action: { kind: "cursor", x: 2, y: 3 } });
+    assert.equal(dispatched[0], fresh.id, "a fresh task is still selectable once it exists");
+  } finally { t.done(); }
+});
+
 test("a new browser room inbox ignores pre-start work but still shows tasks created during this broker lifetime", async () => {
   const roomStartedAt = Date.parse("2026-09-30T12:00:00.000Z");
   let now = new Date(roomStartedAt - 1_000);
