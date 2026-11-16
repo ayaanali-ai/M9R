@@ -41,8 +41,8 @@ test("coordinationRootKey keys shared A2A work by lineage, not by each hop's own
     "every reply in one A2A conversation thread must resolve to the same root key, even though each hop's goal text is unique");
 
   const conversationLinkedTask = { id: "T5", broadcastId: "bcast-2", a2a: { conversationId: "conv-2" } };
-  assert.equal(coordinationRootKey(conversationLinkedTask), "conv-2",
-    "a2a.conversationId takes precedence over broadcastId when a task carries both");
+  assert.equal(coordinationRootKey(conversationLinkedTask), "bcast-2",
+    "an explicit owner broadcast remains the root even after conversation metadata is added");
 
   const soloTask = { id: "T6" };
   assert.equal(coordinationRootKey(soloTask), "T6",
@@ -53,9 +53,30 @@ test("coordinationRootKey keys shared A2A work by lineage, not by each hop's own
     "two unrelated solo tasks must never share a root key");
 });
 
+test("owner broadcast, A2A handoffs, and plain result replies keep one window and launch group", () => {
+  const tasks = [
+    { id: "T1", broadcastId: "owner-broadcast" },
+    { id: "T2", broadcastId: "owner-broadcast" },
+    { id: "T3", a2a: { taskId: "T1", conversationId: "conversation-a" } },
+    { id: "T4", a2a: { taskId: "T2", conversationId: "conversation-b" } },
+    { id: "T5", parentTaskId: "T3", replyToTaskId: "T3" },
+    { id: "T6", parentTaskId: "T5" },
+  ];
+  const lookup = (id: string) => tasks.find(task => task.id === id);
+  for (const task of tasks) {
+    assert.equal(coordinationRootKey(task, lookup), "owner-broadcast");
+    assert.equal(ownerPreviewLaunchQueueKey(coordinationRootKey(task, lookup), "Paint"),
+      ownerPreviewLaunchQueueKey("owner-broadcast", "Paint"));
+  }
+  assert.notEqual(coordinationRootKey({ id: "T7", broadcastId: "unrelated-broadcast" }, lookup), "owner-broadcast");
+  assert.equal(coordinationRootKey({ id: "T8", replyToTaskId: "missing" }, lookup), "T8");
+  const cycle = [{ id: "T9", parentTaskId: "T10" }, { id: "T10", parentTaskId: "T9" }];
+  assert.equal(coordinationRootKey(cycle[0], id => cycle.find(task => task.id === id)), "T9");
+});
+
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
   readPolicyOverride?: () => ReturnType<typeof readTaskStagePolicy>, fenced = false,
-  managerHooks?: { onCloseInputStream?: (streamId: string) => void }, cursorMaxLifetimeMsForTest?: number) {
+  managerHooks?: { onCloseInputStream?: (streamId: string) => void; processAlive?: (pid: number) => boolean }, cursorMaxLifetimeMsForTest?: number) {
   const root = mkdtempSync(join(tmpdir(), "m9r-task-stage-"));
   setOwnerWorkMode(root, "agents-free"); // legacy-path regression fixture; safe-default coverage is separate
   const store = createLocalStore(root);
@@ -105,6 +126,7 @@ function fixture(control = false, resolveStageAppForTest?: (root: string, appId:
     },
   };
   const manager = managerHooks ? createWindowsDesktopStageManager({ ...stage, root, terminal: true,
+    ...(managerHooks.processAlive ? { processAlive: managerHooks.processAlive } : {}),
     sharedWindowFence: mutationFence,
     taskActive: (taskId) => {
       const current = store.getTask(taskId);
@@ -606,6 +628,32 @@ test("an owner desktop app request reuses personal Chrome without creating anoth
       "a newly authorized task in the same authenticated session retains its exact selected window");
     await f.service.act(f.identity.token, next.id, { kind: "capture", view: "app" }, "owner-preview");
     assert.equal(f.creations(), 0, "launch reuse must not create or query a Windows desktop");
+  } finally { f.cleanup(); }
+});
+
+test("a handoff and its plain result can join the owner's exact window across sessions", async () => {
+  const f = fixture(true, (root) => ({ executable: join(root, "chrome.exe"), args: [] }), undefined, true, { processAlive: () => true });
+  try {
+    f.setVisibleWindows([{ pid: 123, windowId: "456", processName: "chrome.exe", title: "Shared Chrome", width: 1280, height: 720 }]);
+    await f.service.launch(f.identity.token, f.task.id, "chrome");
+    const peer = f.store.issueIdentity("codex", "codex", "handoff-session");
+    const handoff = f.store.addTask({ from: "claude", to: "codex", goal: "Continue on the shared window",
+      origin: "agent_initiated", targetSession: "handoff-session", standingRuleApplies: true, idempotencyKey: "window-handoff",
+      a2a: { taskId: f.task.id, conversationId: "shared-conversation", messageId: "handoff-message",
+        senderAgentId: "agent-claude", recipientAgentId: "agent-codex", replyDepth: 0, kind: "surface-handoff", summary: "Your turn" } }).task;
+    await f.service.launch(peer.token, handoff.id, "chrome");
+    const resultIdentity = f.store.issueIdentity("codex", "codex", "result-session");
+    const result = f.store.addTask({ from: "claude", to: "codex", goal: "The edit is ready to inspect",
+      origin: "agent_initiated", targetSession: "result-session", standingRuleApplies: true, idempotencyKey: "window-result",
+      parentTaskId: handoff.id, replyToTaskId: handoff.id }).task;
+    await f.service.launch(resultIdentity.token, result.id, "chrome");
+    await f.service.act(resultIdentity.token, result.id, { kind: "capture", view: "app" }, "owner-preview");
+    assert.deepEqual(f.presentedWindows, Array(3).fill({ pid: 123, windowId: "456" }));
+    assert.equal(f.creations(), 0);
+    const unrelatedIdentity = f.store.issueIdentity("codex", "codex", "unrelated-session");
+    const unrelated = f.store.addTask({ from: "you", to: "codex", goal: "Unrelated work",
+      origin: "human_typed", targetSession: "unrelated-session", idempotencyKey: "unrelated-window-work" }).task;
+    await assert.rejects(f.service.launch(unrelatedIdentity.token, unrelated.id, "chrome"), /claimed/);
   } finally { f.cleanup(); }
 });
 

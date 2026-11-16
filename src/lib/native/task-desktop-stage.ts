@@ -66,19 +66,29 @@ function stageMode(value: unknown): TaskStageMode {
   throw new Error("Invalid task stage mode.");
 }
 
-/**
- * A task's goal text changes on every A2A hop -- the owner's broadcast, each
- * delegate message, each teammate reply all carry different wording for the
- * same shared effort. Hashing the goal (the prior behavior) therefore gives
- * every hop in one conversation a different coordination key, so the second
- * agent's turn never recognizes the window the first agent just claimed on
- * its behalf. Key off task lineage instead: every reply in one A2A thread
- * shares `a2a.conversationId`; every per-recipient task from one owner
- * broadcast shares `broadcastId`; a solo task with neither falls back to its
- * own id, which still isolates it from unrelated work same as before.
- */
-export function coordinationRootKey(task: { id: string; broadcastId?: string; a2a?: { conversationId?: string } }): string {
-  return task.a2a?.conversationId ?? task.broadcastId ?? task.id;
+interface CoordinationTask {
+  id: string;
+  broadcastId?: string;
+  a2a?: { conversationId?: string; taskId?: string };
+  replyToTaskId?: string;
+  parentTaskId?: string;
+}
+
+/** Resolve durable lineage, including plain result replies, before choosing a
+ * window group. A conversation id is only a legacy fallback: it must not split
+ * messages from the owner broadcast that started that conversation. */
+export function coordinationRootKey(task: CoordinationTask, getTask?: (id: string) => CoordinationTask | undefined): string {
+  const seen = new Set<string>();
+  let current = task;
+  for (;;) {
+    if (seen.has(current.id)) return task.id; // malformed lineage never joins another window group
+    seen.add(current.id);
+    if (current.broadcastId) return current.broadcastId;
+    const parentId = current.a2a?.taskId ?? current.replyToTaskId ?? current.parentTaskId;
+    const parent = parentId && parentId !== current.id ? getTask?.(parentId) : undefined;
+    if (!parent) return current.a2a?.conversationId ?? current.id;
+    current = parent;
+  }
 }
 
 /**
@@ -1322,10 +1332,10 @@ export function createTaskDesktopStageService(input: {
     if (manager.list().find((stage) => stage.name === initial.name)?.fencedBinding && !input.mutationFence) {
       throw new DesktopInputNotDispatchedError("This app target requires the owner broker's mutation fence; no launch or focus action was sent.", "dispatch-gate");
     }
-    const queueName = mode === "owner-preview" ? ownerPreviewLaunchQueueKey(coordinationRootKey(initial.task), appId) : initial.name;
+    const queueName = mode === "owner-preview" ? ownerPreviewLaunchQueueKey(coordinationRootKey(initial.task, id => input.store.getTask(id)), appId) : initial.name;
     const run = async () => {
       const { name, identity, task } = authorize(token, taskId, mode);
-      const coordinationKey = mode === "owner-preview" ? stageCoordinationKey(coordinationRootKey(task)) : undefined;
+      const coordinationKey = mode === "owner-preview" ? stageCoordinationKey(coordinationRootKey(task, id => input.store.getTask(id))) : undefined;
       if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("The owner has not enabled stage computer control for this agent.");
       // Broker startup warming is intentionally asynchronous, but app launch
       // must not race that warm-up and accidentally make the first task pay
