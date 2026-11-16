@@ -54,13 +54,14 @@ function gatedConnection(profile: ManagedProviderConnectionProfile) {
 }
 
 test("a provider turn ending without a completion report preserves unfinished M9R work", async () => {
+  const goal = ("Verify both documents. " + "Detailed owner requirements. ".repeat(45)).trim();
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-incomplete-"));
   const store = createLocalStore(root);
   let gated: ReturnType<typeof gatedConnection> | undefined;
   const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
     repoRoot: root, brokerPort: 0, store, env: {}, createConnection: (profile) => (gated = gatedConnection(profile)).connection });
   try {
-    assert.equal(owner.deliver("codex", "Verify both documents.").ok, true);
+    assert.equal(owner.deliver("codex", goal).ok, true);
     for (let attempt = 0; attempt < 100 && !gated?.sent.length; attempt++) await new Promise((done) => setTimeout(done, 10));
     gated!.release();
     for (let attempt = 0; attempt < 100 && store.getTask("T1")?.receipt?.state !== "uncertain"; attempt++) await new Promise((done) => setTimeout(done, 10));
@@ -74,7 +75,8 @@ test("a provider turn ending without a completion report preserves unfinished M9
     // discarded and task-log showed "incomplete" forever).
     assert.equal(task.receipt?.state, "uncertain");
     assert.equal(task.resultSummary, undefined);
-    assert.deepEqual(task.completion?.remainingWork, ["Verify both documents."]);
+    assert.deepEqual(task.completion?.remainingWork, [goal.slice(0, 1_000)]);
+    assert.equal(task.goal, goal, "the full objective remains durable; only the bounded completion excerpt is shortened");
     assert.match(gated!.sent[0]!.prompt, /Ending the provider turn alone never completes/);
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });

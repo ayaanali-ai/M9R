@@ -1391,18 +1391,22 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
       if (existing.to !== identity.handle && existing.to !== roomHandle(identity, identity.handle)) throw new Error(`Task ${taskId} was not sent to you (@${identity.handle}), refusing to report a result for it.`);
-      for (const id of handledPeerTaskIds ?? []) {
+      // The current result already resolves its own task. Prompt delivery is
+      // durable presentation evidence too, including after MCP reconnect.
+      const peerIds = [...new Set(handledPeerTaskIds ?? [])].filter(id => id !== taskId);
+      for (const id of peerIds) {
         const peer = deps.store.getTask(id);
         const key = peer?.a2a?.messageId ?? id;
-        if (!shownPeerMessages.has(`${identity.sessionId}\0${key}`)) throw new Error("Only peer messages shown in this session can be reported handled.");
+        const deliveredHere = peer?.deliveredAt && peer.deliveredSession === identity.sessionId;
+        if (!shownPeerMessages.has(`${identity.sessionId}\0${key}`) && !deliveredHere) throw new Error("Only peer messages shown in this session can be reported handled.");
       }
       let answer: { answerTaskId?: string; answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict" } | undefined;
       if (deps.web?.recordAgentTaskResult) {
-        const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary, report, handledPeerTaskIds);
+        const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary, report, peerIds);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
         answer = recorded;
       } else {
-        const recorded = deps.store.recordTaskResult(authToken, taskId, summary, report, handledPeerTaskIds);
+        const recorded = deps.store.recordTaskResult(authToken, taskId, summary, report, peerIds);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
         answer = recorded;
       }

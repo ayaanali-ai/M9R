@@ -892,6 +892,21 @@ test("a result durably resolves only explicitly handled peer context without ack
   } finally { t.done(); }
 });
 
+test("prompt-delivered peer messages can be reconciled after reconnect and current-task acknowledgement is redundant", async () => {
+  const t = setup();
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Finish work", origin: "human_typed", idempotencyKey: "prompt-root" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const peer = t.store.addTask({ from: "claude", to: "codex", goal: "Verification complete", origin: "agent_initiated",
+      standingRuleApplies: true, targetSession: "x1", replyToTaskId: work.id, idempotencyKey: "prompt-peer" }).task;
+    t.store.markDelivered([peer.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: work.id, summary: "Verified and finished",
+      completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [work.id, peer.id] });
+    assert.equal(t.store.getTask(work.id)?.receipt?.state, "completed");
+    assert.equal(t.store.getTask(peer.id)?.receipt?.state, "completed");
+  } finally { t.done(); }
+});
+
 test("explicit task selection survives older operation activity and is invalidated by pause", async () => {
   const dispatched: string[] = [];
   const t = setup({ web: { taskStageAction: async (_token, taskId) => {

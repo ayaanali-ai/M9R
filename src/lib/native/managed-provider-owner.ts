@@ -818,8 +818,9 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
             // work when the provider returns without that report.
             if (current?.receipt?.state !== "completed" && current?.receipt?.state !== "paused") {
               const result = deps.store.recordTaskResult?.(context.token, taskId, event.text, { status: "incomplete",
-                remainingWork: current?.logicalContext?.remainingWork?.length ? current.logicalContext.remainingWork
-                  : [current?.logicalContext?.latestInstruction ?? current?.goal ?? "Verify the assigned work and report its completion."] });
+                remainingWork: (current?.logicalContext?.remainingWork?.length ? current.logicalContext.remainingWork
+                  : [current?.logicalContext?.latestInstruction ?? current?.goal ?? "Verify the assigned work and report its completion."])
+                  .slice(0, 32).map(item => item.trim().slice(0, 1_000)).filter(Boolean) });
               if (!result?.ok && !result?.alreadyRecorded) emit({ kind: "system", handle: profile.handle, provider: profile.provider, text: `M9R could not record ${taskId}: ${result?.error ?? "result storage is unavailable"}` });
             }
           }
