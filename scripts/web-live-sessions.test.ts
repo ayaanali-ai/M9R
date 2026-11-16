@@ -105,6 +105,18 @@ test("claude starts lazily with M9R-owned identity and no credential in the syst
   } finally { t.done(); }
 });
 
+test("legacy provider delivery includes the task's durable working context", () => {
+  const requested: string[] = [];
+  const t = setup({ store: { issueIdentity: () => ({ token: "test-token" }), revokeIdentity: () => undefined,
+    renderWorkingContextForTask: id => { requested.push(id); return "Recovered working state: save remains unknown"; } } });
+  try {
+    assert.equal(t.sessions.deliver("claude", "Continue the shared task", "T1").ok, true);
+    const prompt = JSON.parse(t.claude.spawned[0].written[0]).message.content[0].text;
+    assert.match(prompt, /Recovered working state: save remains unknown/);
+    assert.deepEqual(requested, ["T1"]);
+  } finally { t.done(); }
+});
+
 test("a message while working interrupts and redirects; the completed answer streams and is labeled Done", () => {
   const t = setup();
   try {

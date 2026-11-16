@@ -72,7 +72,7 @@ test("goals are capped with a visible marker and secrets are redacted before sto
   const long = mk({ goal: "x".repeat(MAX_GOAL_CHARS + 500) });
   assert.equal(long.goal.length <= MAX_GOAL_CHARS, true);
   assert.equal(long.goalTruncated, true);
-  assert.match(long.goal, /truncated: full text via get_task/);
+  assert.match(long.goal, /\[truncated\]/);
   const leaky = mk({ goal: "use api_key=sk-abcdefghijklmnopqrstuvwxyz123456 and password: hunter2hunter2" });
   assert.doesNotMatch(leaky.goal, /sk-abcdefghijklmnopqrstuvwxyz123456/);
   assert.doesNotMatch(leaky.goal, /hunter2hunter2/);
@@ -123,12 +123,12 @@ test("at most three items are shown, the rest are counted, and the cursor advanc
   assert.deepEqual(next.includedIds, ["T4", "T5"]);
 });
 
-test("each item stays within its token cap and points at get_task", () => {
+test("each item stays within its token cap and points at the real task evidence tool", () => {
   const big = mk({ goal: "y".repeat(1900) });
   const r = renderInboxInjection([big], 0);
   const item = r.text.split("\n")[1];
   assert.equal(approxTokens(item) <= CAPS.inboxItemTokens, true, `${approxTokens(item)} tokens`);
-  assert.match(item, /Details: get_task T1\./);
+  assert.match(item, /m9r_working_context taskId=T1 action=evidence evidenceTaskId=T1\./);
 });
 
 test("a pending task is flagged so the agent does not act; denied and expired are hidden", () => {

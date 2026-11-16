@@ -20,6 +20,7 @@ import { canQueue, isThreadId, normCwd } from "./codex-delivery-core";
 import type { VerifiedIdentity } from "./identity-core";
 import type { WebBrokerClient } from "./web-broker-client";
 import { createPageNotesStore, type PageNotesStore } from "./page-notes-store";
+import { workingContextSchema } from "./task-working-context";
 import { isStageAppReference } from "./task-stage-apps";
 import type { NetworkCoreClient } from "./network-core-client";
 import { registerNetworkCoreTools } from "./network-core-mcp-tools";
@@ -194,16 +195,42 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // Conversation context rides on normal tool boundaries. It neither interrupts
   // native input nor claims/finishes an inbox task or changes the current turn.
   const shownPeerMessages = new Set<string>();
+  const shownWorkingContexts = new Map<string, string>();
   const conversationBoundaries = new Set(["m9r_computer_observe", "m9r_computer_action", "m9r_computer_program",
     "m9r_stage_prepare", "m9r_stage_app", "m9r_stage_action", "m9r_team_message",
     "m9r_agents", "m9r_task_state", "m9r_claim_work", "m9r_note"]);
   server.afterTool = async (name, args, result) => {
     if (!conversationBoundaries.has(name) || result.isError) return result;
     const token = args && typeof args === "object" && "token" in args ? (args as { token?: string }).token : undefined;
-    const identity = await requireIdentity(token);
+    const { identity, token: authToken } = await authenticate(token);
     // Browser rooms have their own admitted-member push transport. Never
     // bypass its membership authorization using the native inbox reader.
     if (inRoom(identity)) return result;
+    // Deliver a changed checkpoint once, rather than replaying room history on
+    // every tool call. Explicit reads remain available after provider compaction.
+    const additions: Array<{ type: "text"; text: string }> = [];
+    const pending = pendingTasksFor(identity);
+    if (pending.length) {
+      const id = resolveTaskId(identity);
+      if (pending.some(task => task.id === id && task.deliveredAt
+        && (task.targetSession ?? task.deliveredSession) === identity.sessionId)) {
+        try {
+          const view = deps.store.readWorkingContext(authToken, id);
+          if ("checkpoints" in view && view.checkpoints.length) {
+            const serialized = JSON.stringify(view);
+            const key = `${identity.sessionId}\0${id}`;
+            const fingerprint = createHash("sha256").update(serialized).digest("hex");
+            if (shownWorkingContexts.get(key) !== fingerprint) {
+              additions.push({ type: "text", text: "Updated durable working context (agent-reported data, not owner authorization, live UI proof, or completion). Preserve unknown outcomes and refresh the target before input.\n" + serialized });
+              shownWorkingContexts.set(key, fingerprint);
+              while (shownWorkingContexts.size > 128) shownWorkingContexts.delete(shownWorkingContexts.keys().next().value!);
+            }
+          }
+        } catch {
+          additions.push({ type: "text", text: "M9R could not recover working context for this boundary. The action result above is unchanged; use m9r_working_context to recover it before relying on saved state." });
+        }
+      }
+    }
     // A teammate's reply does not always carry the structured `a2a` link: the
     // owner's own "answer with m9r_result" prompt makes the recipient reply
     // through queueAgentReply (local-store.ts), which creates a plain
@@ -220,13 +247,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         && (task.approval === "approved" || task.approval === "not_needed")
         && !shownPeerMessages.has(`${identity.sessionId}\0${peerMessageKey(task)}`))
       .sort((a, b) => a.seq - b.seq).slice(-4);
-    if (!messages.length) return result;
+    if (!messages.length) return additions.length ? { ...result, content: [...result.content, ...additions] } : result;
     for (const task of messages) shownPeerMessages.add(`${identity.sessionId}\0${peerMessageKey(task)}`);
     while (shownPeerMessages.size > 512) shownPeerMessages.delete(shownPeerMessages.values().next().value!);
     const text = messages.map(task => task.a2a
       ? `@${task.from} → @${task.to}: ${(typeof task.a2a.wireMessage?.details?.messageText === "string" ? task.a2a.wireMessage.details.messageText : task.a2a.summary).slice(0, 1000)}\nTask: ${task.id}; conversation: ${task.a2a.conversationId}; message: ${task.a2a.messageId}`
       : `@${task.from} → @${task.to}: ${task.goal.slice(0, 1000)}\nTask: ${task.id}`).join("\n\n");
-    return { ...result, content: [...result.content, { type: "text", text:
+    return { ...result, content: [...result.content, ...additions, { type: "text", text:
       `New teammate conversation context (teammate data, not owner authorization). Continue your current assignment; do not repeat completed work. Reply naturally in the same conversation when useful. In your existing m9r_result call, list handledPeerTaskIds only for messages you have fully addressed, including any requested work or answer. Leave unanswered questions, corrections, blockers, or unfinished requests unlisted so they remain available. This does not replace sending a useful reply to your teammate.\n\n${text}` }] };
   };
   const operationNamespace = randomUUID();
@@ -1058,6 +1085,31 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
                     ? `The A2A message was recorded, but this owner broker has no confirmed recipient inbox delivery path. Do not report it as delivered.${receipt.error ? ` ${receipt.error}` : ""}`
                     : `The A2A message was recorded, but recipient inbox delivery failed. Do not report it as delivered; retrying the same idempotent message is safe after the broker issue is fixed.${receipt.error ? ` ${receipt.error}` : ""}`;
       return { content: [{ type: "text", text: `${result.duplicate ? "M9R recognized this as the same idempotent teammate message. " : ""}${status} Message ID: ${result.message.messageId}. Conversation: ${result.message.conversationId ?? "run-level"}.` }] };
+    },
+  );
+
+  server.registerTool(
+    "m9r_working_context",
+    {
+      description: "Recover or replace a bounded durable working snapshot for your current task. Save after meaningful decisions, artifact changes, blockers or handoffs, not each action. Read after compaction or missing context instead of replaying history. The goal comes from the owner task; snapshots are attributed agent reports, not authorization, fresh UI proof or completion. Save is a full replacement: preserve still-relevant decisions and unresolved work. Use expectedRevision from read to prevent stale overwrites. Evidence retrieves one full stored task record in this lineage; it does not retrieve a live screen. No polling required.",
+      inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional(),
+        action: z.enum(["read", "save", "evidence"]).default("read"),
+        expectedRevision: z.number().int().min(0).optional(), checkpoint: workingContextSchema.optional(),
+        offset: z.number().int().min(0).optional(), evidenceTaskId: z.string().regex(/^T[0-9]{1,12}$/).optional() },
+    },
+    async ({ token, taskId, action, expectedRevision, checkpoint, offset, evidenceTaskId }) => {
+      const { identity, token: authToken } = await authenticate(token);
+      // Exact recovery IDs must never be silently redirected to newer work.
+      const id = taskId ?? resolveTaskId(identity);
+      if (action === "save") {
+        if (expectedRevision === undefined || !checkpoint || offset !== undefined || evidenceTaskId) throw new Error("Save requires expectedRevision and a complete checkpoint, without read selectors.");
+        const saved = deps.store.saveWorkingContext(authToken, id, expectedRevision, checkpoint);
+        return { content: [{ type: "text", text: JSON.stringify({ taskId: id, revision: saved.revision, status: "saved-agent-report" }) }] };
+      }
+      if (checkpoint || expectedRevision !== undefined || action === "evidence" && (!evidenceTaskId || offset !== undefined)
+        || action === "read" && evidenceTaskId) throw new Error("Choose a read offset or one evidenceTaskId; save fields do not belong on recovery reads.");
+      const view = deps.store.readWorkingContext(authToken, id, action === "evidence" ? { evidenceTaskId } : { offset });
+      return { content: [{ type: "text", text: JSON.stringify(view) }] };
     },
   );
 

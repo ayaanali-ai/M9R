@@ -41,6 +41,49 @@ function setup(options: { allowRule?: boolean; web?: WebBrokerClient; roomStarte
   };
 }
 
+test("working context is exposed over MCP, delivered once per change and recoverable after presentation state is lost", async () => {
+  const t = setup();
+  const checkpoint = { decisions: ["Blue house"], currentEditor: "codex", artifacts: [],
+    observedState: [{ summary: "Save outcome unknown", outcome: "unknown", evidence: null }], unresolved: ["Verify save"], nextStep: "Inspect image" };
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Draw and verify", origin: "human_typed", idempotencyKey: "working-mcp", broadcastId: "working-team" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const args = { token: t.codex, taskId: work.id };
+    assert.equal(JSON.parse(await t.call("m9r_working_context", { ...args, action: "read" })).revision, 0);
+    assert.equal(JSON.parse(await t.call("m9r_working_context", { ...args, action: "save", expectedRevision: 0, checkpoint })).revision, 1);
+    const handler = (t.server as unknown as ToolServer)._registeredTools.m9r_agents.handler;
+    const first = await handler({ token: t.codex, activeWindowMinutes: 10 });
+    assert.match(JSON.stringify(first), /Blue house/);
+    assert.doesNotMatch(JSON.stringify(await handler({ token: t.codex, activeWindowMinutes: 10 })), /Blue house/, "unchanged context is not appended on every call");
+    const peer = t.store.addTask({ from: "you", to: "claude", goal: "Draw and verify", origin: "human_typed", idempotencyKey: "working-peer", broadcastId: "working-team" }).task;
+    t.store.markDelivered([peer.id], "c1");
+    t.store.saveWorkingContext(t.claude, peer.id, 0, { ...checkpoint, nextStep: "Peer will check the roof" });
+    assert.match(JSON.stringify(await handler({ token: t.codex, activeWindowMinutes: 10 })), /Peer will check the roof/, "peer changes reach the active agent at its next normal boundary");
+    const replacement = createM9rMcpServer({ store: createLocalStore(t.store.root) });
+    const recovered = await (replacement as unknown as ToolServer)._registeredTools.m9r_working_context.handler({ ...args, action: "read" });
+    assert.match(recovered.content[0].text, /Save outcome unknown/);
+    const evidence = JSON.parse(await t.call("m9r_working_context", { ...args, action: "evidence", evidenceTaskId: work.id }));
+    assert.equal(evidence.evidence.goal, work.goal);
+    await assert.rejects(t.call("m9r_working_context", { ...args, action: "save", expectedRevision: 0, checkpoint: { ...checkpoint, nextStep: "Overwrite" } }), /changed/);
+    await assert.rejects(t.call("m9r_working_context", { token: t.claude, taskId: work.id, action: "read" }), /exact session/);
+    const updated = { ...checkpoint, nextStep: "Ask for missing evidence" };
+    await t.call("m9r_working_context", { ...args, action: "save", expectedRevision: 1, checkpoint: updated });
+    assert.match(JSON.stringify(await handler({ token: t.codex, activeWindowMinutes: 10 })), /Ask for missing evidence/);
+    assert.equal(t.store.getTask(work.id)?.resultSummary, undefined);
+    const transport = await connectMcp(t.store, "working-context-schema");
+    try {
+      assert.ok((await transport.client.listTools()).tools.some(tool => tool.name === "m9r_working_context"));
+      const saved = await transport.client.callTool({ name: "m9r_working_context", arguments: {
+        ...args, action: "save", expectedRevision: 2, checkpoint: { ...checkpoint, nextStep: "Finish verification" } } });
+      assert.equal(saved.isError, undefined);
+      assert.match(mcpText(saved), /saved-agent-report/);
+      const tooLarge = await transport.client.callTool({ name: "m9r_working_context", arguments: {
+        ...args, action: "save", expectedRevision: 3, checkpoint: { ...checkpoint, nextStep: "x".repeat(241) } } });
+      assert.equal(tooLarge.isError, true);
+    } finally { await transport.client.close(); await transport.server.close(); }
+  } finally { t.done(); }
+});
+
 test("desktop stage MCP tools default to the current owner desktop", () => {
   const t = setup();
   try {

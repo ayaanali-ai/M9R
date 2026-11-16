@@ -657,6 +657,9 @@ test("explicit resume starts a new turn with durable M9R context and no provider
   try {
     assert.equal(owner.deliver("codex", "Inspect the report before changing anything.").ok, true);
     await new Promise((resolve) => setTimeout(resolve, 20));
+    const token = store.identityTokenFor("codex", owner.sessionIdOf("codex")!)!;
+    store.saveWorkingContext(token, "T1", 0, { decisions: ["Keep the original report"], currentEditor: "codex", artifacts: [],
+      observedState: [{ summary: "Report contents unknown", outcome: "unknown", evidence: null }], unresolved: ["Read report"], nextStep: "Inspect report contents" });
     owner.stop("codex");
     gated!.release();
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -671,6 +674,8 @@ test("explicit resume starts a new turn with durable M9R context and no provider
     assert.equal(gated!.sent.length, 2);
     assert.match(gated!.sent[1].prompt, /M9R logical task context/);
     assert.match(gated!.sent[1].prompt, /Reobserve the current surface/);
+    assert.match(gated!.sent[1].prompt, /Keep the original report/);
+    assert.match(gated!.sent[1].prompt, /Report contents unknown/);
     assert.doesNotMatch(gated!.sent[1].prompt, /--resume|providerSessionRef/);
     gated!.release();
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }

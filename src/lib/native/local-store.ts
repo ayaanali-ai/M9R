@@ -6,6 +6,7 @@
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
 import { nextLogicalTaskContext } from "./logical-task-context";
+import { renderWorkingContext, workingContextKey, workingContextRetentionIds, workingContextSchema, workingContextView } from "./task-working-context";
 import { taskCompletionReport, type TaskCompletionReport } from "./task-completion-contract";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -138,6 +139,15 @@ export const RESULT_RECONCILIATION_MAX_AGE_MS = 24 * 60 * 60_000;
 /** How long a task's last recorded stage activity still counts as "the current turn" for
  *  mostRecentlyActiveTaskId -- a real turn's calls happen seconds to low minutes apart. */
 const ACTIVE_TURN_WINDOW_MS = 5 * 60_000;
+
+function ownsWorkingTask(task: Task, identity: VerifiedIdentity): boolean {
+  const handle = normalizeHandle(identity.handle);
+  const target = normalizeHandle(task.to);
+  const owner = task.targetSession ?? task.deliveredSession;
+  return (target === handle || identity.sessionId.startsWith("web-") && target === `web-${handle}`)
+    && owner === identity.sessionId && Boolean(task.deliveredAt)
+    && (task.approval === "approved" || task.approval === "not_needed");
+}
 
 export class LocalStateCapacityError extends Error {
   readonly code = "M9R_LOCAL_STATE_CAPACITY";
@@ -1202,6 +1212,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         // Retire aged or over-budget resolved work before admitting a task. Anything still in flight, awaiting
         // approval, undelivered, or unread is retained, so a full backlog becomes an explicit send failure.
         const retainedTasks = pruneTasks(s.tasks, {
+          preserveIds: workingContextRetentionIds(s.tasks),
           maxCount: MAX_STORED_TASKS - 1,
           maxAgeMs: RESOLVED_TASK_RETENTION_MS,
           now: now().getTime(),
@@ -2104,6 +2115,58 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     getTask(id: string): Task | undefined {
       return readState().tasks.find((t) => t.id === id);
+    },
+
+    /** Trusted delivery path; external recovery uses the authenticated reader. */
+    renderWorkingContextForTask(id: string): string {
+      const tasks = readState().tasks;
+      const task = tasks.find(item => item.id === id);
+      return task ? renderWorkingContext(tasks, task) : "";
+    },
+
+    /** Recovery reads do not claim work, advance inbox cursors, or grant input authority. */
+    readWorkingContext(token: string, id: string, options: { offset?: number; evidenceTaskId?: string } = {}) {
+      const s = readState();
+      const identity = verifyToken(s.identities, token);
+      const task = s.tasks.find(item => item.id === id);
+      if (!identity || !task || !ownsWorkingTask(task, identity)) throw new Error("Working context requires an approved task delivered to this exact session.");
+      if (options.evidenceTaskId) {
+        const evidence = s.tasks.find(item => item.id === options.evidenceTaskId);
+        if (!evidence || !(evidence.approval === "approved" || evidence.approval === "not_needed")
+          || workingContextKey(evidence, s.tasks) !== workingContextKey(task, s.tasks)) throw new Error("Evidence is outside this task's durable lineage.");
+        return { evidence: { taskId: evidence.id, goal: evidence.goal, pointers: evidence.pointers,
+          goalTruncatedAtStorage: evidence.goalTruncated,
+          resultSummary: evidence.resultSummary ?? null, completion: evidence.completion ?? null,
+          checkpoint: evidence.workingContext ?? null, receiptState: evidence.receipt?.state ?? "unknown" } };
+      }
+      const offset = options.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid working-context offset.");
+      return workingContextView(s.tasks, task, offset);
+    },
+
+    /** CAS prevents concurrent/reconstructed clients from overwriting a newer snapshot. */
+    saveWorkingContext(token: string, id: string, expectedRevision: number, value: unknown) {
+      const snapshot = workingContextSchema.parse(value);
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("Invalid working-context revision.");
+      return update(s => {
+        const identity = verifyToken(s.identities, token);
+        const task = s.tasks.find(item => item.id === id);
+        if (!identity || !task || !ownsWorkingTask(task, identity)) throw new Error("Working context requires an approved task delivered to this exact session.");
+        if (task.retiredAt || task.logicalContext?.supersededByTaskId || task.resultSummary
+          || ["completed", "canceled", "paused", "failed"].includes(task.receipt?.state ?? "")) throw new Error("This task no longer accepts working-context updates.");
+        const byId = new Map(s.tasks.map(item => [item.id, item]));
+        const groupKey = workingContextKey(task, s.tasks, byId);
+        const previous = s.tasks.filter(item => item.workingContext?.author === identity.handle
+          && workingContextKey(item, s.tasks, byId) === groupKey)
+          .sort((a, b) => b.workingContext!.revision - a.workingContext!.revision)[0]?.workingContext;
+        const planRevision = task.logicalContext?.planRevision ?? 0;
+        if (previous?.planRevision === planRevision && JSON.stringify(previous.snapshot) === JSON.stringify(snapshot)
+          && (expectedRevision === previous.revision || expectedRevision === previous.revision - 1)) return previous;
+        if (expectedRevision !== (previous?.revision ?? 0)) throw new Error("Working context changed; read the current revision before merging your update.");
+        task.workingContext = { revision: expectedRevision + 1, author: identity.handle,
+          updatedAt: now().toISOString(), planRevision, snapshot };
+        return task.workingContext;
+      });
     },
 
     tasksFrom(handle: string): Task[] {

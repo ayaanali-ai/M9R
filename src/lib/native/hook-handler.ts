@@ -303,7 +303,14 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       // Managed MCP connections bind privately through the provider parent PID. The old
       // token card remains only for legacy/unmanaged adapters during migration.
       const card = renderSessionCard({ handle: self, others, pendingCount: pending, awaitingApproval, memoryDir, identityToken: ctx.providerProcessId === undefined ? identityToken : undefined });
-      return out(event, [card, sessionStartWork].filter(Boolean).join("\n\n"));
+      const recoveryTasks = input.session_id ? ctx.store.tasksForSession(self, input.session_id).filter(task =>
+        (task.targetSession ?? task.deliveredSession) === input.session_id && task.deliveredAt && !task.retiredAt
+        && !task.resultSummary && task.receipt?.state !== "canceled" && task.receipt?.state !== "paused"
+        && (task.approval === "approved" || task.approval === "not_needed")) : [];
+      // A compaction/resume hook restores existing state without redelivering work.
+      const recovery = recoveryTasks.length === 1 ? ctx.store.renderWorkingContextForTask(recoveryTasks[0].id)
+        : recoveryTasks.length > 1 ? "M9R has several open tasks. Recover m9r_working_context for the exact current task; do not replay all open work." : "";
+      return out(event, [card, sessionStartWork, recovery].filter(Boolean).join("\n\n"));
     }
 
     // The OpenCode plugin polls independently of user prompts, then inserts an approved task as a real prompt into

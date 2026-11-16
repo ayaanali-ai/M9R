@@ -53,5 +53,6 @@ export function deliveredTaskContext(store: LocalStore, input: { handle: string;
       && (task.delivery?.state === "sending" || task.delivery?.state === "queued" || task.deliverySource === "prompt");
   });
   if (matches.length > 1) return "M9R cannot uniquely bind this delivered prompt to its approved task. Do not dispatch desktop work until the delivery adapter supplies an unambiguous internal task reference.";
-  return matches.length === 1 ? renderTaskExecutionContext(matches[0], input.handle, token) : undefined;
+  return matches.length === 1 ? [renderTaskExecutionContext(matches[0], input.handle, token),
+    store.renderWorkingContextForTask(matches[0].id)].filter(Boolean).join("\n\n") : undefined;
 }

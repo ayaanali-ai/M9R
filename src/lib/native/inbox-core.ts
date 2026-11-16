@@ -5,7 +5,7 @@ import type { A2AMessage, A2AMessageKind, A2AProgressKind } from "./multiplayer-
  * Pure functions only: no file, network or clock access, so the same code runs in a hook, the Node and a test.
  *
  * Token discipline is a hard rule here: everything injected into an agent's context is capped, delta-only, and a
- * pointer (`get_task <id>`), never a payload.
+ * pointer to retained task evidence through m9r_working_context, never a full transcript.
  */
 
 /** The existing goal cap from the network spec. */
@@ -24,7 +24,7 @@ export const CAPS = {
   cardOthers: 5,
 } as const;
 
-export const TRUNCATION_MARKER = " [truncated: full text via get_task]";
+export const TRUNCATION_MARKER = " [truncated]";
 
 export type Approval = "not_needed" | "pending" | "approved" | "denied" | "expired";
 export type Origin = "human_typed" | "agent_initiated";
@@ -342,6 +342,8 @@ export interface Task {
   goal: string;
   goalTruncated: boolean;
   logicalContext?: LogicalTaskContext;
+  /** Latest bounded agent-authored working snapshot; original evidence remains on task records. */
+  workingContext?: import("./task-working-context").WorkingContextRecord;
   completion?: { status: "completed" | "incomplete"; remainingWork: string[]; summary: string; updatedAt: string };
   pointers: string[];
   origin: Origin;
@@ -722,7 +724,9 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
     const head = t.a2a
       ? `[${t.id} peer message from ${sender}; conversation ${t.a2a.conversationId}; message ${t.a2a.messageId}${t.a2a.replyToMessageId ? ` replying to ${t.a2a.replyToMessageId}` : ""}] `
       : includeTaskIds ? `[${t.id} from ${sender}, ${approvalLabel(t)}] ` : `M9R work from ${sender}: `;
-    const tail = includeTaskIds ? ` Details: get_task ${t.id}.` : " More detail is available through the connected M9R context.";
+    const tail = includeTaskIds
+      ? ` Stored evidence: m9r_working_context taskId=${t.id} action=evidence evidenceTaskId=${t.id}.`
+      : " Recover stored task evidence with m9r_working_context action=evidence; text truncated at storage cannot be recovered there.";
     const room = Math.max(40, Math.min(goalChars, perItemChars - head.length - tail.length));
     // The pointer is only useful (and only safe to mention) when the text shown is not the whole goal.
     const shown = clip(t.goal, room);
@@ -800,8 +804,9 @@ export function renderHeldAck(taskId: string, to: string, includeTaskId = true):
  * undelivered tasks, work without a result, and unread results are never touched, however old. Dismissing a
  * notification only hides it from the overlay; it does not complete the work.
  */
-export function pruneTasks(tasks: readonly Task[], input: { maxCount: number; maxAgeMs: number; now: number }): Task[] {
+export function pruneTasks(tasks: readonly Task[], input: { maxCount: number; maxAgeMs: number; now: number; preserveIds?: ReadonlySet<string> }): Task[] {
   const resolved = (t: Task): boolean => {
+    if (input.preserveIds?.has(t.id)) return false;
     if (!t.deliveredAt || t.approval === "pending") return false;
     const hasResult = t.resultSummary !== undefined;
     const terminalWithoutResult = t.approval === "denied" || t.approval === "expired";
