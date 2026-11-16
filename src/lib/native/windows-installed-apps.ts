@@ -31,6 +31,24 @@ const APP_ALIASES: Record<string, readonly string[]> = {
 const WINDOWS_TERMINAL_NAMES = new Set(["terminal", "windowsterminal", "wt"]);
 const WINDOWS_TERMINAL_REGISTERED_NAME = "Terminal";
 
+// APP_ALIASES' own keys (e.g. "google chrome", "windows notepad") are raw,
+// space-containing strings, but windowsAppSearchNames() looks them up by the
+// same stripped/lowercased key (appNameKey) it uses for everything else --
+// which never contains a space. A lookup by that stripped key against these
+// raw multi-word keys always misses; only the single-word keys ("chrome",
+// "edge") ever matched this way. The exact-raw-lowercase fallback below used
+// to paper over the common case ("Google Chrome" typed exactly), but any
+// other spacing or punctuation ("GoogleChrome", "google  chrome",
+// "google-chrome") resolved zero aliases and fell straight through to
+// whatever direct/PATH executable happened to match the literal name -- the
+// exact legacy-compatibility-stub problem this alias table exists to avoid
+// (see resolveStageLaunchApp's comment on Notepad). Normalize the alias
+// table's own keys the same way once, so every alias matches regardless of
+// how its name is spaced or punctuated, not just an exact literal copy.
+const NORMALIZED_APP_ALIASES = new Map<string, readonly string[]>(
+  Object.entries(APP_ALIASES).map(([aliasKey, names]) => [appNameKey(aliasKey), names]),
+);
+
 /** Resolve compatibility launchers through Windows' installed app metadata.
  * No per-app renderer aliases, title substring guesses, or unrelated fresh HWNDs.
  * Data crosses the PowerShell boundary only through an environment variable.
@@ -127,7 +145,7 @@ export function windowsAppSearchNames(value: string): string[] {
   // generic "terminal" and "wt" searches also find unrelated registrations,
   // turning one ordinary Windows Terminal request into a false ambiguity.
   if (WINDOWS_TERMINAL_NAMES.has(key)) return [WINDOWS_TERMINAL_REGISTERED_NAME];
-  const aliases = APP_ALIASES[key] ?? APP_ALIASES[value.trim().toLowerCase()];
+  const aliases = NORMALIZED_APP_ALIASES.get(key);
   const candidates = [value.trim(), ...(aliases ?? [])].filter(Boolean);
   return [...new Map(candidates.map((candidate) => [appNameKey(candidate), candidate])).values()];
 }

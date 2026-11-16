@@ -32,6 +32,25 @@ test("queries both modern Notepad registration names before falling back to the 
   assert.deepEqual(windowsAppSearchNames("notepad").map((name) => name.toLowerCase()), ["notepad", "windows notepad"]);
 });
 
+test("a multi-word alias still resolves when spaced, punctuated, or cased differently than its exact table entry", () => {
+  // APP_ALIASES is keyed by raw strings like "google chrome", but every name
+  // this function actually compares against is first stripped to letters and
+  // digits only (appNameKey). A lookup by that stripped key against the raw,
+  // space-containing table key always missed; only the exact literal spelling
+  // ("Google Chrome", via the lowercase-exact fallback) ever found its alias.
+  // Any other spacing/punctuation/casing resolved zero aliases and fell
+  // straight through to whatever happened to match the literal name --
+  // exactly the legacy-stub problem this alias table exists to prevent.
+  for (const variant of ["Google Chrome", "GoogleChrome", "google  chrome", "google-chrome", "GOOGLE CHROME"]) {
+    assert.deepEqual(windowsAppSearchNames(variant).map((name) => name.toLowerCase()), ["google chrome", "chrome"],
+      `"${variant}" must resolve the same chrome alias as the exact table entry`);
+  }
+  for (const variant of ["File Explorer", "FileExplorer", "file  explorer"]) {
+    assert.deepEqual(windowsAppSearchNames(variant).map((name) => name.toLowerCase()), ["file explorer", "explorer", "windows explorer"],
+      `"${variant}" must resolve the same explorer aliases as the exact table entry`);
+  }
+});
+
 test("the discovery script collects App Paths matches without exiting before the packaged-app lookup runs", () => {
   // Regression guard for the real bug: an early `exit 0` right after the App
   // Paths loop meant a legacy compatibility stub always won without the
