@@ -15,7 +15,7 @@ import { z } from "zod";
 import { taskCompletionReport, taskCompletionReportSchema } from "./task-completion-contract";
 import { readRuntimeBuildIdentity } from "./runtime-build-identity";
 import { handleForProvider, type LocalStore } from "./local-store";
-import { inboxMaxAgeMs, MAX_AGENT_REPLY_DEPTH, normalizeHandle, renderA2AConversation, renderInboxInjection, renderResultsInjection, type Task } from "./inbox-core";
+import { inboxMaxAgeMs, isReplyToTask, MAX_AGENT_REPLY_DEPTH, normalizeHandle, renderA2AConversation, renderInboxInjection, renderResultsInjection, type Task } from "./inbox-core";
 import { canQueue, isThreadId, normCwd } from "./codex-delivery-core";
 import type { VerifiedIdentity } from "./identity-core";
 import type { WebBrokerClient } from "./web-broker-client";
@@ -1330,9 +1330,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       // silently returning only the first item, and retain ids so a provider
       // can report the exact work item. Freshness/retirement/delivery fences
       // still prevent historical task records from leaking back in.
-        const injection = requestedTaskId
-          ? { text: "", includedIds: [] as string[], newCursor: cursor, omitted: 0 }
-          : renderInboxInjection(authorizedTasks, cursor, { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
+        const requested = requestedTaskId ? outgoing.find(task => task.id === requestedTaskId) : undefined;
+        const inboxTasks = requestedTaskId ? (requested ? authorizedTasks.filter(task =>
+          isReplyToTask(task, requested, deps.store.snapshot().tasks)) : []) : authorizedTasks;
+        // An exact wait must see its answer even if an unrelated presentation
+        // cursor advanced past it. Durable delivery/approval/session fences remain.
+        const injection = renderInboxInjection(inboxTasks, requestedTaskId ? -1 : cursor,
+          { items: 10, itemChars: 3000, includePending: false, includeTaskIds: true, now: (deps.now ?? (() => new Date()))().getTime() });
         if (injection.text) {
           let delivered = injection;
           if (!inRoom(identity)) {
@@ -1360,7 +1364,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           }
           const included = authorizedTasks.filter((task) => delivered.includedIds.includes(task.id))
             .find((task) => ["approved", "not_needed"].includes(task.approval));
-          const stageNotice = included ? await prepareTaskStageNotice(deps.store.root, deps.web, authToken, identity.handle, included.id) : "";
+          // Conversation/reply delivery is not a new desktop assignment. The
+          // connected provider already has its tool contract; do not replay a
+          // multi-page desktop guide on each handoff or verification reply.
+          const stageNotice = included && !included.a2a && !included.replyToTaskId
+            ? await prepareTaskStageNotice(deps.store.root, deps.web, authToken, identity.handle, included.id) : "";
           if (inRoom(identity)) {
             if (deps.web?.advanceAgentInboxCursor) {
               const saved = await deps.web.advanceAgentInboxCursor(authToken, delivered.newCursor);
@@ -1448,9 +1456,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         completion: taskCompletionReportSchema,
         handledPeerTaskIds: z.array(z.string().regex(/^T[0-9]{1,12}$/)).max(20).optional()
           .describe("Peer context task IDs shown during this turn that you fully addressed. Do not list unread messages or unfinished requests. Records them handled with this result, without another acknowledgement turn."),
+        replyMessageId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/).optional()
+          .describe("When finishing a peer message you already fully answered with m9r_team_message, name that exact outgoing messageId. M9R validates its route and reuses it instead of creating a duplicate result reply. Omit when a new result reply is needed."),
       },
     },
-    async ({ token, taskId: requestedTaskId, summary, completion, handledPeerTaskIds }) => {
+    async ({ token, taskId: requestedTaskId, summary, completion, handledPeerTaskIds, replyMessageId }) => {
       const report = taskCompletionReport(summary, completion);
       const { identity, token: authToken } = await authenticate(token);
       const taskId = resolveResultTaskId(identity, requestedTaskId);
@@ -1468,11 +1478,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       }
       let answer: { answerTaskId?: string; answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict" } | undefined;
       if (deps.web?.recordAgentTaskResult) {
-        const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary, report, peerIds);
+        const recorded = await deps.web.recordAgentTaskResult(authToken, taskId, summary, report, peerIds, replyMessageId);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
         answer = recorded;
       } else {
-        const recorded = deps.store.recordTaskResult(authToken, taskId, summary, report, peerIds);
+        const recorded = deps.store.recordTaskResult(authToken, taskId, summary, report, peerIds, replyMessageId);
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
         answer = recorded;
       }

@@ -393,6 +393,8 @@ export interface Task {
   deliveredSession?: string;
   /** Set when the answer was pushed back into the sender's session. */
   answerPushedAt?: string;
+  /** Explicitly selected structured answer; retained so result retries cannot create another reply. */
+  resultReplyMessageId?: string;
   /** Durable, bounded phase timings for native desktop-stage requests. */
   stageTiming?: StageTimingEvent[];
   /** Per-phase totals cover the entire task even when `stageTiming` raw details reach their cap. */
@@ -595,6 +597,25 @@ export function renderResultsInjection(tasks: readonly Task[], handle: string, o
       : `${incomplete ? "Incomplete report" : "Work finished"} by @${t.to}: ${safeSummary}`;
   });
   return { text: `M9R results (${ready.length})\n${lines.join("\n")}`, ids: ready.map((t) => t.id) };
+}
+
+/** Match an answer to a specific outgoing message, including structured replies
+ * that precede its formal task result. Conversation membership alone is not a reply. */
+export function isReplyToTask(candidate: Task, outgoing: Task, tasks: readonly Task[]): boolean {
+  if (normalizeHandle(candidate.from) !== normalizeHandle(outgoing.to)
+    || normalizeHandle(candidate.to) !== normalizeHandle(outgoing.from)) return false;
+  if (candidate.replyToTaskId === outgoing.id) return true;
+  if (!candidate.a2a || !outgoing.a2a || candidate.a2a.conversationId !== outgoing.a2a.conversationId) return false;
+  const byMessage = new Map(tasks.filter(task => task.a2a?.conversationId === outgoing.a2a!.conversationId)
+    .map(task => [task.a2a!.messageId, task]));
+  const seen = new Set<string>([candidate.a2a.messageId]);
+  let parent = candidate.a2a.replyToMessageId;
+  while (parent && !seen.has(parent)) {
+    if (parent === outgoing.a2a.messageId) return true;
+    seen.add(parent);
+    parent = byMessage.get(parent)?.a2a?.replyToMessageId;
+  }
+  return false;
 }
 
 /** Render only the A2A messages this exact identity can see, without advancing inbox cursors. */

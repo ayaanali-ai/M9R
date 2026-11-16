@@ -129,6 +129,28 @@ test("health reports broker liveness without claiming desktop readiness", async 
   } finally { await broker.close(); }
 });
 
+test("explicit structured result answers survive client and owner-pipe transport without another reply", async () => {
+  const ctx = await setup();
+  try {
+    const sender = ctx.store.issueIdentity("alice", "codex", "session-alice");
+    const recipient = ctx.store.issueIdentity("bob", "claude", "session-bob");
+    const web = createWebBrokerClient({ keyPath: brokerKeyPath(ctx.root), ownerPipePath: ownerPipePath(ctx.root), port: ctx.broker.port });
+    const request = ctx.store.addTask({ from: "alice", to: "bob", goal: "Check result", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "session-alice", targetSession: "session-bob", idempotencyKey: "wire-question", a2a: { conversationId: "wire-answer", messageId: "wire-question",
+        senderAgentId: "alice", recipientAgentId: "bob", kind: "verification-request", replyDepth: 0, summary: "Check result" } }).task;
+    ctx.store.markDelivered([request.id], "session-bob");
+    const reply = ctx.store.addTask({ from: "bob", to: "alice", goal: "Checked result", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "session-bob", targetSession: "session-alice", idempotencyKey: "wire-answer", a2a: { conversationId: "wire-answer", messageId: "wire-answer", replyToMessageId: "wire-question",
+        senderAgentId: "bob", recipientAgentId: "alice", kind: "edit-confirmation", replyDepth: 1, summary: "Checked result" } }).task;
+    const denied = await web.recordAgentTaskResult!(recipient.token, request.id, "Checked", { status: "completed", remainingWork: [] }, [], "wrong-answer");
+    assert.equal(denied.ok, false); assert.equal(ctx.store.getTask(request.id)?.resultSummary, undefined);
+    const result = await web.recordAgentTaskResult!(recipient.token, request.id, "Checked", { status: "completed", remainingWork: [] }, [], "wire-answer");
+    assert.equal(result.ok, true); assert.equal(result.answerDelivery, "explicit-reply-queued"); assert.equal(result.answerTaskId, reply.id);
+    assert.equal(ctx.store.tasksFrom("bob").length, 1);
+    assert.ok(ctx.store.verifyIdentity(sender.token));
+  } finally { await ctx.broker.close(); }
+});
+
 test("restricted agent MCP writes go through the owner broker and are identity-scoped", async () => {
   const ctx = await setup();
   try {

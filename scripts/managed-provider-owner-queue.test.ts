@@ -5,6 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { createManagedProviderOwner } from "@/lib/native/managed-provider-owner";
 import { createLocalStore } from "@/lib/native/local-store";
+import { createM9rMcpServer } from "@/lib/native/mcp-server";
+import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
+import { createMultiplayerInboxDelivery } from "@/lib/native/multiplayer-inbox-delivery";
 import type {
   ManagedProviderConnection,
   ManagedProviderConnectionProfile,
@@ -52,6 +55,52 @@ function gatedConnection(profile: ManagedProviderConnectionProfile) {
     release() { release(); },
   };
 }
+
+test("busy agents exchange a verification request and answer without acknowledgement-only provider turns", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-economical-team-"));
+  const store = createLocalStore(root);
+  const connections = new Map<string, ReturnType<typeof gatedConnection>>();
+  const agents = [{ handle: "codex", provider: "codex" as const, folder: root }, { handle: "claude", provider: "claude-code" as const, folder: root }];
+  const owner = createManagedProviderOwner({ agents, storeRoot: root, repoRoot: root, brokerPort: 0, store, env: {},
+    createConnection: profile => { const connection = gatedConnection(profile); connections.set(profile.handle, connection); return connection.connection; } });
+  const servers: ReturnType<typeof createM9rMcpServer>[] = [];
+  try {
+    assert.equal(owner.deliver("claude", "Prepare and independently verify the shared artifact", undefined, "economical-team").ok, true);
+    assert.equal(owner.deliver("codex", "Prepare and independently verify the shared artifact", undefined, "economical-team").ok, true);
+    for (let attempt = 0; attempt < 100 && [...connections.values()].filter(connection => connection.sent.length).length < 2; attempt++) await new Promise(done => setTimeout(done, 10));
+    assert.equal([...connections.values()].filter(connection => connection.sent.length).length, 2);
+    const runtime = createMultiplayerRuntime({ roster: { runId: "economical-team", agents: agents.map(agent => ({
+      agentId: `agent-${agent.handle}`, branchId: `branch-${agent.handle}`, provider: agent.provider, handle: agent.handle })) },
+      delivery: createMultiplayerInboxDelivery({ store, agents: agents.map(agent => ({ handle: agent.handle, agentId: `agent-${agent.handle}` })), sessionIdOf: owner.sessionIdOf }) });
+    const claudeRoot = store.tasksFor("claude").find(task => task.origin === "human_typed")!;
+    const codexRoot = store.tasksFor("codex").find(task => task.origin === "human_typed")!;
+    const request = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: claudeRoot.id, kind: "verification-request",
+      summary: "Please check the shared artifact independently", progressKind: "artifact-changed", progressFingerprint: "artifact-ready" });
+    assert.equal(request.ok, true); if (!request.ok) return;
+    const call = async (handle: string, name: string, args: Record<string, unknown>) => {
+      const server = servers[handle === "codex" ? 0 : 1] ?? createM9rMcpServer({ store });
+      servers[handle === "codex" ? 0 : 1] = server;
+      const tools = (server as unknown as { _registeredTools: Record<string, { handler(args: unknown): Promise<{ content: Array<{ text?: string }> }> }> })._registeredTools;
+      return tools[name].handler({ token: store.identityTokenFor(handle, owner.sessionIdOf(handle)!)!, ...args });
+    };
+    assert.match(JSON.stringify(await call("codex", "m9r_agents", { activeWindowMinutes: 10 })), /check the shared artifact independently/);
+    const answer = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: codexRoot.id, kind: "edit-confirmation",
+      replyToMessageId: request.message.messageId, summary: "The synthetic verification is complete; here is the result", progressKind: "postcondition-verified", progressFingerprint: "artifact-checked" });
+    assert.equal(answer.ok, true); if (!answer.ok) return;
+    await call("codex", "m9r_result", { taskId: codexRoot.id, summary: "Synthetic check completed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [request.delivery.taskId] });
+    assert.match(JSON.stringify(await call("claude", "m9r_agents", { activeWindowMinutes: 10 })), /synthetic verification is complete/);
+    await call("claude", "m9r_result", { taskId: claudeRoot.id, summary: "Synthetic verification reviewed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [answer.delivery.taskId] });
+    for (const connection of connections.values()) connection.release();
+    await new Promise(done => setTimeout(done, 400));
+    assert.equal([...connections.values()].reduce((sum, connection) => sum + connection.sent.length, 0), 2, "one original provider turn per agent; no acknowledgement-only wakeups");
+    assert.equal(store.snapshot().tasks.length, 4, "two owner assignments plus the useful request and answer only");
+    assert.ok(store.snapshot().tasks.every(task => task.receipt?.state === "completed"));
+  } finally {
+    for (const connection of connections.values()) connection.release();
+    for (const server of servers) if (server) await server.close();
+    await owner.shutdown(); rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a provider turn ending without a completion report preserves unfinished M9R work", async () => {
   const goal = ("Verify both documents. " + "Detailed owner requirements. ".repeat(45)).trim();

@@ -2337,7 +2337,10 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           .filter((task) => wanted.has(task.id) && normalizeHandle(task.to) === normalizedHandle)
           .sort((a, b) => a.seq - b.seq);
         for (const task of candidates) {
-          if (task.seq <= cursor || task.retiredAt) continue;
+          // A selected exact reply can sit behind a cursor advanced by other
+          // context. The global delivery receipt below, not cursor position,
+          // proves it was shown. All ordinary reads still preview their delta.
+          if (task.retiredAt) continue;
           // A push may already be executing. Inbox fallback must not race or replay it.
           if (task.delivery?.state === "sending" || task.delivery?.state === "uncertain") continue;
           const failedPush = task.delivery?.state === "failed";
@@ -2904,7 +2907,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Record an authenticated result once, in the same transaction that checks its session ownership. */
-    recordTaskResult(token: string, id: string, summary: string, completion?: TaskCompletionReport, handledPeerTaskIds: readonly string[] = []): {
+    recordTaskResult(token: string, id: string, summary: string, completion?: TaskCompletionReport, handledPeerTaskIds: readonly string[] = [], replyMessageId?: string): {
       ok: boolean;
       error?: string;
       alreadyRecorded?: boolean;
@@ -2942,7 +2945,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           return { answerDelivery: "not-applicable" as const };
         }
         if (!task.fromSession) return { answerDelivery: "missing-sender-session" as const };
-        const explicitReply = s.tasks.find((candidate) => candidate.replyToTaskId === task.id
+        const explicitReply = s.tasks.find((candidate) => (task.resultReplyMessageId
+          ? candidate.a2a?.messageId === task.resultReplyMessageId : candidate.replyToTaskId === task.id)
           && candidate.origin === "agent_initiated"
           && !candidate.idempotencyKey?.startsWith("agent-result:")
           && normalizeHandle(candidate.from) === normalizeHandle(identity.handle)
@@ -3010,6 +3014,20 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (!identity.sessionId.startsWith("web-") && (!task.deliveredAt || !owner)) {
           return { ok: false, error: `Task ${id} has not been delivered to this session.` };
         }
+        if (replyMessageId !== undefined) {
+          const reply = s.tasks.find(candidate => candidate.a2a?.messageId === replyMessageId);
+          if (!/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(replyMessageId)
+            || task.resultReplyMessageId && task.resultReplyMessageId !== replyMessageId
+            || task.origin !== "agent_initiated" || !task.a2a || !task.fromSession
+            || !reply || reply.a2a?.replyToMessageId !== task.a2a.messageId || reply.a2a.conversationId !== task.a2a.conversationId
+            || normalizeHandle(reply.from) !== handle || reply.fromSession !== identity.sessionId
+            || normalizeHandle(reply.to) !== normalizeHandle(task.from) || reply.targetSession !== task.fromSession
+            || !["approved", "not_needed"].includes(reply.approval) || reply.retiredAt
+            || ["canceled", "paused", "failed", "uncertain"].includes(reply.receipt?.state ?? "")
+            || reply.delivery?.state === "failed" || reply.delivery?.state === "uncertain") {
+            return { ok: false, error: "replyMessageId must name your durable structured answer to this exact peer message and pinned sender session." };
+          }
+        }
         if (!Array.isArray(handledPeerTaskIds) || handledPeerTaskIds.length > 20 || handledPeerTaskIds.some(peerId => {
           const peer = s.tasks.find(item => item.id === peerId);
           return !peer || peer.id === id || peer.origin !== "agent_initiated" || !(peer.a2a || peer.replyToTaskId)
@@ -3021,11 +3039,13 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
             || s.stageOperations.some(operation => operation.taskId === peerId && operation.state === "running");
         })) return { ok: false, error: "A handled peer message is not eligible for this session; no result was recorded." };
         if (task.resultSummary) {
+          if (replyMessageId && task.resultReplyMessageId !== replyMessageId) return { ok: false, error: "The recorded result cannot change its reply routing." };
           if (task.resultSummary === bounded) return { ok: true, alreadyRecorded: true, ...queueAgentReply(s, task, identity) };
           return { ok: false, error: `Task ${id} already has a recorded result; it was not overwritten.` };
         }
         if (task.completion?.status === "incomplete" && task.completion.summary === bounded
           && report.status === "incomplete" && JSON.stringify(task.completion.remainingWork) === JSON.stringify(report.remainingWork)) {
+          if (replyMessageId && task.resultReplyMessageId !== replyMessageId) return { ok: false, error: "The recorded result cannot change its reply routing." };
           return { ok: true, alreadyRecorded: true, ...queueAgentReply(s, task, identity) };
         }
         if (task.receipt?.state === "completed") return { ok: false, error: `Task ${id} already has a terminal completion; its late result was refused.` };
@@ -3044,6 +3064,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (task.targetSession && task.targetSession === identity.sessionId) task.deliveredSession = identity.sessionId;
         const at = now().toISOString();
         task.completion = { ...report, summary: bounded, updatedAt: at };
+        task.resultReplyMessageId = replyMessageId;
         if (report.status === "incomplete") {
           task.logicalContext ??= nextLogicalTaskContext(task);
           task.logicalContext.state = "paused";

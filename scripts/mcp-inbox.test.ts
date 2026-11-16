@@ -353,6 +353,73 @@ test("waitSeconds returns as soon as a message arrives instead of running out th
   t.done();
 });
 
+test("an exact task wait receives a structured reply without waiting for formal completion or claiming unrelated work", async () => {
+  const t = setup();
+  const link = { conversationId: "economical-plan", senderAgentId: "agent-claude", recipientAgentId: "agent-codex", replyDepth: 0,
+    kind: "delegate" as const, summary: "Choose the door color", messageId: "plan-request" };
+  try {
+    const sent = t.store.addTask({ from: "claude", to: "codex", goal: link.summary, origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "c1", targetSession: "x1", idempotencyKey: "plan-request", a2a: link }).task;
+    const reply = t.store.addTask({ from: "codex", to: "claude", goal: "I suggest a green door.", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "x1", targetSession: "c1", idempotencyKey: "plan-answer", a2a: { ...link, messageId: "plan-answer", replyToMessageId: link.messageId,
+        senderAgentId: "agent-codex", recipientAgentId: "agent-claude", replyDepth: 1, summary: "I suggest a green door." } }).task;
+    const unrelated = t.store.addTask({ from: "codex", to: "claude", goal: "Unrelated work must stay queued", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "x1", targetSession: "c1", idempotencyKey: "other-answer", a2a: { ...link, messageId: "other-answer", replyToMessageId: "some-other-message" } }).task;
+    t.store.setCursor("claude", "c1", 99);
+    const answer = await t.call("m9r_inbox", { token: t.claude, taskId: sent.id, waitSeconds: 0 });
+    assert.match(answer, /green door/);
+    assert.doesNotMatch(answer, /Unrelated work/);
+    assert.equal(t.store.getTask(reply.id)?.deliveredSession, "c1");
+    assert.equal(t.store.getTask(unrelated.id)?.deliveredAt, undefined);
+    assert.equal(t.store.getTask(sent.id)?.resultSummary, undefined, "a conversational answer does not fabricate task completion");
+    assert.doesNotMatch(await t.call("m9r_inbox", { token: t.claude, taskId: sent.id, waitSeconds: 0 }), /green door/, "the exact reply is not redelivered");
+  } finally { t.done(); }
+});
+
+test("a structured reply wakes an exact wait during an unfinished teammate task", async () => {
+  const t = setup();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const request = t.store.addTask({ from: "claude", to: "codex", goal: "Choose a color", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "c1", targetSession: "x1", idempotencyKey: "waiting-plan", a2a: { conversationId: "waiting-plan", messageId: "waiting-question",
+        senderAgentId: "agent-claude", recipientAgentId: "agent-codex", kind: "delegate", replyDepth: 0, summary: "Choose a color" } }).task;
+    const started = Date.now();
+    const waiting = t.call("m9r_inbox", { token: t.claude, taskId: request.id, waitSeconds: 10 });
+    timer = setTimeout(() => t.store.addTask({ from: "codex", to: "claude", goal: "Let's use blue", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "x1", targetSession: "c1", idempotencyKey: "waiting-answer", a2a: { conversationId: "waiting-plan", messageId: "waiting-answer", replyToMessageId: "waiting-question",
+        senderAgentId: "agent-codex", recipientAgentId: "agent-claude", kind: "edit-confirmation", replyDepth: 1, summary: "Let's use blue" } }), 300);
+    assert.match(await waiting, /Let's use blue/);
+    assert.ok(Date.now() - started < 3000, "returns on the answer instead of spending the full wait budget");
+    assert.equal(t.store.getTask(request.id)?.resultSummary, undefined);
+  } finally { if (timer) clearTimeout(timer); t.done(); }
+});
+
+test("an explicitly selected structured answer prevents a duplicate result reply and survives retry", async () => {
+  let forwarded: string | undefined;
+  let resultStore: ReturnType<typeof createLocalStore>;
+  const t = setup({ web: { recordAgentTaskResult: async (token, id, summary, completion, handled, replyMessageId) => {
+    forwarded = replyMessageId; return resultStore.recordTaskResult(token, id, summary, completion, handled, replyMessageId);
+  } } });
+  resultStore = t.store;
+  try {
+    const request = t.store.addTask({ from: "claude", to: "codex", goal: "Verify the value", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "c1", targetSession: "x1", idempotencyKey: "explicit-question", a2a: { conversationId: "explicit-answer", messageId: "explicit-question",
+        senderAgentId: "agent-claude", recipientAgentId: "agent-codex", kind: "verification-request", replyDepth: 0, summary: "Verify the value" } }).task;
+    t.store.markDelivered([request.id], "x1");
+    const reply = t.store.addTask({ from: "codex", to: "claude", goal: "The independently checked value is 42", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "x1", targetSession: "c1", idempotencyKey: "explicit-answer", a2a: { conversationId: "explicit-answer", messageId: "explicit-answer",
+        replyToMessageId: "explicit-question", senderAgentId: "agent-codex", recipientAgentId: "agent-claude", kind: "edit-confirmation", replyDepth: 1, summary: "The independently checked value is 42" } }).task;
+    const args = { token: t.codex, taskId: request.id, summary: "The check is complete", completion: { status: "completed", remainingWork: [] } };
+    await assert.rejects(t.call("m9r_result", { ...args, replyMessageId: "wrong-message" }), /replyMessageId/);
+    assert.equal(t.store.getTask(request.id)?.resultSummary, undefined, "invalid suppression cannot partially complete the request");
+    assert.match(await t.call("m9r_result", { ...args, replyMessageId: "explicit-answer" }), new RegExp(`already sent a structured reply.*${reply.id}`));
+    assert.equal(forwarded, "explicit-answer");
+    await t.call("m9r_result", args);
+    assert.equal(t.store.tasksFrom("codex").length, 1, "an omitted field on a same-result retry does not generate an automatic answer");
+    assert.equal(t.store.getTask(request.id)?.resultReplyMessageId, "explicit-answer");
+  } finally { t.done(); }
+});
+
 test("with nothing to deliver, waitSeconds waits about that long and then says the inbox is empty", async () => {
   const t = setup();
   const started = Date.now();
@@ -360,6 +427,22 @@ test("with nothing to deliver, waitSeconds waits about that long and then says t
   const elapsed = Date.now() - started;
   assert.ok(elapsed >= 900 && elapsed < 3_000, `waited ${elapsed}ms`);
   t.done();
+});
+
+test("conversation delivery does not repeat the desktop guide needed by a new assignment", async () => {
+  const t = setup({ web: { prepareTaskStage: async () => ({ ok: true }) } });
+  try {
+    writeFileSync(join(t.store.root, "task-stage-policy.json"), JSON.stringify({ version: 1, handles: ["codex"] }));
+    t.store.addTask({ from: "claude", to: "codex", goal: "Inspect the artifact", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "c1", targetSession: "x1", idempotencyKey: "new-assignment" });
+    assert.match(await t.call("m9r_inbox", { token: t.codex, waitSeconds: 0 }), /M9R desktop tools are available/);
+    t.store.addTask({ from: "claude", to: "codex", goal: "The artifact is ready for your check", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: "c1", targetSession: "x1", idempotencyKey: "review-ready", a2a: { conversationId: "review", messageId: "review-ready",
+        senderAgentId: "agent-claude", recipientAgentId: "agent-codex", kind: "verification-request", replyDepth: 0, summary: "The artifact is ready for your check" } });
+    const context = await t.call("m9r_inbox", { token: t.codex, waitSeconds: 0 });
+    assert.match(context, /artifact is ready/);
+    assert.doesNotMatch(context, /M9R desktop tools are available|The normal mode is/);
+  } finally { t.done(); }
 });
 
 test("an explicit inbox check shows a long message in full, while the automatic injection still clips it", async () => {

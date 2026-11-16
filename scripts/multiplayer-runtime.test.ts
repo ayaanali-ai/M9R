@@ -408,93 +408,60 @@ test("owner broker queues one durable peer conversation item and returns its rea
   }
 });
 
-test("a teammate delegation is suppressed when the recipient already has the same broadcast in flight", () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-a2a-broadcast-"));
+test("a delegation always has durable message identity instead of an inline turn on an unrelated active broadcast", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-a2a-durable-"));
   const store = createLocalStore(root);
-  const woken: Array<{ handle: string; text: string; taskId: string }> = [];
-  const inboxDelivery = createMultiplayerInboxDelivery({
-    store,
-    agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
-    sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
-    wakeRecipient: (handle, text, taskId) => { woken.push({ handle, text, taskId }); return { ok: true }; },
-  });
-  const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
+  let inlineTurns = 0;
+  const options = { store, agents: roster.agents.map(agent => ({ handle: agent.handle!, agentId: agent.agentId })),
+    sessionIdOf: (handle: string) => `${handle}-session`,
+    wakeRecipient: () => { inlineTurns++; return { ok: true }; } };
+  const runtime = createMultiplayerRuntime({ roster, delivery: createMultiplayerInboxDelivery(options) });
   try {
-    // Simulate one owner message that addressed both agents directly (web-ui-bridge.ts's multi-target
-    // broadcast loop): each recipient gets its own task, both tagged with the same broadcastId.
-    const claudeBroadcastTask = store.addTask({
-      from: "you", to: "claude", goal: "shared broadcast", origin: "human_typed",
-      idempotencyKey: "bcast-claude-1", broadcastId: "bcast-1",
-    });
-    const codexBroadcastTask = store.addTask({
-      from: "you", to: "codex", goal: "shared broadcast", origin: "human_typed",
-      idempotencyKey: "bcast-codex-1", broadcastId: "bcast-1",
-    });
-    assert.equal(claudeBroadcastTask.created, true);
-    assert.equal(codexBroadcastTask.created, true);
-
-    // Claude now delegates to Codex for the same underlying request -- Codex already has this work
-    // directly from the owner broadcast, so no second parallel task should be created for it.
-    const result = runtime.sendFromHandle("claude", "claude-code", {
-      to: "codex", taskId: "shared-room-1", summary: "Please pick a number.", kind: "delegate",
-      progressFingerprint: "p-1", progressKind: "observation", idempotencyKey: "delegate-1",
-    });
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      assert.equal(result.delivery.created, false);
-      assert.equal(result.delivery.taskId, codexBroadcastTask.task.id);
-    }
-    assert.equal(store.tasksFor("codex").length, 1, "the delegation must not create a second task for codex");
-    // Suppressing the duplicate task record must not silently drop the delegation's content: the recipient
-    // may already have paused its own turn waiting for exactly this (observed live -- Codex finished its
-    // turn reporting "waiting for Claude's delegation" and nothing else would ever wake it back up).
-    assert.equal(woken.length, 1);
-    assert.equal(woken[0]!.handle, "codex");
-    assert.equal(woken[0]!.taskId, codexBroadcastTask.task.id);
-    assert.ok(woken[0]!.text.includes("Please pick a number."), "the delegation's actual content reaches the recipient as a fresh turn");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+    const oldSender = store.addTask({ from: "you", to: "claude", goal: "Old shared work", origin: "human_typed", idempotencyKey: "old-sender", broadcastId: "old-broadcast" }).task;
+    const oldRecipient = store.addTask({ from: "you", to: "codex", goal: "Old shared work", origin: "human_typed", idempotencyKey: "old-recipient", broadcastId: "old-broadcast" }).task;
+    const current = store.addTask({ from: "you", to: "claude", goal: "Current independent work", origin: "human_typed", idempotencyKey: "current-sender", broadcastId: "current-broadcast" }).task;
+    const sent = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: current.id, summary: "Please check this new result", kind: "delegate",
+      progressFingerprint: "new-result", progressKind: "postcondition-verified" });
+    assert.equal(sent.ok, true);
+    if (!sent.ok) return;
+    const stored = store.getTask(sent.delivery.taskId!)!;
+    assert.equal(stored.a2a?.messageId, sent.message.messageId);
+    assert.equal(stored.a2a?.taskId, current.id);
+    assert.equal(stored.targetSession, "codex-session");
+    assert.equal(inlineTurns, 0);
+    assert.equal(store.getTask(oldRecipient.id)?.deliveredAt, undefined);
+    assert.equal(store.getTask(oldSender.id)?.resultSummary, undefined);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-for (const failure of ["throws", "busy", "unconfirmed"] as const) test(`a delegation is durably queued when waking an existing assignment ${failure}`, () => {
-  const root = mkdtempSync(join(tmpdir(), "m9r-a2a-broadcast-wake-fails-"));
+test("a shared-broadcast conversation stays durable and retries do not create another message or assignment", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-a2a-broadcast-"));
   const store = createLocalStore(root);
-  const inboxDelivery = createMultiplayerInboxDelivery({
-    store,
-    agents: roster.agents.map((agent) => ({ handle: agent.handle!, agentId: agent.agentId })),
-    sessionIdOf: (handle) => handle === "codex" ? "codex-session" : "claude-session",
-    wakeRecipient: () => { if (failure === "throws") throw new Error("provider connection is down"); return failure === "busy" ? { ok: false } : undefined; },
-  });
-  const runtime = createMultiplayerRuntime({ roster, delivery: inboxDelivery });
+  const runtime = createMultiplayerRuntime({ roster, delivery: createMultiplayerInboxDelivery({ store,
+    agents: roster.agents.map(agent => ({ handle: agent.handle!, agentId: agent.agentId })),
+    sessionIdOf: handle => handle === "codex" ? "codex-session" : "claude-session" }) });
   try {
-    const claudeBroadcastTask = store.addTask({
-      from: "you", to: "claude", goal: "shared broadcast", origin: "human_typed",
-      idempotencyKey: "bcast-claude-2", broadcastId: "bcast-2",
-    });
-    const codexBroadcastTask = store.addTask({
-      from: "you", to: "codex", goal: "shared broadcast", origin: "human_typed",
-      idempotencyKey: "bcast-codex-2", broadcastId: "bcast-2",
-    });
-    assert.equal(claudeBroadcastTask.created, true);
-    const result = runtime.sendFromHandle("claude", "claude-code", {
-      to: "codex", taskId: "shared-room-3", summary: "Please pick a number.", kind: "delegate",
-      progressFingerprint: "p-3", progressKind: "observation", idempotencyKey: "delegate-3",
-    });
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      assert.equal(result.delivery.created, true);
-      assert.notEqual(result.delivery.taskId, codexBroadcastTask.task.id);
-      assert.equal(result.delivery.state, "queued");
-      const queued = store.getTask(result.delivery.taskId!);
-      assert.equal(queued?.delivery?.state, "deferred");
-      assert.ok(queued?.goal.includes("Please pick a number."));
-      assert.equal(queued?.a2a?.messageId, result.message.messageId);
-    }
-    assert.equal(store.tasksFor("codex").length, 2, "existing work plus one durable conversation message");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+    const sender = store.addTask({ from: "you", to: "claude", goal: "Shared work", origin: "human_typed", idempotencyKey: "sender", broadcastId: "shared" }).task;
+    const recipient = store.addTask({ from: "you", to: "codex", goal: "Shared work", origin: "human_typed", idempotencyKey: "recipient", broadcastId: "shared" }).task;
+    const message = { to: "codex", taskId: sender.id, summary: "Please verify the result independently", kind: "verification-request" as const,
+      progressFingerprint: "artifact-ready", progressKind: "artifact-changed" as const, idempotencyKey: "one-check" };
+    const sent = runtime.sendFromHandle("claude", "claude-code", message);
+    assert.equal(sent.ok, true);
+    if (!sent.ok) return;
+    assert.equal(sent.delivery.created, true);
+    assert.notEqual(sent.delivery.taskId, recipient.id);
+    const stored = store.getTask(sent.delivery.taskId!)!;
+    assert.equal(stored.coordination?.intent, "message", "the inbox record is conversation context, not a second ownership claim");
+    assert.equal(stored.a2a?.taskId, sender.id);
+    assert.equal(stored.delivery?.state, "deferred");
+    assert.equal(stored.targetSession, "codex-session");
+    const retry = runtime.sendFromHandle("claude", "claude-code", message);
+    assert.equal(retry.ok, true);
+    if (retry.ok) { assert.equal(retry.duplicate, true); assert.equal(retry.delivery.taskId, stored.id); }
+    assert.equal(store.tasksFor("codex").length, 2);
+    assert.equal(store.getTask(recipient.id)?.resultSummary, undefined);
+    assert.equal(store.getTask(recipient.id)?.deliveredAt, undefined, "persisting peer context does not start or replay the owner's assignment");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("a teammate delegation still creates a new task when the recipient has no matching broadcast", () => {

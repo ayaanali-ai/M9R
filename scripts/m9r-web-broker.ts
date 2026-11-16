@@ -155,7 +155,6 @@ async function main(): Promise<void> {
     store,
     agents: config.agents.map((agent) => ({ handle: agent.handle, agentId: `agent-${agent.handle}` })),
     sessionIdOf: (handle) => sessionOwner.current?.sessionIdOf(handle),
-    wakeRecipient: (handle, text, taskId) => sessionOwner.current?.deliver(handle, text, taskId),
   }));
   // One broker-owned mutation fence is shared by the browser route and the
   // desktop stage service. Both dispatch real input from this process, so this

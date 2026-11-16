@@ -1,5 +1,4 @@
 import type { LocalStore } from "./local-store";
-import type { Task } from "./inbox-core";
 import type { MultiplayerDelivery } from "./multiplayer-runtime";
 
 export interface MultiplayerInboxAgent {
@@ -8,31 +7,14 @@ export interface MultiplayerInboxAgent {
 }
 
 /**
- * Mirrors task-desktop-stage.ts's taskActive(): a task is still "in flight" until it reaches a
- * terminal state -- "failed"/"uncertain"/"paused" receipts included, since RECEIPT_TRANSITIONS
- * (inbox-core.ts) never lets any of those three move back into active work. Keep both in sync.
- */
-function isTaskActive(task: Task): boolean {
-  return task.resultSummary === undefined
-    && task.lifecycle?.state !== "completed" && task.lifecycle?.state !== "failed"
-    && !["canceled", "failed", "uncertain", "paused"].includes(task.receipt?.state ?? "");
-}
-
-/** The two A2A kinds that hand a recipient brand-new work, as opposed to a reply or status update. */
-const NEW_WORK_KINDS = new Set(["help-request", "delegate"]);
-
-/**
  * Persist one roster-authenticated A2A message as a recipient inbox item.
  * Message acceptance and provider receipt stay separate: this callback only
  * promises that the owner's durable task queue contains the peer message.
  */
 export function createMultiplayerInboxDelivery(input: {
-  store: Pick<LocalStore, "addTask" | "setDelivery" | "setApproval" | "tasksFor">;
+  store: Pick<LocalStore, "addTask" | "setDelivery" | "setApproval">;
   agents: readonly MultiplayerInboxAgent[];
   sessionIdOf?: (handle: string) => string | undefined;
-  /** Inline delivery is only established by an explicit successful outcome.
-   * Otherwise persist the message for normal delivery after the current turn. */
-  wakeRecipient?: (handle: string, text: string, taskId: string) => { ok: boolean } | void;
 }): MultiplayerDelivery {
   const profiles = new Map(input.agents.map((agent) => [agent.agentId, agent]));
 
@@ -48,31 +30,10 @@ export function createMultiplayerInboxDelivery(input: {
     const replyLine = message.replyToMessageId ? ` reply-to ${message.replyToMessageId}` : "";
     const goal = `[M9R team conversation ${conversationId}; task ${rootTaskId}; message ${message.messageId}${replyLine}; kind ${message.kind}] @${sender.handle}: ${message.summary}${detail}`.slice(0, 4_000);
 
-    // A teammate's delegation can redundantly duplicate work the recipient already received directly
-    // from the owner (e.g. "Claude, ask Codex to do X" where the owner's own message also named Codex).
-    // Both deliveries are individually legitimate; what's missing is recognizing the recipient already
-    // has equivalent work in flight. Key that off task lineage (broadcastId), not message wording, so
-    // it holds for any phrasing -- explicit @mentions, bare names, or anything said multiple times.
-    if (NEW_WORK_KINDS.has(message.kind)) {
-      const senderBroadcastId = input.store.tasksFor(sender.handle)
-        .find((task) => task.broadcastId && isTaskActive(task))?.broadcastId;
-      if (senderBroadcastId) {
-        const existing = input.store.tasksFor(recipient.handle)
-          .find((task) => task.broadcastId === senderBroadcastId && isTaskActive(task));
-        if (existing) {
-          // Suppressing the duplicate task record must not silently drop the delegation's actual content:
-          // the recipient may already have paused/finished its own turn waiting for exactly this (e.g. "wait
-          // for Claude's explicit delegation" from the shared broadcast), and nothing else would ever wake
-          // it back up. Push the content as a fresh turn on the existing task instead of a second task.
-          try {
-            if (input.wakeRecipient?.(recipient.handle, goal, existing.id)?.ok) {
-              return { ok: true, taskId: existing.id, created: false, state: "already-present" };
-            }
-          } catch { /* Persist below; no content is lost when the recipient is busy/offline. */ }
-        }
-      }
-    }
+    // Every conversation message gets its own durable identity. Busy recipients
+    // read it at tool boundaries; idle recipients use the normal owner queue.
     const senderSession = input.sessionIdOf?.(sender.handle);
+    const recipientSession = input.sessionIdOf?.(recipient.handle);
     const result = input.store.addTask({
       to: recipient.handle,
       from: sender.handle,
@@ -100,6 +61,7 @@ export function createMultiplayerInboxDelivery(input: {
         wireMessage: message,
       },
       ...(senderSession ? { fromSession: senderSession } : {}),
+      ...(recipientSession ? { targetSession: recipientSession } : {}),
     });
 
     let task = result.task;

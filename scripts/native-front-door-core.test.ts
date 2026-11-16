@@ -6,6 +6,7 @@ import {
   MAX_GOAL_CHARS,
   approxTokens,
   findByIdempotencyKey,
+  isReplyToTask,
   newTask,
   redactSecrets,
   renderInboxInjection,
@@ -61,6 +62,21 @@ process.env.M9R_INBOX_MAX_AGE_MINUTES = "100000000";
 const t0 = "2026-09-20T00:00:00.000Z";
 const mk = (over: Partial<Parameters<typeof newTask>[0]> = {}, seq = 1, id = `T${seq}`) =>
   newTask({ from: "claude", to: "codex", goal: "investigate the relay reconnect bug", origin: "human_typed", idempotencyKey: `k${seq}`, ...over }, { id, seq }, t0);
+
+test("exact reply matching follows only the requested conversation ancestry and sender", () => {
+  const link = { conversationId: "plan", messageId: "question", senderAgentId: "agent-claude", recipientAgentId: "agent-codex",
+    replyDepth: 0, kind: "delegate" as const, summary: "Question" };
+  const request = mk({ a2a: link });
+  const followup = mk({ a2a: { ...link, messageId: "clarification", replyToMessageId: "question" } }, 2);
+  const answer = mk({ from: "codex", to: "claude", a2a: { ...link, messageId: "answer", replyToMessageId: "clarification" } }, 3);
+  assert.equal(isReplyToTask(answer, request, [request, followup, answer]), true);
+  assert.equal(isReplyToTask({ ...answer, from: "someone-else" }, request, [request, followup]), false);
+  assert.equal(isReplyToTask({ ...answer, a2a: { ...answer.a2a!, conversationId: "other" } }, request, [request, followup]), false);
+  assert.equal(isReplyToTask(answer, request, [request]), false, "missing ancestry is not guessed from conversation membership");
+  const cycle = { ...followup, a2a: { ...followup.a2a!, replyToMessageId: "answer" } };
+  assert.equal(isReplyToTask(answer, request, [request, cycle, answer]), false);
+  assert.equal(isReplyToTask({ ...answer, a2a: undefined, replyToTaskId: request.id }, request, []), true, "formal result replies retain their exact task route");
+});
 
 test("a human-typed task needs no approval; an agent-initiated one waits unless a standing rule covers it", () => {
   assert.equal(mk().approval, "not_needed");
