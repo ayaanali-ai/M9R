@@ -456,7 +456,8 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
               return;
             }
             if (event.sessionId) this.providerSessionRef = event.sessionId;
-            this.queue?.push({ kind: "result", text: event.text, isError: event.isError });
+            this.queue?.push({ kind: "result", text: event.text, isError: event.isError,
+              usage: event.usage ?? null, providerReportedCostUsd: event.reportedCostUsd ?? null });
             const interrupted = this.interruptedTask === this.activeTaskId;
             if (interrupted) this.interruptedTask = undefined;
             this.finishTask();

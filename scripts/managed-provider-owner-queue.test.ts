@@ -130,6 +130,37 @@ test("a provider turn ending without a completion report preserves unfinished M9
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("provider turn usage reaches durable task state without claiming subscription consumption", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-provider-usage-"));
+  const store = createLocalStore(root);
+  const owner = createManagedProviderOwner({ agents: [{ handle: "claude", provider: "claude-code", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, createConnection: profile => {
+      const connection = gatedConnection(profile).connection;
+      connection.send = async function* () {
+        yield { kind: "accepted" };
+        yield { kind: "result", text: "done", isError: false, providerReportedCostUsd: 0,
+          usage: { inputTokens: 2, outputTokens: 3, cachedInputTokens: 100, cacheWriteInputTokens: null, totalTokens: null } };
+      };
+      return connection;
+    } });
+  try {
+    assert.equal(owner.deliver("claude", "Inspect the fixture").ok, true);
+    for (let attempt = 0; attempt < 100 && !store.getTask("T1")?.providerUsage; attempt++) await new Promise(done => setTimeout(done, 10));
+    const usage = createLocalStore(root).getTask("T1")?.providerUsage;
+    assert.equal(usage?.samples.length, 1); assert.equal(usage?.samples[0].counters?.cachedInputTokens, 100);
+    assert.equal(usage?.samples[0].providerReportedCostUsd, 0);
+    assert.equal(usage?.samples[0].counters?.cacheWriteInputTokens, null);
+    const sample = usage!.samples[0];
+    store.recordTaskProviderUsage("T1", { ...sample, counters: { ...sample.counters!, outputTokens: 4 } });
+    assert.equal(store.getTask("T1")?.providerUsage?.samples.length, 1, "same dispatch updates rather than adds another charged turn");
+    assert.equal(store.getTask("T1")?.providerUsage?.samples[0].counters?.outputTokens, 4);
+    for (let index = 0; index < 33; index++) store.recordTaskProviderUsage("T1", { ...sample, dispatchId: `extra-${index}`, counters: null, providerReportedCostUsd: null });
+    assert.equal(store.getTask("T1")?.providerUsage?.samples.length, 32);
+    assert.equal(store.getTask("T1")?.providerUsage?.droppedSamples, 2, "bounded raw history exposes lost coverage");
+    assert.equal(store.getTask("T1")?.resultSummary, undefined, "usage evidence does not declare successful completion");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("an error result is durably failed and is not counted as a first action", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-result-error-"));
   const store = createLocalStore(root);

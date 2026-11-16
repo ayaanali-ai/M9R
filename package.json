@@ -5,6 +5,7 @@
   "license": "BUSL-1.1",
   "description": "M9R web app: the multiplayer workspace and evidence layer for AI coding agents.",
   "scripts": {
+    "report:efficiency": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-alias.mjs ./scripts/task-efficiency-report.ts",
     "dev": "next dev",
     "build": "node scripts/build.mjs",
     "build:webpack": "next build --webpack",

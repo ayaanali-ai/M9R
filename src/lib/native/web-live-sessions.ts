@@ -320,6 +320,7 @@ export interface WebLiveSessionsDeps {
     flushStageTiming?(): void;
     /** Attach a verified owner-runtime build identity to task evidence. */
     recordTaskRuntimeBuild?(id: string, buildId: string): boolean;
+    recordTaskProviderUsage?(id: string, sample: import("./provider-usage-core").TaskProviderUsageSample): boolean;
     /** Close a room task when its provider reports a terminal failure before m9r_result can run. */
     setResult?(id: string, summary: string): unknown;
     /** Record a terminal provider failure without mislabeling it as a completed result. */

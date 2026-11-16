@@ -99,6 +99,34 @@ function profile() {
   return { connectionId: "m9r:codex:test", handle: "codex", provider: "codex", cwd: "C:/RunLeak/runleak" } as const;
 }
 
+test("Claude managed results retain reported usage and distinguish explicit zero cost from missing cost", async () => {
+  const fake = fakeClaude(["default"]);
+  const write = fake.child.stdin.write.bind(fake.child.stdin);
+  let turn = 0;
+  fake.child.stdin.write = (chunk: string) => {
+    write(chunk);
+    if (chunk.includes('"type":"user"')) {
+      turn++;
+      setImmediate(() => fake.child.stdout.emit("data", `${JSON.stringify({ type: "result", result: "ok", is_error: false,
+        usage: { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 100 }, ...(turn === 1 ? { total_cost_usd: 0 } : {}) })}\n`));
+    }
+    return true;
+  };
+  const connection = createClaudeManagedProviderConnection({ profile: { ...profile(), provider: "claude-code", handle: "claude" },
+    mcpConfigPath: "fixture", environment: {}, spawn: () => fake.child as never });
+  try {
+    await connection.start();
+    for (const index of [1, 2]) {
+      const events = [];
+      for await (const event of connection.send({ ...connection.profile, generation: connection.status().generation, taskId: `T${index}`, prompt: "test" })) events.push(event);
+      const result = events.find(event => event.kind === "result");
+      assert.ok(result?.kind === "result");
+      assert.equal(result.usage?.cachedInputTokens, 100);
+      assert.equal(result.providerReportedCostUsd, index === 1 ? 0 : null);
+    }
+  } finally { await connection.stop(); }
+});
+
 test("Codex worker failure retains bounded redacted stderr in the provider error", async () => {
   const workers: Array<EventEmitter & CodexWorkerProcess> = [];
   const connection = createCodexManagedProviderConnection({

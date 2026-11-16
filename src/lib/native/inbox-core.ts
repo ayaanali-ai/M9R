@@ -344,6 +344,8 @@ export interface Task {
   logicalContext?: LogicalTaskContext;
   /** Latest bounded agent-authored working snapshot; original evidence remains on task records. */
   workingContext?: import("./task-working-context").WorkingContextRecord;
+  /** Bounded task-scoped provider reports. Missing counters/costs remain unknown. */
+  providerUsage?: { samples: import("./provider-usage-core").TaskProviderUsageSample[]; droppedSamples: number };
   completion?: { status: "completed" | "incomplete"; remainingWork: string[]; summary: string; updatedAt: string };
   pointers: string[];
   origin: Origin;

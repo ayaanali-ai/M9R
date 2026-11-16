@@ -6,6 +6,7 @@
  * Local first: nothing here needs the network or an account (design section 1, principle 7).
  */
 import { nextLogicalTaskContext } from "./logical-task-context";
+import { reportedTurnUsage, type TaskProviderUsageSample } from "./provider-usage-core";
 import { renderWorkingContext, workingContextKey, workingContextRetentionIds, workingContextSchema, workingContextView } from "./task-working-context";
 import { taskCompletionReport, type TaskCompletionReport } from "./task-completion-contract";
 import { createHash, randomUUID } from "node:crypto";
@@ -2115,6 +2116,24 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
 
     getTask(id: string): Task | undefined {
       return readState().tasks.find((t) => t.id === id);
+    },
+
+    /** Trusted provider adapter evidence, once per dispatch; never model-authored task text. */
+    recordTaskProviderUsage(id: string, sample: TaskProviderUsageSample): boolean {
+      if (!/^[A-Za-z0-9._:-]{1,128}$/.test(sample.dispatchId) || !/^[A-Za-z0-9_-]{1,80}$/.test(sample.provider)
+        || !Number.isFinite(Date.parse(sample.recordedAt)) || (sample.providerReportedCostUsd !== null
+          && (!Number.isFinite(sample.providerReportedCostUsd) || sample.providerReportedCostUsd < 0))) throw new Error("Invalid provider usage evidence.");
+      const counters = reportedTurnUsage(sample.counters);
+      return update(s => {
+        const task = s.tasks.find(item => item.id === id);
+        if (!task) return false;
+        const prior = task.providerUsage ?? { samples: [], droppedSamples: 0 };
+        const samples = prior.samples.filter(item => item.dispatchId !== sample.dispatchId);
+        samples.push({ dispatchId: sample.dispatchId, provider: sample.provider, recordedAt: sample.recordedAt,
+          counters, providerReportedCostUsd: sample.providerReportedCostUsd });
+        task.providerUsage = { samples: samples.slice(-32), droppedSamples: prior.droppedSamples + Math.max(0, samples.length - 32) };
+        return true;
+      });
     },
 
     /** Trusted delivery path; external recovery uses the authenticated reader. */

@@ -743,6 +743,11 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           emit({ kind: "tool", handle: profile.handle, provider: profile.provider, name: event.name, runId });
         }
         else if (event.kind === "result") {
+          // Measurement is additive; a missing provider report stays unknown,
+          // and telemetry failure must never change or replay the task result.
+          try { deps.store.recordTaskProviderUsage?.(taskId, { dispatchId: runId, provider: profile.provider,
+            recordedAt: now().toISOString(), counters: event.usage ?? null, providerReportedCostUsd: event.providerReportedCostUsd ?? null }); }
+          catch { /* the report exposes absent coverage rather than invented zero cost */ }
           terminalObserved = true;
           // recordStageTiming batches non-terminal phases (like "action") to
           // disk on a debounce timer -- reading task.stageTiming without

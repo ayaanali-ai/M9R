@@ -90,7 +90,7 @@ export type ManagedProviderEvent =
   | { readonly kind: "status"; readonly status: ManagedProviderStatus; readonly doing?: string }
   | { readonly kind: "text"; readonly text: string; /** A raw stream chunk: append verbatim, never trim or overlap-merge. */ readonly delta?: boolean }
   | { readonly kind: "tool"; readonly name: string; readonly summary?: string }
-  | { readonly kind: "result"; readonly text: string; readonly isError: boolean }
+  | { readonly kind: "result"; readonly text: string; readonly isError: boolean; readonly usage?: import("./provider-usage-core").ReportedTurnUsage | null; readonly providerReportedCostUsd?: number | null }
   | { readonly kind: "error"; readonly error: string; readonly retryable: boolean };
 
 /**
