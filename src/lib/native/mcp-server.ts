@@ -722,7 +722,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   // The provider-neutral computer-use surface is registered on the same authenticated
   // MCP server as the legacy tools. It owns observation/action routing; the existing
   // web broker and owner-launched desktop stage remain its only dispatch backends.
-  registerComputerUseTools(server, {
+  const computerUseTools = registerComputerUseTools(server, {
     store: deps.store,
     web: deps.web,
     requireIdentity,
@@ -873,8 +873,13 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     const taskId = resolveTaskId(identity, requestedTaskId);
     const operationId = requestedOperationId ?? createHash("sha256").update(`${operationNamespace}\0${String(extra.requestId)}`).digest("hex");
     const revisionKey = stageRevisionKey(identity, mode);
+    const reference = "ref" in action
+      ? computerUseTools.resolveStageReference(identity, taskId, mode, action.view, action.ref)
+      : undefined;
+    const dispatchAction = reference ? { ...action, ref: reference.ref } : action;
     const response = deps.web?.taskStageAction
-      ? await deps.web.taskStageAction(authToken, taskId, action, mode, operationId, lastKnownStageMutationRevision.get(revisionKey))
+      ? await deps.web.taskStageAction(authToken, taskId, dispatchAction, mode, operationId,
+        reference ? reference.mutationRevision : lastKnownStageMutationRevision.get(revisionKey))
       : { ok: false, error: "The owner-launched stage broker is unavailable." };
     const result = response.result as { capture?: { dataUrl?: string; ownedPopups?: Array<{ dataUrl?: string }> };
       fallbackCapture?: { dataUrl?: string; ownedPopups?: Array<{ dataUrl?: string }> }; mutationRevision?: number } | undefined;

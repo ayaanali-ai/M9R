@@ -125,6 +125,61 @@ test("m9r_stage_action tracks the mutation revision it last observed and feeds i
   } finally { t.done(); }
 });
 
+test("structured observation refs work in stage actions without losing native identity or the observed mutation fence", async () => {
+  const sent: Array<{ action: unknown; revision: number | undefined }> = [];
+  const t = setup({ web: {
+    prepareTaskStage: async () => ({ ok: true }),
+    taskStageAction: async (_token, _taskId, action, _mode, _operationId, revision) => {
+      if ((action as { kind: string }).kind === "read_structure") return { ok: true, result: { status: "complete", capturedAt: new Date().toISOString(), mutationRevision: 7,
+        elements: [{ ref: "uia:note-editor", role: "edit", label: "Note Editor", enabled: true,
+          actions: ["click"], rect: { x: 1, y: 2, width: 100, height: 100 } }] } };
+      sent.push({ action, revision });
+      return { ok: true, result: { mutationRevision: 8 } };
+    },
+  } });
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Edit the note", origin: "human_typed", idempotencyKey: "mapped-ref" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const observe = async () => JSON.parse(await t.call("m9r_computer_observe", { token: t.codex, taskId: work.id, target: "app-window" }));
+    const first = await observe();
+    assert.ok(first.observation, JSON.stringify(first));
+    const ref = first.observation.structure.elements[0].ref;
+    assert.match(ref, /^control_/);
+    const act = (token = t.codex, controlRef = ref, taskId = work.id, mode = "owner-preview") => t.call("m9r_stage_action", {
+      token, taskId, mode, operationId: `mapped-${sent.length}`, action: {
+        kind: "click_element", view: "app", ref: controlRef, expectedRole: "edit", expectedLabel: "Note Editor",
+      },
+    });
+    await act();
+    assert.deepEqual(sent[0], { action: { kind: "click_element", view: "app", ref: "uia:note-editor",
+      expectedRole: "edit", expectedLabel: "Note Editor" }, revision: 7 });
+    // A stage response must not silently upgrade an older observation's fence.
+    await act();
+    assert.equal(sent[1].revision, 7);
+    await assert.rejects(act(t.claude), /structured control reference/);
+    await assert.rejects(act(t.codex, ref, work.id, "background"), /structured control reference/);
+    const refreshed = await observe();
+    await assert.rejects(act(), /structured control reference/);
+    assert.equal(sent.length, 2, "foreign, wrong-mode, and superseded refs never reach dispatch");
+    await act(t.codex, "uia:legacy-control");
+    assert.equal((sent[2].action as { ref: string }).ref, "uia:legacy-control", "native stage refs remain supported");
+    const freshRef = refreshed.observation.structure.elements[0].ref;
+    for (const action of [
+      { kind: "replace_element", text: "Updated note" },
+      { kind: "scroll_element", direction: "down" },
+    ]) {
+      await t.call("m9r_stage_action", { token: t.codex, taskId: work.id, mode: "owner-preview",
+        operationId: `mapped-${sent.length}`, action: { ...action, view: "app", ref: freshRef } });
+      assert.equal((sent.at(-1)!.action as { ref: string }).ref, "uia:note-editor");
+      assert.equal(sent.at(-1)!.revision, 7);
+    }
+    const next = t.store.addTask({ from: "you", to: "codex", goal: "Different work", origin: "human_typed", idempotencyKey: "other-ref-task" }).task;
+    t.store.markDelivered([next.id], "x1");
+    await assert.rejects(act(t.codex, freshRef, next.id), /structured control reference/);
+    assert.equal(sent.length, 5, "a control from another task must not dispatch");
+  } finally { t.done(); }
+});
+
 test("an agent naming a task the owner's new message paused acts under the owner's latest task", async () => {
   let receivedTaskId = "";
   const web: WebBrokerClient = {

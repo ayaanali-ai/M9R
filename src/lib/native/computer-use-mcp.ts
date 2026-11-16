@@ -713,7 +713,7 @@ function publicStageCapture(capture: Record<string, unknown>) {
  * web broker as the only dispatch backends. Observations are session-scoped,
  * bounded, short-lived, and never contain raw HWND/process handles.
  */
-export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcpDeps): { observationModalityStats: () => ReturnType<ObservationModalityLedger["snapshot"]> } {
+export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcpDeps) {
   const records = new Map<string, TargetRecord>();
   const logicalTargets = new Map<string, string>();
   const changeBaselines = new Map<string, StoredObservationFingerprint>();
@@ -2001,5 +2001,22 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       controls: matching.slice(0, boundedLimit), truncated: matching.length > boundedLimit } });
   });
 
-  return { observationModalityStats: () => observationModalityLedger.snapshot() };
+  return {
+    observationModalityStats: () => observationModalityLedger.snapshot(),
+    // Legacy stage actions share the structured observation's private mapping.
+    // Never guess by label/position or accept a ref from another task/session.
+    resolveStageReference(identity: VerifiedIdentity, taskId: string, mode: string, view: string | undefined, ref: string) {
+      if (!ref.startsWith("control_")) return undefined;
+      for (const record of records.values()) {
+        if (record.identityKey !== identityKey(identity) || record.context.kind !== "desktop"
+          || record.context.taskId !== taskId || record.context.mode !== mode || view !== "app" || record.context.view !== "app") continue;
+        const control = record.context.controls.get(ref);
+        if (!control?.stageRef) continue;
+        const work = deps.resolveWorkIdentity?.(taskId);
+        if (work && (record.work?.workId !== work.workId || record.work.planRevision !== work.planRevision)) break;
+        return { ref: control.stageRef, mutationRevision: record.mutationRevision };
+      }
+      throw new DesktopInputNotDispatchedError("This structured control reference is no longer available for this task, session, and app view. Observe the app again before acting; no input was sent.");
+    },
+  };
 }
