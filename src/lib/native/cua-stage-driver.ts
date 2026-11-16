@@ -1523,7 +1523,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // Retrying it here was a second guaranteed-failing native call on
       // every single such dispatch. Only attempt it here when it genuinely
       // has not been tried yet (preferForeground skipped the earlier block).
-      if (options.nativeHeadless && !headlessAlreadyAttempted) {
+      if (options.nativeHeadless && !headlessAlreadyAttempted && !options.preferForeground) {
         try {
           const dispatched = await timedInputDispatch(options.nativeHeadless.route, options.nativeHeadless.send,
             (result) => result.dispatched === true);
@@ -2429,7 +2429,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         // whether the app opened. Never bind keyboard input to the taskbar.
         return { status: "unverified" as const, summary: "Windows acknowledged exact shell control invocation; verify the returned capture." };
       }
-      if ((options.button === undefined || options.button === "left") && (options.count ?? 1) === 1) {
+      if (!options.confirmFocusForeground && (options.button === undefined || options.button === "left") && (options.count ?? 1) === 1) {
         // UIA's point hit-test is authoritative for a coordinate action. A
         // smallest-rectangle search can select an overlapping sibling (for
         // example, a popup suggestion over a page control), so only invoke the
@@ -2826,7 +2826,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // that screen point (a headless action); if it has no semantic action,
       // the owner-visible route falls through to native pointer input.
       let targetScreenPoint: { x: number; y: number } | undefined;
-      if ((options.button === undefined || options.button === "left") && (options.count ?? 1) === 1) {
+      if (!options.confirmFocusForeground && (options.button === undefined || options.button === "left") && (options.count ?? 1) === 1) {
         targetScreenPoint = await localToScreenPoint(pid, windowId, x, y, before.width, before.height, before.windowBounds);
         let control: NativePointControl | undefined;
         try { control = await timed("target-resolution", () => manager.pointControl(targetScreenPoint!.x, targetScreenPoint!.y),
@@ -3723,7 +3723,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       if (!selectedElementToken) throw new DesktopInputNotDispatchedError("The accessibility element is missing its driver token; no click was sent.");
       if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
       if (cursorIdentity) forgetDesktopInputTarget(name, cursorIdentity);
-      if (selected.nativeElement && typeof manager.invokeWindowElement === "function"
+      if (!options.confirmFocusForeground && selected.nativeElement && typeof manager.invokeWindowElement === "function"
         && selected.nativeElement.role.trim()
         && (selected.nativeElement.label.trim() || selected.nativeElement.automationId.trim())) {
         let semantic: Awaited<ReturnType<typeof manager.invokeWindowElement>>;

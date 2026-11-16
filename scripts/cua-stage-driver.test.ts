@@ -115,7 +115,7 @@ test("explicit background click uses the exact-window message route without the 
   await driver.shutdown();
 }));
 
-test("foreground activation uses target messages without requiring owner-pointer APIs", async () => withRoot(async root => {
+test("explicit foreground activation uses native physical input without SDK dispatch", async () => withRoot(async root => {
   await registerStage(root);
   const calls:Array<{method:string;value?:unknown}>=[];
   const driver=createCuaStageDriver({stage:stageDependencies(root),loadSdk:async()=>makeSdk({ testRoot: root,calls}) as never,
@@ -123,8 +123,8 @@ test("foreground activation uses target messages without requiring owner-pointer
   const result = await driver.click("stage",42,24,undefined,{confirmFocusForeground:true});
   assert.equal(result.outcome.status,"unverified");
   assert.ok(nativeFixture(root).calls.some(call => call.op === "bringToForeground"), "the requested target window is activated");
-  assert.ok(nativeFixture(root).calls.some(call => call.op === "postClickToWindow"), "the click is posted to the target window");
-  assert.equal(nativeFixture(root).calls.some(call => call.op === "sendClick"), false, "the user's pointer is not used when target messaging works");
+  assert.equal(nativeFixture(root).calls.some(call => call.op === "postClickToWindow"), false, "explicit foreground input is not replaced by a queued message");
+  assert.ok(nativeFixture(root).calls.some(call => call.op === "sendClick"), "the explicitly requested physical click is dispatched");
   assert.equal(calls.some(call=>call.method==="callTool"),false);
   await driver.shutdown();
 }));
@@ -2148,6 +2148,24 @@ test("native UI Automation click dispatch is headless and reports verification s
   assert.equal(calls.some(call => ["click", "callTool"].includes(call.method)), false,
     "the overlay SDK does not dispatch app input");
   await driver.shutdown();
+}));
+
+test("explicit foreground clicks use physical input instead of returning a queued headless click", async () => withRoot(async root => {
+  await registerStage(root);
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [],
+    state: { elements: [{ role: "Button", label: "Rectangle", enabled: true, actions: ["invoke"], frame: { x: 120, y: 58, w: 60, h: 24 } }] } }) as never });
+  try {
+    await driver.click("stage", 20, 10, undefined, { confirmFocusForeground: true });
+    const observed = await driver.readStructure("stage");
+    await driver.clickElement("stage", observed.elements[0]!.ref, undefined, { confirmFocusForeground: true });
+    const calls = nativeFixture(root).calls;
+    assert.equal(calls.filter(call => call.op === "sendClick").length, 2);
+    assert.equal(calls.some(call => ["postClickToWindow", "invokePointControl", "invokeWindowElement"].includes(String(call.op))), false,
+      "an explicitly requested physical click must not return a different headless strategy");
+    await assert.rejects(driver.click("stage", 20, 10, undefined, { confirmFocusForeground: true, deliveryMode: "background" }),
+      error => error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+    assert.equal(nativeFixture(root).calls.filter(call => call.op === "sendClick").length, 2);
+  } finally { await driver.shutdown(); }
 }));
 
 test("explicit background click never falls through after a proven headless refusal", async () => withRoot(async root => {

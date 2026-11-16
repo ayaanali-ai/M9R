@@ -819,7 +819,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       // (;=,-./`[]\'); this schema used to be narrower than what actually
       // works downstream, rejecting valid keys (e.g. "=" for a calculator)
       // before they ever got there.
-      z.object({ view: z.enum(["desktop", "app", "popup"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9;=,\-./`[\]\\']|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i), confirmFocusForeground: z.boolean().optional() }).strict()
+      z.object({ view: z.enum(["desktop", "app", "popup"]).optional(), kind: z.literal("press_key"), key: z.string().min(1).max(20).regex(/^(?:[a-z0-9;=,\-./`[\]\\']|F(?:[1-9]|1[0-9]|2[0-4])|Ctrl|Control|Alt|Shift|Meta|Win|Enter|Return|Escape|Esc|Tab|Space|Backspace|Delete|Insert|Home|End|PageUp|PageDown|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Up|Down|Left|Right|CapsLock|PrintScreen)$/i), modifiers: z.array(z.enum(["Control", "Ctrl", "Alt", "Shift", "Meta", "Win"])).max(3).optional(), confirmFocusForeground: z.boolean().optional() }).strict()
         .describe("Send one physical keyboard key to the exact selected window. Use only when the app tree cannot express the requested action or keyboard semantics are required; prefer click_element for exposed buttons and type/replace_element for accessible text fields. Never call this repeatedly to send a sequence (digits, an expression, a word) one character at a time -- use the type action instead to send the whole string in a single dispatch; each separate press_key call pays its own full foreground acquisition, so typing \"123*456\" as seven press_key calls is far slower than one type call and is never the right choice when type can express it. In I'm Working, this can require a foreground approval."),
       z.object({ view: z.enum(["desktop", "app", "popup"]).optional(), kind: z.literal("hotkey"), keys: z.array(z.string().min(1).max(20)).min(1).max(4), confirmFocusForeground: z.boolean().optional() }).strict(),
       z.object({ view: z.literal("app"), kind: z.literal("click_element"), ref: z.string().min(1).max(512), expectedRole: z.string().max(160).optional().describe("The element's role from the read_structure call this ref came from. Strongly recommended: lets the system confirm it is still the exact same control before clicking, since the underlying ref can become ambiguous if the page/window structure changed in between."), expectedLabel: z.string().max(160).optional().describe("The element's label from that same read_structure call, for the same confirmation."), confirmFocusForeground: z.boolean().optional() }).strict()
@@ -862,7 +862,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     const reference = "ref" in action
       ? computerUseTools.resolveStageReference(identity, taskId, mode, action.view, action.ref)
       : undefined;
-    const dispatchAction = reference ? { ...action, ref: reference.ref } : action;
+    const translatedAction = reference ? { ...action, ref: reference.ref } : action;
+    const dispatchAction = translatedAction.kind === "press_key" && translatedAction.modifiers?.length
+      ? { kind: "hotkey" as const, keys: [...translatedAction.modifiers.map(key => key === "Control" ? "Ctrl" : key === "Meta" ? "Win" : key), translatedAction.key],
+          ...(translatedAction.view ? { view: translatedAction.view } : {}), ...(translatedAction.confirmFocusForeground ? { confirmFocusForeground: true } : {}) }
+      : translatedAction.kind === "press_key" ? (({ modifiers, ...keyAction }) => keyAction)(translatedAction) : translatedAction;
     const response = deps.web?.taskStageAction
       ? await deps.web.taskStageAction(authToken, taskId, dispatchAction, mode, operationId,
         reference?.mutationRevision)

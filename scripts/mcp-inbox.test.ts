@@ -94,6 +94,20 @@ test("desktop stage input derives a private one-shot receipt ID from the MCP req
   } finally { t.done(); }
 });
 
+test("stage press_key with modifiers dispatches the same exact-window hotkey contract", async () => {
+  const actions: unknown[] = [];
+  const t = setup({ web: { taskStageAction: async (_token, _taskId, action) => { actions.push(action); return { ok: true }; } } });
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Open file", origin: "human_typed", idempotencyKey: "key-alias" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const args = { token: t.codex, taskId: work.id, operationId: "open-key", action: { kind: "press_key", key: "o", modifiers: ["Control"], view: "app" } };
+    const schema = (t.server as unknown as ToolServer)._registeredTools.m9r_stage_action.inputSchema as { safeParse(value: unknown): { success: boolean } };
+    assert.equal(schema.safeParse(args).success, true, "the public schema accepts the rehearsal's modifier syntax");
+    await t.call("m9r_stage_action", args);
+    assert.deepEqual(actions, [{ kind: "hotkey", keys: ["Ctrl", "o"], view: "app" }]);
+  } finally { t.done(); }
+});
+
 test("native stage actions leave surface-scoped revision tracking to the owner broker", async () => {
   const receivedRevisions: Array<number | undefined> = [];
   let nextRevision = 0;
