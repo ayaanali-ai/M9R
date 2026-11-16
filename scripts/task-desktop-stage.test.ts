@@ -359,6 +359,58 @@ test("task completion removes the persistent cursor but preserves the agent-sess
   } finally { await f.service.close(); f.cleanup(); }
 });
 
+test("an old task's pending cursor hide cannot discard a follow-up task's cleanup ownership", async () => {
+  const f = fixture(true);
+  let release = () => {};
+  let hiding = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let first = true;
+  f.driver.closeAgentCursor = async identity => {
+    if (first) { first = false; hiding = true; await gate; }
+    f.cursorEvents.push(`close:${identity.sessionId}`);
+  };
+  const settle = () => new Promise(resolve => setTimeout(resolve, 600));
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await new Promise(resolve => setImmediate(resolve));
+    f.store.markDelivered([f.task.id], "session-one");
+    assert.equal(f.store.recordTaskResult(f.identity.token, f.task.id, "Done", { status: "completed", remainingWork: [] }).ok, true);
+    for (let i = 0; i < 100 && !hiding; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(hiding, true);
+    const next = f.store.addTask({ from: "you", to: "codex", goal: "Follow-up", origin: "human_typed", targetSession: "session-one", idempotencyKey: "hide-race" }).task;
+    await f.service.prepare(f.identity.token, next.id, "owner-preview");
+    await new Promise(resolve => setImmediate(resolve));
+    release();
+    await settle();
+    assert.ok(f.cursorEvents.filter(event => event === "show:session-one").length >= 3, "a late hide reasserts the newer task's marker");
+    assert.equal(f.cursorEvents.filter(event => event === "close:session-one").length, 1, "the active follow-up is not reaped");
+    f.store.markDelivered([next.id], "session-one");
+    assert.equal(f.store.recordTaskResult(f.identity.token, next.id, "Follow-up done", { status: "completed", remainingWork: [] }).ok, true);
+    await settle();
+    assert.equal(f.cursorEvents.filter(event => event === "close:session-one").length, 2, "the follow-up remains tracked and clears on completion");
+  } finally { release(); await f.service.close(); f.cleanup(); }
+});
+
+test("one agent's completion clears only its cursor while its teammate continues", async () => {
+  const f = fixture(true, undefined, () => ({ handles: ["codex", "claude"], controlHandles: ["codex", "claude"] }));
+  try {
+    const peer = f.store.issueIdentity("claude", "claude-code", "claude-working");
+    const task = f.store.addTask({ from: "you", to: "claude", goal: "Keep working", origin: "human_typed", targetSession: "claude-working", idempotencyKey: "peer-working" }).task;
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.prepare(peer.token, task.id, "owner-preview");
+    await new Promise(resolve => setImmediate(resolve));
+    f.store.markDelivered([f.task.id], "session-one");
+    f.store.recordTaskResult(f.identity.token, f.task.id, "Done", { status: "completed", remainingWork: [] });
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.ok(f.cursorEvents.includes("close:session-one"));
+    assert.equal(f.cursorEvents.includes("close:claude-working"), false);
+    f.store.markDelivered([task.id], "claude-working");
+    f.store.recordTaskResult(peer.token, task.id, "Done", { status: "completed", remainingWork: [] });
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.ok(f.cursorEvents.includes("close:claude-working"));
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("a follow-up task re-shows its cursor after the prior task cleaned it up", async () => {
   const f = fixture(true);
   const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 2_100));

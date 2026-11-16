@@ -1855,6 +1855,23 @@ export function createTaskDesktopStageService(input: {
   const grantReaper = setInterval(() => { ownerWorkPolicy.reapRevokedGrants(); }, 2000);
   grantReaper.unref();
 
+  function finishCursorHide(key: string, active: { identity: CuaAgentCursorIdentity; taskId: string; primedAt: number }): boolean {
+    const current = activeAgentCursors.get(key);
+    if (current !== active) {
+      // A new task may have shown this same session's marker while hide was
+      // awaiting the compositor. Keep its cleanup ownership and restore it.
+      if (current && taskActive(current.taskId)) {
+        cursorPresentationTask.delete(key);
+        void ensureCursorPrimed(cursorStageName(current.identity), current.identity, current.taskId);
+      }
+      return false;
+    }
+    activeAgentCursors.delete(key);
+    cursorPresentationTask.delete(key);
+    cursorAuthFailures.delete(key);
+    return true;
+  }
+
   const cursorReaper = setInterval(() => {
     if (activeAgentCursors.size === 0 || cursorReaperQueued) return;
     cursorReaperQueued = true;
@@ -1873,9 +1890,7 @@ export function createTaskDesktopStageService(input: {
             // The visible marker is task-scoped; the native input host is
             // agent-session-scoped and must survive a completed task so the
             // next task keeps the same independent stream identity/process.
-            activeAgentCursors.delete(key);
-            cursorPresentationTask.delete(key);
-            cursorAuthFailures.delete(key);
+            finishCursorHide(key, active);
           } catch { /* retry terminal-task cleanup on the next tick */ }
           continue;
         }
@@ -1897,10 +1912,7 @@ export function createTaskDesktopStageService(input: {
         if (failures < CURSOR_REVOKE_AFTER_FAILURES) continue;
         try {
           await driver.closeAgentCursor(active.identity);
-          manager.closeInputStream?.(agentInputStreamId(active.identity));
-          activeAgentCursors.delete(key);
-          cursorPresentationTask.delete(key);
-          cursorAuthFailures.delete(key);
+          if (finishCursorHide(key, active)) manager.closeInputStream?.(agentInputStreamId(active.identity));
         } catch { /* retry revocation on the next tick; Driver idle-hide is the fail-safe */ }
       }
     };
