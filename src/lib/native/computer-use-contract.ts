@@ -138,7 +138,9 @@ export const computerUseIntentSchema = z.object({
 
 export const computerUsePostconditionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("url-equals"), url: navigationUrl }).strict(),
-  z.object({ kind: z.literal("visible-text-contains"), text: textValue }).strict(),
+    z.object({ kind: z.literal("visible-text-contains"), text: textValue }).strict(),
+    z.object({ kind: z.literal("accessible-control-selected"), label: z.string().min(1).max(160),
+      role: z.string().min(1).max(80).optional(), selected: z.boolean() }).strict(),
   z.object({
     kind: z.literal("accessible-control-present"),
     role: z.string().min(1).max(80).optional(),

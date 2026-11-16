@@ -1156,7 +1156,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ? undefined
         : "Standalone focus is available only for one exact observed app window; browser tabs and desktop-wide views have no bounded OS focus target.";
     }
-    if (action.postcondition && action.postcondition.kind !== "accessible-control-present" && record.context.kind !== "browser") {
+    if (action.postcondition && !["accessible-control-present", "accessible-control-selected"].includes(action.postcondition.kind) && record.context.kind !== "browser") {
       return `The ${action.postcondition.kind} postcondition requires a browser-tab observation.`;
     }
     if (action.postcondition?.kind === "accessible-control-present" && record.context.kind === "desktop" && record.context.controls.size === 0) {
@@ -1325,8 +1325,17 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       return record.context.text.includes(condition.text) ? "verified" : "unknown";
     }
     const controls = record.context.kind === "browser"
-      ? [...record.context.elements.values()].map(({ role, name }) => ({ role, label: name }))
+      ? [...record.context.elements.values()].map(({ role, name, selected }) => ({ role, label: name, selected }))
       : [...record.context.controls.values()];
+    if (condition.kind === "accessible-control-selected") {
+      // Composite desktop observations historically label keyboard focus as
+      // selected; only the exact app's native selection evidence is qualified.
+      if (record.context.kind === "desktop" && record.context.view !== "app") return "unknown";
+      const matches = controls.filter(control => control.label === condition.label
+        && (condition.role === undefined || control.role === condition.role));
+      if (matches.length !== 1 || typeof matches[0].selected !== "boolean") return "unknown";
+      return matches[0].selected === condition.selected ? "verified" : "mismatch";
+    }
     return controls.some((control) =>
       (condition.role === undefined || control.role === condition.role)
       && (condition.label === undefined || control.label === condition.label)) ? "verified" : "unknown";
@@ -2011,16 +2020,21 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     observationModalityStats: () => observationModalityLedger.snapshot(),
     // Legacy stage actions share the structured observation's private mapping.
     // Never guess by label/position or accept a ref from another task/session.
-    resolveStageReference(identity: VerifiedIdentity, taskId: string, mode: string, view: string | undefined, ref: string) {
+    resolveStageReference(identity: VerifiedIdentity, taskId: string, mode: string, view: string | undefined, ref: string, kind?: string,
+      expected: { role?: string; label?: string } = {}) {
       if (!ref.startsWith("control_")) return undefined;
       for (const record of records.values()) {
         if (record.identityKey !== identityKey(identity) || record.context.kind !== "desktop"
           || record.context.taskId !== taskId || record.context.mode !== mode || view !== "app" || record.context.view !== "app") continue;
         const control = record.context.controls.get(ref);
-        if (!control?.stageRef) continue;
+        if (!control) continue;
         const work = deps.resolveWorkIdentity?.(taskId);
         if (work && (record.work?.workId !== work.workId || record.work.planRevision !== work.planRevision)) break;
-        return { ref: control.stageRef, mutationRevision: record.mutationRevision };
+        if (control.stageRef) return { ref: control.stageRef, mutationRevision: record.mutationRevision };
+        if (kind === "click_element" && control.enabled !== false && control.rect) {
+          if ((expected.role !== undefined && expected.role !== control.role) || (expected.label !== undefined && expected.label !== control.label)) break;
+          return { point: { x: control.rect.x + control.rect.width / 2, y: control.rect.y + control.rect.height / 2 }, mutationRevision: record.mutationRevision };
+        }
       }
       throw new DesktopInputNotDispatchedError("This structured control reference is no longer available for this task, session, and app view. Observe the app again before acting; no input was sent.");
     },

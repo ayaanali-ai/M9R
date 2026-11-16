@@ -605,6 +605,7 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
             className: String(element.className ?? ""), automationId: String(element.automationId ?? ""),
             ...(Array.isArray(element.runtimeId) ? { runtimeId: element.runtimeId as number[] } : {}),
             enabled: element.enabled !== false, focused: element.focused === true,
+            ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
             rect: { x: Number(frame.x ?? 100), y: Number(frame.y ?? 50),
               width: Number(frame.width ?? frame.w ?? 10), height: Number(frame.height ?? frame.h ?? 10) },
             actions: {
@@ -2234,13 +2235,16 @@ test("an exact UIA ref with no advertised activation pattern still uses native p
 
 test("app accessibility observations retain native keyboard focus separately from dispatch success", async () => withRoot(async root => {
   await registerStage(root);
-  const state = { elements: [{ role: "Edit", label: "Search", focused: true, enabled: true,
+  const state = { elements: [{ role: "Edit", label: "Search", focused: true, selected: false, enabled: true,
     frame: { x: 120, y: 70, w: 60, h: 24 } }] };
   const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [], state }) as never });
   try {
     assert.equal((await driver.readStructure("stage")).elements[0]!.focused, true);
+    assert.equal((await driver.readStructure("stage")).elements[0]!.selected, false);
     state.elements[0].focused = false;
+    state.elements[0].selected = true;
     assert.equal((await driver.readStructure("stage")).elements[0]!.focused, false);
+    assert.equal((await driver.readStructure("stage")).elements[0]!.selected, true);
   } finally { await driver.shutdown(); }
 }));
 

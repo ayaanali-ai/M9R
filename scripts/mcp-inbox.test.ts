@@ -191,6 +191,28 @@ test("structured observation refs work in stage actions without losing native id
   } finally { t.done(); }
 });
 
+test("fresh visual control references click their observed bounds without inventing a native token", async () => {
+  const sent: unknown[] = [];
+  const t = setup({ web: { prepareTaskStage: async () => ({ ok: true }), taskStageAction: async (_token, _taskId, action) => {
+    if ((action as { kind: string }).kind === "capture") return { ok: true, result: { mutationRevision: 4, capture: { dataUrl: "data:image/png;base64,eA==",
+      capturedAt: new Date().toISOString(), width: 300, height: 200, controls: [{ label: "Resize and skew", role: "button", rect: { x: 20, y: 30, width: 40, height: 20 } }] } } };
+    sent.push(action); return { ok: true };
+  } } });
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Resize canvas", origin: "human_typed", idempotencyKey: "visual-ref" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const observed = JSON.parse(await t.call("m9r_computer_observe", { token: t.codex, taskId: work.id, target: "app-window", representation: "visual" }));
+    const ref = observed.observation.controls[0].ref;
+    const args = { token: t.codex, taskId: work.id, mode: "owner-preview", action: { kind: "click_element", view: "app", ref,
+      expectedRole: "button", expectedLabel: "Resize and skew", confirmFocusForeground: true }, operationId: "resize-visual" };
+    await t.call("m9r_stage_action", args);
+    assert.deepEqual(sent, [{ kind: "click", view: "app", x: 40, y: 40, confirmFocusForeground: true }]);
+    await assert.rejects(t.call("m9r_stage_action", { ...args, action: { ...args.action, expectedLabel: "Different control" } }), /structured control reference/);
+    await assert.rejects(t.call("m9r_stage_action", { ...args, action: { kind: "replace_element", view: "app", ref, text: "No native field" } }), /structured control reference/);
+    assert.equal(sent.length, 1);
+  } finally { t.done(); }
+});
+
 test("an agent naming a task the owner's new message paused acts under the owner's latest task", async () => {
   let receivedTaskId = "";
   const web: WebBrokerClient = {
@@ -819,6 +841,23 @@ test("a teammate's plain result reply surfaces mid-turn even though it carries n
     await Promise.all([claudeConn.client.close(), claudeConn.server.close(), codexConn.client.close(), codexConn.server.close()]);
     rmSync(storeRoot, { recursive: true, force: true });
   }
+});
+
+test("long progress messages preserve their text and normalize progress routing before broker delivery", async () => {
+  let received: Record<string, unknown> | undefined;
+  const t = setup({ web: { sendA2A: async (_token, input) => { received = input as unknown as Record<string, unknown>;
+    return { ok: true, message: { messageId: "long-progress", conversationId: "progress-thread" }, delivery: { state: "queued", taskId: "T99" }, recipientAgentIds: ["codex"] } as never; } } });
+  try {
+    const summary = "The saved file was checked and the next step is ready. ".repeat(8);
+    const args = { token: t.claude, to: "codex", taskId: "T1", summary, kind: "operation-completed", progressFingerprint: "save-checked" };
+    const schema = (t.server as unknown as ToolServer)._registeredTools.m9r_team_message.inputSchema as { safeParse(input: unknown): { success: boolean } };
+    assert.equal(schema.safeParse(args).success, true);
+    await t.call("m9r_team_message", args);
+    assert.equal(received?.kind, "delegate");
+    assert.equal(received?.progressKind, "operation-completed");
+    assert.equal((received?.summary as string).length, 280);
+    assert.equal((received?.details as Record<string, string>).messageText, summary, "long messages are not silently truncated");
+  } finally { t.done(); }
 });
 
 test("structured teammate messages publish participant-labelled pill activity once", async () => {

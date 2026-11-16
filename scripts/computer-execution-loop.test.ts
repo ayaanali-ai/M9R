@@ -35,6 +35,7 @@ function fixture() {
   let stageWindowFrame: { requested: { x: number; y: number; width: number; height: number }; actual: { x: number; y: number; width: number; height: number }; verified: boolean } | undefined;
   let activeTaskId = "T1";
   let nativeFocus: boolean | undefined;
+  let selectedState: boolean | undefined;
   let clockMs: number | undefined;
   const capture = () => ({ dataUrl: "data:image/png;base64,eA==", width: 300, height: 200, capturedAt: new Date().toISOString() });
   const web: Pick<WebBrokerClient, "prepareTaskStage" | "taskStageAction"> = {
@@ -48,7 +49,7 @@ function fixture() {
         ...(structureScreenRect ? { screenRect: structureScreenRect } : {}),
         ...(desktopWindows ? { scope: "desktop", windows: desktopWindows } : {}),
         elements: [{ ref: "uia:1", label: unlabeled ? "" : "Action", role: nativeFocus === undefined ? "Button" : "Edit", focused: nativeFocus,
-          enabled: true, actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
+          enabled: true, ...(selectedState === undefined ? {} : { selected: selectedState }), actions: ["invoke"], rect: { x: 1, y: 2, width: 50, height: 20 } }], fallbackCapture: capture() } };
       if (failure === "before") return { ok: false, error: "Owner pointer is active", dispatchState: "not-dispatched", gateCode: "foreground-lease" };
       if (failure === "uncertain") throw new Error("Response lost after input");
       if (action.kind === "type_then_enter") return { ok: true, result: { capture: capture(), outcome: { status: "confirmed" },
@@ -71,6 +72,7 @@ function fixture() {
       now: () => new Date(clockMs ?? Date.now()) });
   return { calls, actionsSent, setNativeFocus: (value: boolean) => { nativeFocus = value; }, setTask: (taskId: string) => { activeTaskId = taskId; }, setFailure: (value: typeof failure) => { failure = value; }, setUnlabeled: () => { unlabeled = true; },
     setPopupCaptureFallback: () => { popupCaptureFallback = true; },
+    setSelected: (value: boolean | undefined) => { selectedState = value; },
     setCoverage: (value: Record<string, unknown>) => { structureCoverage = value; },
     setDesktopWindows: (value: Array<Record<string, unknown>>) => { desktopWindows = value; },
     setStructureScreenRect: (value: Record<string, number>) => { structureScreenRect = value; },
@@ -81,6 +83,20 @@ function fixture() {
     callRaw: async (name: string, input: Record<string, unknown>) => handlers.get(name)!(input),
     close: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test("selection verification distinguishes present, selected, and unknown without dispatching input", async () => {
+  const f = fixture(); try {
+    for (const state of [undefined, false, true]) {
+      f.setSelected(state);
+      const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+      const result = await f.call("m9r_computer_action", { action: { kind: "observe", operationId: `verify-${state}`,
+        targetId: observed.target.targetId, targetRevision: observed.target.revision,
+        postcondition: { kind: "accessible-control-selected", label: "Action", selected: true } } });
+      assert.equal(result.result.effectStatus, state === undefined ? "unknown" : state ? "verified" : "mismatch");
+    }
+    assert.ok(f.actionsSent.every(action => (action as { kind: string }).kind === "read_structure"), "selection verification dispatches no input");
+  } finally { f.close(); }
+});
 
 test("isolated-browser tools remain unregistered even if the retired opt-in variable is set", () => {
   const temp = resolve(".test-tmp"); mkdirSync(temp, { recursive: true });

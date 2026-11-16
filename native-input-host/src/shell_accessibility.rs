@@ -23,7 +23,7 @@ use windows::Win32::{
         UIA_ScrollHorizontalViewSizePropertyId, UIA_ScrollHorizontallyScrollablePropertyId,
         UIA_ScrollPatternId, UIA_ScrollVerticalScrollPercentPropertyId,
         UIA_ScrollVerticalViewSizePropertyId, UIA_ScrollVerticallyScrollablePropertyId,
-        UIA_SelectionItemPatternId, UIA_TabItemControlTypeId, UIA_TogglePatternId,
+        UIA_SelectionItemPatternId, UIA_SelectionItemIsSelectedPropertyId, UIA_TabItemControlTypeId, UIA_TogglePatternId, UIA_ToggleToggleStatePropertyId,
         UIA_TreeItemControlTypeId, UIA_ValueIsReadOnlyPropertyId, UIA_ValuePatternId,
     },
     UI::WindowsAndMessaging::{
@@ -74,6 +74,8 @@ fn build_structure_cache_request(
         UIA_AutomationIdPropertyId,
         UIA_IsEnabledPropertyId,
         UIA_HasKeyboardFocusPropertyId,
+        UIA_SelectionItemIsSelectedPropertyId,
+        UIA_ToggleToggleStatePropertyId,
         UIA_IsPasswordPropertyId,
         UIA_ValueIsReadOnlyPropertyId,
         UIA_LegacyIAccessibleDefaultActionPropertyId,
@@ -540,6 +542,11 @@ fn walk_window_element(
             .is_ok();
         let supports_select = unsafe { element.GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId) }
             .is_ok();
+        let selected = unsafe { element.GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId) }
+            .ok().and_then(|pattern| unsafe { pattern.CachedIsSelected() }.ok()).map(|value| value.as_bool())
+            .or_else(|| unsafe { element.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }.ok()
+                .and_then(|pattern| unsafe { pattern.CachedToggleState() }.ok())
+                .and_then(|state| match state.0 { 0 => Some(false), 1 => Some(true), _ => None }));
         let supports_toggle = unsafe { element.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }
             .is_ok();
         let supports_legacy = unsafe { element.GetCachedPatternAs::<IUIAutomationLegacyIAccessiblePattern>(UIA_LegacyIAccessiblePatternId) }
@@ -573,7 +580,7 @@ fn walk_window_element(
             "automationId": truncate_text(&automation_id, 256),
             "runtimeId": element_runtime_id(element),
             "rect": { "x": bounds.left, "y": bounds.top, "width": bounds.right - bounds.left, "height": bounds.bottom - bounds.top },
-            "depth": depth, "enabled": enabled, "focused": focused,
+            "depth": depth, "enabled": enabled, "focused": focused, "selected": selected,
             "actions": { "invoke": supports_invoke, "select": supports_select, "toggle": supports_toggle, "legacy": supports_legacy, "setValue": supports_value, "readValue": supports_read_value, "scroll": supports_scroll },
             "scroll": scroll_state,
         }));

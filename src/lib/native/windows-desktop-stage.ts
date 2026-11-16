@@ -156,6 +156,8 @@ export interface NativeDesktopStructure {
 }
 
 export interface NativeWindowStructureElement extends NativeDesktopStructureElement {
+  /** SelectionItem state, or on/off Toggle state; null/absent is unknown. */
+  selected?: boolean | null;
   ref: string;
   /** Control View child-index path used for immediate native re-resolution. */
   path: number[];
@@ -803,7 +805,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       elements: structure.elements.map((element) => ({
         label: element.label, role: element.role, className: element.className,
         automationId: element.automationId, depth: element.depth, path: element.path,
-        enabled: element.enabled, focused: element.focused, rect: element.rect,
+        enabled: element.enabled, focused: element.focused, selected: element.selected, rect: element.rect,
         actions: element.actions, scroll: element.scroll,
       })),
     });
