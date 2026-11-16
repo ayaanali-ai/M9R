@@ -57,3 +57,19 @@ remain to be verified in the combined installed build.
 ## Live runs
 
 Pending combined candidate build, tagged installation, and rehearsal.
+
+### Run 1 — failed, v22 / 37ed798d
+
+Installed candidate `2026-11-15T21-54-26-775Z-37ed798d`, release tag
+`release-20261115-recovery-v22`. Submitted 2026-11-16T00:05:29Z;
+owner tasks T413 (Claude) and T414 (Codex), delegated task T415,
+conversation `conversation-1df11eccedabc63971a6c491`.
+No completed house PNG was produced. Agents reported separate agreement-note
+work; Paint discovery timed out. Claude's roster query incorrectly reported no
+other agents because managed native sessions consulted legacy endpoint activity.
+The packaged renderer fallback looked up Explorer's identity instead of the
+requested AppsFolder identity and did not retain the resolved exact image path.
+These source defects have regression coverage; the next installed build still
+requires a complete live run. The supervisor deliberately stopped both agents
+with an owner stop command; this was not a product crash or owner stop request.
+Passing complete rehearsals: **0 / 3**.

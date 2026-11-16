@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { stageWindowMatchesApp } from "../src/lib/native/task-stage-apps";
 import { discoverInstalledWindowExecutable, discoverInstalledWindowsApp, WINDOWS_APP_DISCOVERY_SCRIPT, WINDOWS_RENDERER_DISCOVERY_SCRIPT, windowsAppSearchNames } from "../src/lib/native/windows-installed-apps";
 
 const LEGACY_NOTEPAD = { executable: "C:\\Windows\\System32\\notepad.exe", args: [] as string[] };
@@ -62,4 +63,24 @@ test("throws when the same query genuinely matches two unrelated, non-dedupable 
   await assert.rejects(
     () => discoverInstalledWindowsApp("notepad", async () => JSON.stringify([unrelatedOne, unrelatedTwo])),
     /multiple installed apps/);
+});
+
+test("packaged renderer lookup carries the requested app identity instead of Explorer identity", async () => {
+  const expected = "C:\\Program Files\\WindowsApps\\Drawing.Package\\Drawing.exe";
+  const renderer = await discoverInstalledWindowExecutable("C:\\Windows\\explorer.exe", async (script, env) => {
+    assert.equal(env.M9R_APP_AUMID, "Drawing.Package!App");
+    assert.match(script, /\$env:M9R_APP_AUMID/);
+    return JSON.stringify([expected]);
+  }, "Drawing.Package!App");
+  assert.equal(renderer, expected);
+});
+
+test("packaged windows without AUMID require the resolved renderer's exact path", () => {
+  const renderer = "C:\\Program Files\\WindowsApps\\Drawing.Package\\Drawing.exe";
+  const app = { executable: "C:\\Windows\\explorer.exe", args: ["shell:AppsFolder\\Drawing.Package!App"], appUserModelId: "Drawing.Package!App" };
+  const window = { pid: 123, windowId: "456", appName: "Drawing.exe", title: "Untitled", className: "DrawingFrame", visible: true, minimized: false, processPath: renderer };
+  assert.equal(stageWindowMatchesApp(window, app), false);
+  const resolved = { ...app, windowExecutable: renderer, windowExecutablePath: renderer };
+  assert.equal(stageWindowMatchesApp(window, resolved), true);
+  assert.equal(stageWindowMatchesApp({ ...window, processPath: "C:\\Other\\Drawing.exe" }, resolved), false);
 });

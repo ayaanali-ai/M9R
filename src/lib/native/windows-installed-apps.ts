@@ -47,9 +47,9 @@ if ($description -match '^Windows\s+(.+)$') { $names += $Matches[1] }
 $keys = @($names | Where-Object { $_ } | ForEach-Object { Key $_ })
 $shell = New-Object -ComObject Shell.Application
 $item = $shell.Namespace($launcher.DirectoryName).ParseName($launcher.Name)
-$aumid = [string] $item.ExtendedProperty('System.AppUserModel.ID')
+$aumid = if ($env:M9R_APP_AUMID) { $env:M9R_APP_AUMID } else { [string] $item.ExtendedProperty('System.AppUserModel.ID') }
 $found = @()
-foreach ($app in @(Get-StartApps | Where-Object { ($keys -contains (Key $_.Name)) -or ($aumid -and $_.AppID -eq $aumid) })) {
+foreach ($app in @(Get-StartApps | Where-Object { if ($env:M9R_APP_AUMID) { $_.AppID -eq $aumid } else { ($keys -contains (Key $_.Name)) -or ($aumid -and $_.AppID -eq $aumid) } })) {
   if ($app.AppID -notmatch '^([^!]+)!([^!]+)$') { continue }
   $family = $Matches[1]; $id = $Matches[2]
   $packageName = $family.Substring(0, $family.LastIndexOf('_'))
@@ -81,9 +81,10 @@ const windowExecutableCache = new Map<string, DiscoveryCacheEntry<string>>();
 const installedAppCache = new Map<string, DiscoveryCacheEntry<InstalledWindowsApp>>();
 
 export async function discoverInstalledWindowExecutable(executable: string,
-  query?: (script: string, env: Record<string, string>) => Promise<string>): Promise<string | undefined> {
+  query?: (script: string, env: Record<string, string>) => Promise<string>,
+  appUserModelId?: string): Promise<string | undefined> {
   if (!query && process.platform !== "win32") return undefined;
-  const cacheKey = query ? undefined : executable.toLowerCase();
+  const cacheKey = query ? undefined : `${executable.toLowerCase()}\0${appUserModelId ?? ""}`;
   if (cacheKey) {
     const cached = windowExecutableCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
@@ -98,7 +99,8 @@ export async function discoverInstalledWindowExecutable(executable: string,
       (error, stdout) => error ? reject(new Error("Windows renderer identity lookup failed; no mismatched window was adopted.")) : resolve(stdout));
   }));
   try {
-    const parsed: unknown = JSON.parse((await run(WINDOWS_RENDERER_DISCOVERY_SCRIPT, { M9R_APP_LAUNCHER: executable })).replace(/^\uFEFF/, ""));
+    const parsed: unknown = JSON.parse((await run(WINDOWS_RENDERER_DISCOVERY_SCRIPT, { M9R_APP_LAUNCHER: executable,
+      M9R_APP_AUMID: appUserModelId ?? "" })).replace(/^\uFEFF/, ""));
     const result = !Array.isArray(parsed) || parsed.some((path) => typeof path !== "string" || !isAbsolute(path) || !/\.exe$/i.test(path))
       ? undefined
       : (() => {

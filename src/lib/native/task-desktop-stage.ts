@@ -1367,11 +1367,12 @@ export function createTaskDesktopStageService(input: {
         if (!matches.length && windows.length && !rendererLookupAttempted) {
           rendererLookupAttempted = true;
           // Test launchers never consult the host's installed app inventory.
-          const resolveRenderer = input.resolveWindowExecutable
-            ?? (input.resolveStageAppForTest ? undefined : discoverInstalledWindowExecutable);
-          const windowExecutable = await resolveRenderer?.(approved.executable);
+          const windowExecutable = input.resolveWindowExecutable
+            ? await input.resolveWindowExecutable(approved.executable)
+            : input.resolveStageAppForTest ? undefined
+              : await discoverInstalledWindowExecutable(approved.executable, undefined, approved.appUserModelId);
           if (windowExecutable) {
-            approved = { ...approved, windowExecutable };
+            approved = { ...approved, windowExecutable, windowExecutablePath: windowExecutable };
             matches = windows.filter((window) => stageWindowMatchesApp(window, approved));
           }
         }
