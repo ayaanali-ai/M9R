@@ -600,6 +600,57 @@ test("governed Git child environment omits provider and M9R credentials", async 
   assert.equal(Object.values(env).some((value) => value?.includes("fixture")), false);
 });
 
+test("a teammate's plain result reply surfaces mid-turn even though it carries no a2a link", async () => {
+  // queueAgentReply (local-store.ts) answers an agent-initiated task with a
+  // plain agent-initiated task tagged only with replyToTaskId -- it never
+  // sets `a2a`. afterTool's piggyback used to require `task.a2a`, so this
+  // exact reply shape was invisible to the sender until its own turn ended
+  // on its own. Confirmed live: Claude's 7-minute turn never surfaced
+  // Codex's reply even though it existed in the inbox the whole time.
+  const storeRoot = mkdtempSync(join(tmpdir(), "m9r-mcp-inbox-reply-"));
+  const store = createLocalStore(storeRoot);
+  store.addRule({ from: "claude", to: "codex", ttlMs: 3_600_000 });
+  const claudeConn = await connectMcp(store, "m9r-inbox-reply-claude");
+  const codexConn = await connectMcp(store, "m9r-inbox-reply-codex");
+  try {
+    const claudeToken = store.issueIdentity("claude", "claude-code", "claude-reply-session").token;
+    const codexToken = store.issueIdentity("codex", "codex", "codex-reply-session").token;
+
+    const sendResult = await claudeConn.client.callTool({
+      name: "m9r_send",
+      arguments: { token: claudeToken, to: "codex", goal: "Write the first half, then reply with your result." },
+    });
+    assert.match(mcpText(sendResult), /Sent to @codex as task T\d+\./);
+    const delegated = store.tasksFor("codex").find((item) => item.goal.includes("first half"));
+    assert.ok(delegated, "the delegated task was created");
+    store.markDelivered([delegated.id], "codex-reply-session");
+
+    const resultResult = await codexConn.client.callTool({
+      name: "m9r_result",
+      arguments: { token: codexToken, taskId: delegated.id, summary: "Wrote the first half.", completion: { status: "completed", remainingWork: [] } },
+    });
+    assert.match(mcpText(resultResult), /Recorded result/);
+    const reply = store.tasksFor("claude").find((item) => item.replyToTaskId === delegated.id);
+    assert.ok(reply, "queueAgentReply created the auto-reply task");
+    assert.equal(reply.a2a, undefined, "this reply shape genuinely carries no a2a link");
+    assert.ok(reply.approval === "approved" || reply.approval === "not_needed", "the reply is pre-approved, so it is eligible for piggyback delivery");
+
+    // Claude's own turn is still "running" (no Stop, no new m9r_inbox poll) --
+    // the only way it can hear this is the mid-turn afterTool piggyback.
+    const noteDuringTurn = await claudeConn.client.callTool({
+      name: "m9r_note",
+      arguments: { token: claudeToken, action: "list", room: "coordination-test-room" },
+    });
+    const noteText = mcpText(noteDuringTurn);
+    assert.match(noteText, /New teammate conversation context/);
+    assert.match(noteText, new RegExp(`@codex.*${delegated.id}`));
+    assert.match(noteText, /Wrote the first half/);
+  } finally {
+    await Promise.all([claudeConn.client.close(), claudeConn.server.close(), codexConn.client.close(), codexConn.server.close()]);
+    rmSync(storeRoot, { recursive: true, force: true });
+  }
+});
+
 test("structured teammate messages publish participant-labelled pill activity once", async () => {
   let duplicate = false;
   const notices: Array<{ agent: string; to: string; text: string }> = [];
