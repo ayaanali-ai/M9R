@@ -907,6 +907,44 @@ test("prompt-delivered peer messages can be reconciled after reconnect and curre
   } finally { t.done(); }
 });
 
+test("root completion survives reconstructed MCP context without inferring completion from a child or accepting foreign acknowledgements", async () => {
+  const t = setup();
+  try {
+    const root = t.store.addTask({ from: "you", to: "codex", goal: "Draw, save, and verify", origin: "human_typed", broadcastId: "closure-broadcast", idempotencyKey: "closure-root" }).task;
+    const otherRoot = t.store.addTask({ from: "you", to: "claude", goal: "Draw, save, and verify", origin: "human_typed", broadcastId: "closure-broadcast", idempotencyKey: "closure-other-root" }).task;
+    t.store.markDelivered([root.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: root.id, summary: "Drawing remains unfinished",
+      completion: { status: "incomplete", remainingWork: ["Save and verify"] } });
+    const child = t.store.addTask({ from: "claude", to: "codex", goal: "Verify saved drawing", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "c1", targetSession: "x1", replyToTaskId: root.id, idempotencyKey: "closure-child",
+      a2a: { taskId: otherRoot.id, conversationId: "closure-conversation", messageId: "closure-message", senderAgentId: "agent-claude",
+        recipientAgentId: "agent-codex", replyDepth: 0, kind: "verification-request", summary: "Verify the saved drawing" } }).task;
+    t.store.markDelivered([child.id], "x1");
+    const reopened = createLocalStore(t.store.root);
+    const freshServer = createM9rMcpServer({ store: reopened });
+    try {
+      const report = (args: unknown) => (freshServer as unknown as ToolServer)._registeredTools.m9r_result.handler(args);
+      // No task id means the current child, not the older owner objective.
+      const childResult = await report({ token: t.codex, summary: "Verified saved drawing", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [child.id] });
+      assert.match(childResult.content[0].text, new RegExp(`not owner task ${root.id}`));
+      assert.equal(reopened.getTask(child.id)?.receipt?.state, "completed");
+      assert.equal(reopened.getTask(root.id)?.receipt?.state, "uncertain", "a child's success cannot silently close its parent");
+      const foreign = reopened.addTask({ from: "claude", to: "codex", goal: "Other session", origin: "agent_initiated",
+        standingRuleApplies: true, targetSession: "another-session", replyToTaskId: root.id, idempotencyKey: "closure-foreign" }).task;
+      reopened.markDelivered([foreign.id], "another-session");
+      await assert.rejects(report({ token: t.codex, taskId: root.id, summary: "Everything complete",
+        completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [foreign.id] }), /Only peer messages shown/);
+      assert.equal(reopened.getTask(root.id)?.receipt?.state, "uncertain", "a rejected report must not partially complete the root");
+      await report({ token: t.codex, taskId: root.id, summary: "Drawing saved and independently verified",
+        completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [root.id, child.id] });
+      assert.equal(reopened.getTask(root.id)?.receipt?.state, "completed");
+      assert.equal(reopened.getTask(otherRoot.id)?.resultSummary, undefined, "one agent cannot complete another agent's owner assignment");
+      assert.equal(reopened.getTask(foreign.id)?.resultSummary, undefined);
+      assert.deepEqual(reopened.getTask(root.id)?.completion?.remainingWork, []);
+    } finally { await freshServer.close(); }
+  } finally { t.done(); }
+});
+
 test("explicit task selection survives older operation activity and is invalidated by pause", async () => {
   const dispatched: string[] = [];
   const t = setup({ web: { taskStageAction: async (_token, taskId) => {

@@ -1423,11 +1423,35 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
               : answer?.answerDelivery === "conflict"
                 ? " The result is recorded, but the existing reply record did not match this sender and recipient session; M9R did not route another reply."
                 : "";
+      // Completing a peer message is not proof that the owner's objective is
+      // finished. Keep that distinction visible after handoffs/context resets.
+      let ownerReminder = "";
+      if (report.status === "completed" && existing.origin === "agent_initiated" && !inRoom(identity)) {
+        const seen = new Set<string>();
+        let parent = existing;
+        while (!seen.has(parent.id)) {
+          seen.add(parent.id);
+          const parentId = parent.a2a?.taskId ?? parent.replyToTaskId ?? parent.parentTaskId;
+          if (!parentId) break;
+          const next = deps.store.getTask(parentId);
+          if (!next) break;
+          parent = next;
+          if (parent.from !== "you") continue;
+          const ownerTask = parent.to === identity.handle ? parent : parent.broadcastId
+            ? deps.store.tasksForSession(identity.handle, identity.sessionId).find(task => task.from === "you" && task.broadcastId === parent.broadcastId)
+            : undefined;
+          if (ownerTask && !ownerTask.resultSummary && ownerTask.deliveredSession === identity.sessionId
+            && ownerTask.receipt?.state !== "paused" && ownerTask.receipt?.state !== "canceled" && ownerTask.receipt?.state !== "failed") {
+            ownerReminder = ` This resolves peer message ${taskId}, not owner task ${ownerTask.id}. Continue any remaining owner requirements. Only once all are verified, report m9r_result with taskId ${ownerTask.id}; otherwise preserve its incomplete outcome.`;
+          }
+          break;
+        }
+      }
       return { content: [{ type: "text", text: report.status === "incomplete"
         ? `Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed.${inRoom(identity) ? " M9R will deliver the reply to the sender's room." : (answerText || " The sender can retrieve the blocker with m9r_inbox.")}`
         : inRoom(identity)
           ? `Recorded result. M9R will deliver it to the sender's room.${answerText}`
-          : `Recorded result.${answerText || " The sending session can retrieve it with m9r_inbox."}` }] };
+          : `Recorded result.${answerText || " The sending session can retrieve it with m9r_inbox."}${ownerReminder}` }] };
     },
   );
 
