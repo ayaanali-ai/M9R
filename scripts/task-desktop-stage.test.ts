@@ -248,6 +248,31 @@ test("a cursor is reaped promptly once its receipt is paused/failed/uncertain, w
   } finally { await f.service.close(); f.cleanup(); }
 });
 
+test("a cursor is never primed in the first place for a task whose receipt is already paused/failed/uncertain", async () => {
+  // resolveCursorTarget() only excluded a "canceled" receipt, while taskActive() in this same file (the
+  // reaper's own reference predicate, confirmed correct by the two tests above) also excludes "failed",
+  // "uncertain", and "paused". Priming could show a cursor/chatter bubble for a task every other part of
+  // the system -- window claims, action routing, the reaper itself -- already treated as dead.
+  const f = fixture(false);
+  try {
+    f.store.registerEndpoint({ provider: "codex", sessionId: "session-one" });
+    f.store.markDelivered([f.task.id], f.identity.sessionId);
+    f.store.pauseTask(f.task.id);
+    const paused = await f.service.primeCursor(f.identity.token, f.task.id);
+    assert.equal(paused.shown, false);
+    assert.deepEqual(f.cursorEvents, [], "a paused receipt must refuse the prime outright, not show then immediately reap");
+
+    const uncertainTask = f.store.addTask({ from: "you", to: "codex", goal: "Second stage", origin: "human_typed",
+      idempotencyKey: "uncertain-prime", targetSession: "session-one" }).task;
+    f.store.markDelivered([uncertainTask.id], f.identity.sessionId);
+    f.store.recordTaskResult(f.identity.token, uncertainTask.id, "Partial check.", { status: "incomplete", remainingWork: ["Finish."] });
+    assert.equal(f.store.getTask(uncertainTask.id)?.receipt?.state, "uncertain");
+    const uncertain = await f.service.primeCursor(f.identity.token, uncertainTask.id);
+    assert.equal(uncertain.shown, false);
+    assert.deepEqual(f.cursorEvents, [], "an uncertain receipt must refuse the prime the same way");
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("re-priming the same still-running task does not reset the safety-net age, but a genuinely new task does", async () => {
   const f = fixture(true, undefined, undefined, false, undefined, 300);
   const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

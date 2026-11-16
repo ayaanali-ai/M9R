@@ -596,7 +596,15 @@ export function createTaskDesktopStageService(input: {
    */
   function resolveCursorTarget(token: string | undefined, taskId: string, ownerOnly = false): CursorTarget | undefined {
     const task = input.store.getTask(taskId);
-    if (!task || task.resultSummary || task.receipt?.state === "canceled" || task.approval === "pending" || task.approval === "denied" || task.approval === "expired"
+    // Only excluded "canceled" here, while taskActive() below (the same file's own
+    // reference predicate, used by the cursor reaper and the owner-preview window
+    // claim) also excludes "failed", "uncertain", and "paused" receipt states. A
+    // cursor/chatter bubble could be primed (or kept alive) for a task every other
+    // part of the system had already decided was dead -- the same "independent,
+    // disagreeing active-task predicate" class of bug fixed in pendingTasksFor
+    // (mcp-server.ts). Match taskActive()'s exclusion list here too.
+    if (!task || task.resultSummary || ["canceled", "failed", "uncertain", "paused"].includes(task.receipt?.state ?? "")
+      || task.approval === "pending" || task.approval === "denied" || task.approval === "expired"
       || task.lifecycle?.state === "completed" || task.lifecycle?.state === "failed") return undefined;
     if (ownerOnly && (task.origin !== "human_typed" || normalizeHandle(task.from) !== "you")) return undefined;
     const bearer = token ? input.store.verifyIdentity(token) : null;
