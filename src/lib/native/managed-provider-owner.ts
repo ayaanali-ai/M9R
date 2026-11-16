@@ -973,11 +973,19 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
     const sessionIds = new Set(activeContexts.map((context) => context.sessionId));
     for (const profile of profiles) {
       if (active.has(profile.connectionId)) continue;
+      // `fromSession`/`targetSession` membership in `sessionIds` already proves both ends are
+      // live, locally-authenticated managed sessions this broker itself connected -- the same
+      // guarantee multiplayer-inbox-delivery.ts relies on to auto-approve a roster-authenticated
+      // peer message (receiving it is not an OS mutation; any desktop action the recipient takes
+      // still goes through the ordinary stage/action approval policy). Excluding "pending" here
+      // meant a message between two already-authenticated agents could sit pending forever with
+      // nothing left to promote it -- the one line below that promotes a pending candidate could
+      // never run, because this filter had already excluded every pending task before it got there.
       const candidate = deps.store.tasksFor(profile.handle).find((task) => task.origin === "agent_initiated"
         && task.fromSession && sessionIds.has(task.fromSession)
         && (!task.targetSession || sessionIds.has(task.targetSession))
         && !task.deliveredAt && !task.dismissedAt && !task.resultSummary
-        && (task.approval === "approved" || task.approval === "not_needed")
+        && (task.approval === "approved" || task.approval === "not_needed" || task.approval === "pending")
         && isFreshTask(task, now));
       if (!candidate) continue;
       if (candidate.approval === "pending") deps.store.setApproval?.(candidate.id, "approved");

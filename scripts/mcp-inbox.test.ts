@@ -291,6 +291,52 @@ test("an agent result queues one reply for the exact requesting session and neve
   } finally { t.done(); }
 });
 
+test("delegationParentFor authorizes from the most recent assignment instead of refusing when a session has leftover open work", async () => {
+  // Requiring exactly one qualifying candidate meant a single leftover stale task (one the
+  // session never explicitly closed out) silently blocked every new delegation from that
+  // session, even with a fresh, clearly-current task also in flight. Confirmed live: Codex
+  // had two open tasks (a stale one plus the fresh one from the exact turn in progress) and
+  // its own teammate message sat pending with nothing to authorize it.
+  const t = setup();
+  try {
+    const stale = t.store.addTask({
+      from: "claude", to: "codex", goal: "An earlier request codex never explicitly closed out.", origin: "agent_initiated",
+      fromSession: "c1", standingRuleApplies: true, idempotencyKey: "delegation-parent-stale",
+    }).task;
+    t.store.markDelivered([stale.id], "x1");
+
+    const fresh = t.store.addTask({
+      from: "claude", to: "codex", goal: "The current turn codex is actually working on.", origin: "agent_initiated",
+      fromSession: "c1", standingRuleApplies: true, idempotencyKey: "delegation-parent-fresh",
+    }).task;
+    t.store.markDelivered([fresh.id], "x1");
+
+    assert.equal(t.store.tasksFor("codex").filter((task) => !task.resultSummary).length, 2,
+      "this fixture must reproduce two simultaneously open tasks for the same session");
+    const parent = t.store.delegationParentFor("codex", "x1", "Report back on the current turn.");
+    assert.ok(parent, "a session with more than one open task must still resolve a delegation parent");
+    assert.equal(parent.id, fresh.id, "the most recently delivered task is treated as the actual current assignment");
+
+    const sendResult = await t.call("m9r_send", { token: t.codex, to: "claude", goal: "Report back on the current turn." });
+    assert.match(sendResult, /Sent to @claude as task T\d+\./, "delegation inherits approval instead of landing pending");
+  } finally { t.done(); }
+});
+
+test("m9r_send never claims a message was sent when it actually landed pending", async () => {
+  // M9R told the sending agent "Sent to @X as task T..." even when the task's own
+  // approval was still "pending" and no delivery had happened -- confirmed live, Codex
+  // was told its message was sent while it silently sat withheld for owner approval.
+  const t = setup({ allowRule: false });
+  try {
+    const sendResult = await t.call("m9r_send", { token: t.codex, to: "claude", goal: "No standing rule covers this pair." });
+    const taskId = sendResult.match(/as (T\d+)/)?.[1];
+    assert.ok(taskId, "the reply must still name the created task");
+    assert.equal(t.store.getTask(taskId!)?.approval, "pending", "this fixture must reproduce the exact pending shape");
+    assert.doesNotMatch(sendResult, /Sent to @claude/, "must not claim delivery for a task that is actually still pending");
+    assert.match(sendResult, /awaiting owner approval/);
+  } finally { t.done(); }
+});
+
 test("a structured A2A reply suppresses the duplicate automatic task-result reply", async () => {
   const t = setup();
   try {

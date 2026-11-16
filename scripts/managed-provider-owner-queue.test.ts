@@ -395,6 +395,80 @@ test("managed provider bridge returns A2A results to the pinned sender session",
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a teammate message between two already-authenticated managed sessions is delivered even while still approval-pending", async () => {
+  // bridgeOnce's candidate filter used to require approval "approved" or "not_needed",
+  // excluding "pending" outright -- so the one line right below it that promotes a
+  // pending candidate to "approved" could never run; the filter had already thrown the
+  // task away first. Both fromSession and targetSession membership in `sessionIds` here
+  // already proves this message is between two live, locally-authenticated managed
+  // sessions this same broker connected, the same guarantee multiplayer-inbox-delivery.ts
+  // relies on to auto-approve a roster-authenticated peer message. Confirmed live: a
+  // teammate message between two managed agents sat pending with nothing to authorize
+  // it, while the tool that sent it told the sender "Sent to @claude."
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-pending-promote-"));
+  const store = createLocalStore(root);
+  const sessions = new Map<string, string>();
+  const prompts = new Map<string, string[]>();
+  const owner = createManagedProviderOwner({
+    agents: [
+      { handle: "claude", provider: "claude-code", folder: root },
+      { handle: "codex", provider: "codex", folder: root },
+    ],
+    storeRoot: root,
+    repoRoot: root,
+    brokerPort: 0,
+    store,
+    env: {},
+    createConnection: (profile, context) => {
+      sessions.set(profile.handle, context.sessionId);
+      prompts.set(profile.handle, []);
+      const connection: ManagedProviderConnection = {
+        profile,
+        start: async () => ({ connectionId: profile.connectionId, generation: 1 }),
+        send: async function* (task) {
+          prompts.get(profile.handle)!.push(task.prompt);
+          yield { kind: "accepted" };
+          yield { kind: "result", text: "Acknowledged.", isError: false };
+        },
+        interrupt: async () => undefined,
+        cancel: async () => undefined,
+        pause: async () => undefined,
+        resume: async () => undefined,
+        status: () => ({ ...profile, status: "ready", generation: 1 }),
+        readiness: () => ({ healthy: true }),
+        capabilities: () => ({ connectionId: profile.connectionId, provider: profile.provider, generation: 1, models: [], currentModel: null, currentEffort: null }),
+        applyModelSelection: async () => ({ ok: true, applies: "next-turn" }),
+        continuation: () => undefined,
+        drain: async () => undefined,
+        stop: async () => undefined,
+      };
+      return connection;
+    },
+  });
+  const waitFor = async (predicate: () => boolean, description: string) => {
+    for (let attempt = 0; attempt < 200 && !predicate(); attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(predicate(), true, `timed out waiting for ${description}`);
+  };
+  try {
+    assert.deepEqual((await owner.start()).failures, []);
+    // No standingRuleApplies and no matching rule in the table: this lands as
+    // approval "pending", exactly the shape produced when a sender session is
+    // carrying more than one open task and delegationParentFor finds no single
+    // unambiguous parent to inherit approval from.
+    const pending = store.addTask({
+      from: "codex", to: "claude", goal: "Wrote the first half; your turn to finish it.", origin: "agent_initiated",
+      fromSession: sessions.get("codex"), targetSession: sessions.get("claude"),
+      idempotencyKey: "managed-a2a-pending-promote",
+    }).task;
+    assert.equal(pending.approval, "pending", "this fixture must reproduce the exact pending shape seen live");
+    store.setDelivery(pending.id, { state: "deferred" });
+
+    await waitFor(() => !!store.getTask(pending.id)?.deliveredAt, "the pending teammate message to be delivered to Claude");
+    assert.equal(store.getTask(pending.id)?.approval, "approved", "bridgeOnce promoted the pending candidate instead of leaving it stuck");
+    assert.match(prompts.get("claude")?.join("\n") ?? "", new RegExp(pending.id));
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("OpenCode preserves owner config, account and model sources while injecting M9R tool policy", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-opencode-home-"));
   const ownerConfig = join(root, "owner-opencode-config");

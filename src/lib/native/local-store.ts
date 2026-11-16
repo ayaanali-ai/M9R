@@ -2221,11 +2221,17 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /**
-     * Finds the one active owner-approved turn that authorizes an ordinary delegation.
+     * Finds the active owner-approved turn that authorizes an ordinary delegation.
      *
      * This is deliberately fail-closed: a provider session may inherit approval only when
-     * it is actively carrying exactly one fresh, delivered, unfinished task. Protected work
-     * never inherits approval, and ambiguous/stale state remains pending for an owner decision.
+     * it is actively carrying at least one fresh, delivered, unfinished task. Protected work
+     * never inherits approval, and a session with no qualifying task remains pending for an
+     * owner decision. When several qualify -- e.g. an older task the session never closed out
+     * plus the fresh one it is actually mid-turn on -- this picks the most recently *delivered*
+     * one as "the actual current assignment" instead of refusing outright. Requiring an exact
+     * count of one meant a single leftover stale task silently blocked every new delegation from
+     * that session: confirmed live, Codex had two open tasks (a stale one plus the fresh one from
+     * this exact turn) and its teammate message sat pending with nothing to authorize it.
      */
     delegationParentFor(handle: string, sessionId: string, goal: string): Task | undefined {
       if (!sessionId || isProtectedAction(goal)) return undefined;
@@ -2243,8 +2249,8 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         return Number.isFinite(createdAt) && Number.isFinite(deliveredAt)
           && createdAt >= cutoff && deliveredAt <= current;
       });
-      if (candidates.length !== 1) return undefined;
-      return candidates[0];
+      if (candidates.length === 0) return undefined;
+      return candidates.reduce((latest, task) => Date.parse(task.deliveredAt!) > Date.parse(latest.deliveredAt!) ? task : latest);
     },
 
     /**

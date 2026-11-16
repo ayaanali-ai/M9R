@@ -953,8 +953,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           text: goal,
         }).catch(() => false);
       }
+      const sentTask = deps.store.getTask?.(taskId);
+      const awaitingApproval = sentTask ? sentTask.approval === "pending" : false;
       return { content: [{ type: "text", text: created
-        ? `M9R accepted one teammate message for @${to} as ${taskId}. Sent to @${to} as task ${taskId}. Recipient acknowledgement is tracked separately. ${replyDepth > 0 ? `Exchange depth ${replyDepth}/${MAX_AGENT_REPLY_DEPTH}.` : "Identical sends are suppressed within the active dedupe window."}`
+        ? awaitingApproval
+          ? `M9R recorded one teammate message for @${to} as ${taskId}, but it is awaiting owner approval and has not been sent yet. It will be delivered once approved.`
+          : `M9R accepted one teammate message for @${to} as ${taskId}. Sent to @${to} as task ${taskId}. Recipient acknowledgement is tracked separately. ${replyDepth > 0 ? `Exchange depth ${replyDepth}/${MAX_AGENT_REPLY_DEPTH}.` : "Identical sends are suppressed within the active dedupe window."}`
         : `M9R deduplicated this teammate message; it is already represented by task ${taskId}. Recipient acknowledgement remains tracked separately.` }] };
     },
   );
