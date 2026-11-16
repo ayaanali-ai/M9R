@@ -41,7 +41,7 @@ export interface WebBrokerClient {
   /** Acknowledge only completed teammate replies addressed to the authenticated sending session. */
   markAgentResultsShown?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
-  recordAgentTaskResult?(token: string, taskId: string, summary: string, completion?: TaskCompletionReport): Promise<{
+  recordAgentTaskResult?(token: string, taskId: string, summary: string, completion?: TaskCompletionReport, handledPeerTaskIds?: readonly string[]): Promise<{
     ok: boolean;
     error?: string;
     alreadyRecorded?: boolean;
@@ -270,14 +270,14 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
     async advanceAgentInboxCursor(token, seq) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "cursor", token, seq } });
     },
-    async recordAgentTaskResult(token, taskId, summary, completion) {
+    async recordAgentTaskResult(token, taskId, summary, completion, handledPeerTaskIds) {
       return agentStoreRequest<{
         ok: boolean;
         error?: string;
         alreadyRecorded?: boolean;
         answerTaskId?: string;
         answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict";
-      }>({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary, ...(completion ? { completion } : {}) } });
+      }>({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary, ...(completion ? { completion } : {}), ...(handledPeerTaskIds?.length ? { handledPeerTaskIds } : {}) } });
     },
     async taskStageApp(token, taskId, appId, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,

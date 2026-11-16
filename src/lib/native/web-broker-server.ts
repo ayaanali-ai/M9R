@@ -419,14 +419,16 @@ export function applyAgentMcpStoreMutation(
     }
 
     if (value.action === "result") {
-      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary", "completion"].includes(key))
+      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary", "completion", "handledPeerTaskIds"].includes(key))
         || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
         || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 20_000
-        || (value.completion !== undefined && !taskCompletionReportSchema.safeParse(value.completion).success)) {
+        || (value.completion !== undefined && !taskCompletionReportSchema.safeParse(value.completion).success)
+        || (value.handledPeerTaskIds !== undefined && (!Array.isArray(value.handledPeerTaskIds) || value.handledPeerTaskIds.length > 20
+          || value.handledPeerTaskIds.some(id => typeof id !== "string" || !/^T[0-9]{1,12}$/.test(id))))) {
         return { status: 400, body: { ok: false, error: "Invalid M9R task result." } };
       }
       const recorded = store.recordTaskResult(value.token, value.taskId, value.summary,
-        value.completion === undefined ? undefined : taskCompletionReportSchema.parse(value.completion));
+        value.completion === undefined ? undefined : taskCompletionReportSchema.parse(value.completion), value.handledPeerTaskIds as string[] | undefined);
       if (!recorded.ok) {
         const status = /No task/.test(recorded.error ?? "") ? 404
           : /belongs to another session|not sent to you|not been delivered/.test(recorded.error ?? "") ? 403

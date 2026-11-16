@@ -859,6 +859,42 @@ test("native action boundaries include new peer context once without claiming an
   } finally { t.done(); }
 });
 
+test("a result durably resolves only explicitly handled peer context without acknowledgement tasks", async () => {
+  const t = setup({ web: { taskStageAction: async () => ({ ok: true, result: { actionExecuted: true } }) } });
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Finish the checklist", origin: "human_typed", idempotencyKey: "resolve-work" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const addPeer = (key: string) => t.store.addTask({ from: "claude", to: "codex", goal: key,
+      origin: "agent_initiated", targetSession: "x1", fromSession: "c1", standingRuleApplies: true, idempotencyKey: key,
+      a2a: { conversationId: "conversation-resolve", messageId: key, senderAgentId: "agent-claude", recipientAgentId: "agent-codex",
+        replyDepth: 0, kind: "help-request", summary: key } }).task;
+    const handled = addPeer("handled-message");
+    const unanswered = addPeer("unanswered-question");
+    const handler = (t.server as unknown as ToolServer)._registeredTools.m9r_stage_action.handler as
+      (args: unknown, extra: { requestId: number }) => Promise<{ content: Array<{ text: string }> }>;
+    const response = await handler({ token: t.codex, taskId: work.id, action: { kind: "cursor", x: 1, y: 1 } }, { requestId: 601 });
+    assert.ok(response.content.some(block => block.text.includes(`Task: ${handled.id}`)));
+    const unseen = addPeer("new-blocker-after-presentation");
+    await assert.rejects(t.call("m9r_result", { token: t.codex, taskId: work.id, summary: "Done", completion: { status: "completed", remainingWork: [] },
+      handledPeerTaskIds: [unseen.id] }), /Only peer messages shown/);
+    const count = t.store.snapshot().tasks.length;
+    const args = { token: t.codex, taskId: work.id, summary: "Finished checklist and answered the first request", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [handled.id] };
+    await t.call("m9r_result", args);
+    const reopened = createLocalStore(t.store.root);
+    assert.equal(reopened.getTask(handled.id)?.receipt?.state, "completed");
+    assert.match(reopened.getTask(handled.id)!.resultSummary!, /Handled during/);
+    for (const task of [unanswered, unseen]) {
+      assert.equal(reopened.getTask(task.id)?.resultSummary, undefined);
+      assert.equal(reopened.getTask(task.id)?.deliveredAt, undefined, "unresolved/new messages remain eligible for their own turn");
+    }
+    assert.equal(reopened.snapshot().tasks.length, count, "resolving context creates no acknowledgement task");
+    await t.call("m9r_result", args);
+    assert.equal(t.store.snapshot().tasks.length, count, "repeating the result is idempotent");
+    const denied = t.store.recordTaskResult(t.codex, work.id, args.summary, { status: "completed", remainingWork: [] }, [work.id]);
+    assert.equal(denied.ok, false, "the broker independently refuses arbitrary owner tasks as peer acknowledgements");
+  } finally { t.done(); }
+});
+
 test("explicit task selection survives older operation activity and is invalidated by pause", async () => {
   const dispatched: string[] = [];
   const t = setup({ web: { taskStageAction: async (_token, taskId) => {

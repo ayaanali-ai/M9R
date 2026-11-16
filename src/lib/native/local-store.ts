@@ -2841,7 +2841,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Record an authenticated result once, in the same transaction that checks its session ownership. */
-    recordTaskResult(token: string, id: string, summary: string, completion?: TaskCompletionReport): {
+    recordTaskResult(token: string, id: string, summary: string, completion?: TaskCompletionReport, handledPeerTaskIds: readonly string[] = []): {
       ok: boolean;
       error?: string;
       alreadyRecorded?: boolean;
@@ -2857,6 +2857,24 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         ? clean.slice(0, MAX_RESULT_SUMMARY_CHARS - TRUNCATION_MARKER.length) + TRUNCATION_MARKER
         : clean;
       const queueAgentReply = (s: StoreState, task: Task, identity: VerifiedIdentity) => {
+        // The recipient explicitly reported these messages handled in this turn.
+        // Persist that outcome atomically with its result, without generating
+        // acknowledgement messages that would themselves require another turn.
+        for (const peerId of new Set(handledPeerTaskIds)) {
+          const peer = s.tasks.find(item => item.id === peerId)!;
+          if (peer.resultSummary) continue;
+          const at = now().toISOString();
+          peer.deliveredAt ??= at;
+          peer.deliveredSession = identity.sessionId;
+          peer.completion = { status: "completed", remainingWork: [], summary: `Handled during ${task.id}; the recipient explicitly reported this message fully addressed. See that task's result.`, updatedAt: at };
+          peer.resultSummary = peer.completion.summary;
+          if (peer.delivery) peer.delivery = { ...peer.delivery, state: "done" };
+          recordTaskReceipt(peer, { state: "provider_received", at, source: "provider-session", sessionId: identity.sessionId });
+          recordTaskReceipt(peer, { state: "completed", at, source: "provider-session", sessionId: identity.sessionId });
+          applyTaskLifecycle(peer, { state: "completed", sessionId: identity.sessionId, completedAt: at });
+          setCoordinationCompletion(peer, "completed");
+          pushEvent(s, { kind: "task.result", taskId: peer.id, handle: peer.from, text: `Handled within ${task.id}` });
+        }
         if (task.origin !== "agent_initiated" || task.replyToTaskId || task.from.startsWith("web-") || identity.sessionId.startsWith("web-")) {
           return { answerDelivery: "not-applicable" as const };
         }
@@ -2929,6 +2947,16 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         if (!identity.sessionId.startsWith("web-") && (!task.deliveredAt || !owner)) {
           return { ok: false, error: `Task ${id} has not been delivered to this session.` };
         }
+        if (!Array.isArray(handledPeerTaskIds) || handledPeerTaskIds.length > 20 || handledPeerTaskIds.some(peerId => {
+          const peer = s.tasks.find(item => item.id === peerId);
+          return !peer || peer.id === id || peer.origin !== "agent_initiated" || !(peer.a2a || peer.replyToTaskId)
+            || normalizeHandle(peer.to) !== handle || peer.retiredAt || peer.dismissedAt
+            || !(peer.approval === "approved" || peer.approval === "not_needed")
+            || (peer.targetSession ?? peer.deliveredSession ?? identity.sessionId) !== identity.sessionId
+            || peer.receipt?.state === "canceled" || peer.receipt?.state === "paused" || peer.receipt?.state === "failed"
+            || peer.delivery?.state === "sending" || peer.delivery?.state === "uncertain"
+            || s.stageOperations.some(operation => operation.taskId === peerId && operation.state === "running");
+        })) return { ok: false, error: "A handled peer message is not eligible for this session; no result was recorded." };
         if (task.resultSummary) {
           if (task.resultSummary === bounded) return { ok: true, alreadyRecorded: true, ...queueAgentReply(s, task, identity) };
           return { ok: false, error: `Task ${id} already has a recorded result; it was not overwritten.` };

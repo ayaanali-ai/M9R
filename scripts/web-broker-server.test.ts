@@ -164,9 +164,20 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
     assert.match(denied.error ?? "", /not sent to you/);
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, undefined);
 
-    const recorded = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.", { status: "completed", remainingWork: [] });
+    const peer = ctx.store.addTask({ from: "alice", to: "bob", goal: "Check the second file too", origin: "agent_initiated",
+      standingRuleApplies: true, targetSession: "session-bob", fromSession: "session-alice", idempotencyKey: "handled-peer-wire",
+      replyToTaskId: sent.taskId! }).task;
+    const foreign = ctx.store.addTask({ from: "alice", to: "bob", goal: "Other session's request", origin: "agent_initiated",
+      standingRuleApplies: true, targetSession: "other-bob", fromSession: "session-alice", idempotencyKey: "foreign-peer-wire",
+      replyToTaskId: sent.taskId! }).task;
+    const wrongPeer = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.", { status: "completed", remainingWork: [] }, [foreign.id]);
+    assert.equal(wrongPeer.ok, false);
+    assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, undefined, "invalid peer resolution cannot partially complete the main task");
+    const recorded = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.", { status: "completed", remainingWork: [] }, [peer.id]);
     assert.equal(recorded.ok, true);
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "Reviewed the diff.");
+    assert.equal(ctx.store.getTask(peer.id)?.receipt?.state, "completed", "handled peer IDs survive client/owner-pipe transport");
+    assert.equal(ctx.store.getTask(foreign.id)?.resultSummary, undefined);
     const duplicateResult = await web.recordAgentTaskResult!(bob.token, sent.taskId!, "Reviewed the diff.", { status: "completed", remainingWork: [] });
     assert.equal(duplicateResult.ok, true, "retrying the same successful result is idempotent");
     assert.equal(ctx.store.getTask(sent.taskId!)?.resultSummary, "Reviewed the diff.");
@@ -177,7 +188,7 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
     });
     assert.equal(extraFieldRejected?.ok, false);
     assert.match(extraFieldRejected?.error ?? "", /Invalid M9R task message/);
-    assert.equal(ctx.store.tasksFrom("alice").length, 1, "invalid requests must not mutate the task store");
+    assert.equal(ctx.store.tasksFrom("alice").length, 3, "invalid requests must not add to the original task and two peer messages");
 
     const malformed = await web.submitAgentTask!("not-a-session-token", "bob", "not accepted");
     assert.equal(malformed.ok, false);
@@ -188,7 +199,7 @@ test("restricted agent MCP writes go through the owner broker and are identity-s
     const revoked = await web.submitAgentTask!(alice.token, "bob", "revoked identity task");
     assert.equal(revoked.ok, false);
     assert.match(revoked.error ?? "", /not active/);
-    assert.equal(ctx.store.tasksFrom("alice").length, 1);
+    assert.equal(ctx.store.tasksFrom("alice").length, 3);
   } finally { await ctx.done(); }
 });
 
