@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { renameStateFile } from "../src/lib/native/atomic-file";
 import { createLocalStore } from "../src/lib/native/local-store";
-import { createTaskDesktopStageService, ownerPreviewLaunchQueueKey, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
+import { coordinationRootKey, createTaskDesktopStageService, ownerPreviewLaunchQueueKey, readTaskStagePolicy, resolveLaunchTarget, setTaskStagePermission, stageAccessMode } from "../src/lib/native/task-desktop-stage";
 import { createWindowsDesktopStageManager, type WindowsStageDependencies } from "../src/lib/native/windows-desktop-stage";
 import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 import { resolveUnlistedStageApp, isStageAppReference, stageAppLaunchCwd, stageWindowMatchesApp, type StageAppLaunchSpec } from "../src/lib/native/task-stage-apps";
@@ -27,6 +27,30 @@ test("owner-preview launch queues coalesce same-app joins without blocking diffe
     "independent apps in one multiplayer task must have independent launch queues");
   assert.notEqual(ownerPreviewLaunchQueueKey(goal, "Calculator"), ownerPreviewLaunchQueueKey(`${goal} follow-up`, "Calculator"),
     "different task intents must not share a launch queue");
+});
+
+test("coordinationRootKey keys shared A2A work by lineage, not by each hop's own goal wording", () => {
+  const broadcastRecipientA = { id: "T1", broadcastId: "bcast-1" };
+  const broadcastRecipientB = { id: "T2", broadcastId: "bcast-1" };
+  assert.equal(coordinationRootKey(broadcastRecipientA), coordinationRootKey(broadcastRecipientB),
+    "every per-recipient task from one owner broadcast must resolve to the same root key");
+
+  const delegateMessage = { id: "T3", a2a: { conversationId: "conv-1" } };
+  const replyMessage = { id: "T4", a2a: { conversationId: "conv-1" } };
+  assert.equal(coordinationRootKey(delegateMessage), coordinationRootKey(replyMessage),
+    "every reply in one A2A conversation thread must resolve to the same root key, even though each hop's goal text is unique");
+
+  const conversationLinkedTask = { id: "T5", broadcastId: "bcast-2", a2a: { conversationId: "conv-2" } };
+  assert.equal(coordinationRootKey(conversationLinkedTask), "conv-2",
+    "a2a.conversationId takes precedence over broadcastId when a task carries both");
+
+  const soloTask = { id: "T6" };
+  assert.equal(coordinationRootKey(soloTask), "T6",
+    "a task with no lineage falls back to its own id, isolating it exactly like before");
+
+  const unrelatedTask = { id: "T7" };
+  assert.notEqual(coordinationRootKey(soloTask), coordinationRootKey(unrelatedTask),
+    "two unrelated solo tasks must never share a root key");
 });
 
 function fixture(control = false, resolveStageAppForTest?: (root: string, appId: string) => StageAppLaunchSpec,
