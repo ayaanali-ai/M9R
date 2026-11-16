@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { compactObservationPayload } from "../src/lib/native/observation-payload";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { registerComputerUseTools } from "../src/lib/native/computer-use-mcp";
@@ -84,11 +85,28 @@ function fixture() {
     close: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+test("compact observations reconstruct complete element details and preserve differing evidence", () => {
+  const control = { ref: "one", label: "Rectangle", role: "button", selected: true, rect: { x: 1, y: 2, width: 30, height: 40 } };
+  const original = { controls: [control], structure: { status: "partial", coverage: { offscreenContent: "unknown" }, elements: [
+    { ...control }, { ...control, label: "Different evidence", selected: false }, { ref: "unmatched", label: "Keep me" },
+  ] } };
+  const result = compactObservationPayload(original) as typeof original;
+  assert.ok(JSON.stringify(result).length < JSON.stringify(original).length);
+  assert.deepEqual(result.structure.elements.map(element => ({ ...(element.ref === "one" ? control : {}), ...element })), original.structure.elements);
+  assert.equal(result.structure.status, "partial");
+  assert.deepEqual(result.structure.coverage, original.structure.coverage);
+  assert.equal(original.structure.elements[0].label, "Rectangle", "compaction must not mutate the source evidence");
+});
+
 test("selection verification distinguishes present, selected, and unknown without dispatching input", async () => {
   const f = fixture(); try {
     for (const state of [undefined, false, true]) {
       f.setSelected(state);
       const observed = await f.call("m9r_computer_observe", { target: "app-window" });
+      const structure = observed.observation.structure as unknown as { elementDetails: string; elements: Array<{ ref: string }> };
+      assert.match(structure.elementDetails, /observation.controls/);
+      assert.ok(structure.elements.every((element: { ref: string }) =>
+        observed.observation.controls.some((control: { ref: string }) => control.ref === element.ref)));
       const result = await f.call("m9r_computer_action", { action: { kind: "observe", operationId: `verify-${state}`,
         targetId: observed.target.targetId, targetRevision: observed.target.revision,
         postcondition: { kind: "accessible-control-selected", label: "Action", selected: true } } });

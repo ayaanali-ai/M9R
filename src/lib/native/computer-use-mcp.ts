@@ -21,6 +21,7 @@ import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { preDispatchRetry, type ComputerUseRetry } from "./computer-use-recovery";
 import { recordComputerUseLatency } from "./computer-use-latency";
 import { runComputerUseProgram } from "./computer-use-program";
+import { compactObservationPayload } from "./observation-payload";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
 import type { ObservationModalityLedger } from "./observation-modality-ledger";
 import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
@@ -1085,7 +1086,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           ...(visibleCapture ? { capture: publicStageCapture(visibleCapture) } : {}), controls: publicControls };
     return {
       record,
-      observation,
+      observation: compactObservationPayload(observation),
       ...(image ? { image } : {}),
     };
   }

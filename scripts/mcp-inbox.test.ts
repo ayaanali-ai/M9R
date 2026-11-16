@@ -108,6 +108,24 @@ test("stage press_key with modifiers dispatches the same exact-window hotkey con
   } finally { t.done(); }
 });
 
+test("legacy stage images are optional without suppressing error recovery evidence", async () => {
+  let ok = true;
+  const t = setup({ web: { taskStageAction: async () => ({ ok, result: { capture: { dataUrl: "data:image/png;base64,eA==", width: 10, height: 10,
+    ownedPopups: [{ dataUrl: "data:image/png;base64,eQ==" }] } } }) } });
+  try {
+    const work = t.store.addTask({ from: "you", to: "codex", goal: "Inspect controls", origin: "human_typed", idempotencyKey: "image-choice" }).task;
+    t.store.markDelivered([work.id], "x1");
+    const handler = (t.server as unknown as ToolServer)._registeredTools.m9r_stage_action.handler;
+    const args = { token: t.codex, taskId: work.id, action: { kind: "read_structure", view: "app" }, operationId: "image-choice" };
+    assert.equal((await handler(args)).content.filter(block => block.type === "image").length, 2);
+    const compact = await handler({ ...args, includeScreenshot: false });
+    assert.equal(compact.content.some(block => block.type === "image"), false);
+    assert.match(compact.content[0].text, /not-requested/);
+    ok = false;
+    assert.equal((await handler({ ...args, includeScreenshot: false })).content.filter(block => block.type === "image").length, 2);
+  } finally { t.done(); }
+});
+
 test("native stage actions leave surface-scoped revision tracking to the owner broker", async () => {
   const receivedRevisions: Array<number | undefined> = [];
   let nextRevision = 0;
