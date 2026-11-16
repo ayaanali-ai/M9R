@@ -67,21 +67,21 @@ test("task progress witnesses stop repeated no-progress provider wakeups and res
     return result;
   };
 
-  for (let index = 1; index <= 3; index += 1) {
+  for (let index = 1; index <= 2; index += 1) {
     const result = send(index, "same-state");
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.delivery.state, "queued");
   }
-  const stalled = send(4, "same-state");
+  const stalled = send(3, "same-state");
   assert.equal(stalled.ok, true);
   if (stalled.ok) assert.equal(stalled.delivery.state, "held-no-progress");
-  assert.equal(delivered.length, 3);
+  assert.equal(delivered.length, 2);
   assert.equal(runtime.snapshot().tasks[0]?.state, "waiting-agent");
 
-  const resumed = send(5, "new-state", "operation-completed");
+  const resumed = send(4, "new-state", "operation-completed");
   assert.equal(resumed.ok, true);
   if (resumed.ok) assert.equal(resumed.delivery.state, "queued");
-  assert.equal(delivered.length, 4);
+  assert.equal(delivered.length, 3);
   assert.equal(runtime.snapshot().tasks[0]?.state, "active");
 });
 

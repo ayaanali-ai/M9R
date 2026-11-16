@@ -325,7 +325,7 @@ export function createTaskContext(input: CreateTaskContextInput): TaskContextSto
       // change.
       const duplicate = prior?.stateFingerprint === witness.stateFingerprint;
       const streak = duplicate ? context.progress.noProgressStreak + 1 : 0;
-      const waiting = streak >= 3;
+      const waiting = streak >= 2;
       context = update(context, {
         progress: { lastWitness: witness, noProgressStreak: Math.min(32, streak) },
         state: waiting ? "waiting-agent" : context.state === "waiting-agent" ? "active" : context.state,

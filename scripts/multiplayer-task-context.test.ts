@@ -33,6 +33,17 @@ test("duplicate progress enters waiting-agent instead of looping forever", () =>
   assert.equal(task.snapshot().progress.noProgressStreak, 0);
 });
 
+test("a streak of two no-progress witnesses is enough to hold, not three", () => {
+  const task = createTaskContext({ taskId: "task-2a", conversationId: "conversation-2a", runId: "run-2a", participants, now: 100 });
+  const texts = ["Opening observation.", "Acknowledged.", "Acknowledged, no action needed."];
+  for (let index = 0; index < texts.length; index += 1) {
+    const result = task.recordProgress({ witnessId: `witness-${index}`, kind: "observation", stateFingerprint: "same-state", summary: texts[index]!, at: 110 + index });
+    assert.equal(result.ok, true);
+  }
+  assert.equal(task.snapshot().progress.noProgressStreak, 2);
+  assert.equal(task.snapshot().state, "waiting-agent");
+});
+
 test("changing the progress label cannot reset an unchanged-state streak", () => {
   const task = createTaskContext({ taskId: "task-progress-kind", conversationId: "conversation-progress-kind", runId: "run-progress-kind", participants, now: 100 });
   const kinds = ["observation", "blocker", "operation-completed", "postcondition-verified"] as const;
