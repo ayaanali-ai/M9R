@@ -1,7 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { validateCliRelativeImports } from "./cli-import-validation.mjs";
 import { NATIVE_TEST_FILES, codeCheckPlan, requireNativeReleaseCoverage, testNodeArgs, testSummary, splitTestFilesIntoBatches, validateTestFileManifest } from "./test-suite-runner-core.mjs";
+
+test("CLI validation catches extensionless and missing local imports before publishing", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-cli-imports-"));
+  try {
+    writeFileSync(join(root, "multiplayer-a2a.js"), "export const ready = true;\n");
+    writeFileSync(join(root, "runtime.js"), 'import { ready } from "./multiplayer-a2a";\n');
+    assert.throws(() => validateCliRelativeImports(root), /missing relative import \.\/multiplayer-a2a/);
+    writeFileSync(join(root, "runtime.js"), 'import { ready } from "./multiplayer-a2a.js";\nexport { thing } from "./missing.js";\n');
+    assert.throws(() => validateCliRelativeImports(root), /missing relative import \.\/missing\.js/);
+    mkdirSync(join(root, "folder"));
+    writeFileSync(join(root, "runtime.js"), 'import "./folder";\n');
+    assert.throws(() => validateCliRelativeImports(root), /missing relative import \.\/folder/);
+    writeFileSync(join(root, "runtime.js"), 'import { ready } from "./multiplayer-a2a.js";\nimport { join } from "node:path";\n');
+    assert.doesNotThrow(() => validateCliRelativeImports(root));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("test batches preserve every filename and stay below the Windows argument budget", () => {
   const files = ["one.test.ts", "two.test.ts", "three.test.ts", "four.test.ts"];

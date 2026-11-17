@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import ts from "typescript";
 import { buildSync } from "esbuild";
 import { publishGeneratedDirectory } from "./engine-build-transaction.mjs";
+import { validateCliRelativeImports } from "./cli-import-validation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cliDir = resolve(repoRoot, "cli");
@@ -312,7 +313,7 @@ function build() {
   for (const name of ["agent-input-stream", "owner-work-mode", "native-control-region", "atomic-file", "browser-space-ledger", "windows-desktop-stage", "process-liveness", "cua-driver-host", "cua-stage-driver", "agent-cursor-overlay-host", "foreground-input-lease", "desktop-input-errors", "stage-errors", "stage-save-as", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "multiplayer-action-policy", "multiplayer-task-context", "multiplayer-runtime", "universal-intent-resolver", "workflow-preferences", "observation-modality-ledger", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "claude-delivery", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "logical-task-context", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "provider-session-reconciliation", "multiplayer-contract", "multiplayer-cursor-chatter", "multiplayer-presence", "multiplayer-run-coordinator", "multiplayer-a2a", "multiplayer-surface", "multiplayer-target-identity", "multiplayer-mutation-scheduler", "multiplayer-dispatch-fence", "runtime-readiness", "latency-telemetry", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-state", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "opencode-executable", "legacy-browser-extension-cleanup-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers", "multiplayer-inbox-delivery"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
-      .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
+      .replace(/from\s+["']\.\/([a-z0-9-]+)["']/g, 'from "./$1.js"')
       .replace(/["']\.\/m9r-prompt-markers["']/g, '"./m9r-prompt-markers.js"')
       .replace(/["']\.\.\/bridge\/governed-agent-tools["']/g, '"./governed-agent-tools.js"')
       .replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"')
@@ -324,11 +325,11 @@ function build() {
   // separate pass so the legacy native module allowlist remains reviewable.
   for (const name of ["computer-use-program"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
-    writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"'));
+    writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z0-9-]+)["']/g, 'from "./$1.js"'));
   }
-  for (const name of ["computer-use-recovery", "computer-use-latency", "task-completion-contract", "task-working-context", "observation-payload"]) {
+  for (const name of ["computer-use-recovery", "computer-use-latency", "task-completion-contract", "task-working-context", "observation-payload", "hook-handler"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
-    writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"'));
+    writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z0-9-]+)["']/g, 'from "./$1.js"'));
   }
   const localPresenceHeartbeatTs = readFileSync(resolve(repoRoot, "src/lib/native/local-presence-heartbeat.ts"), "utf8");
   writeFileSync(resolve(outDir, "local-presence-heartbeat.js"), transpile(localPresenceHeartbeatTs));
@@ -683,11 +684,13 @@ function build() {
   // SEA artifacts and stable runtime identities.
   writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: buildMarker() }, null, 2) + "\n");
 
+  validateCliRelativeImports(outDir);
+
   // Validate every generated executable entrypoint before publishing. A
   // missing generated module must fail this build, not the subsequent SEA
   // packaging or a user's first provider/desktop command. No verification
   // bundle ships; this is only a dependency-graph check.
-  for (const entry of ["m9r.js", "m9r-mcp.js", "dev-mcp-server.js", "native-commands.js"]) {
+  for (const entry of ["m9r.js", "m9r-mcp.js", "dev-mcp-server.js", "native-commands.js", "multiplayer-runtime.js", "codex-watch.js"]) {
     buildSync({ entryPoints: [resolve(outDir, entry)], bundle: true,
       platform: "node", format: "esm", write: false, logLevel: "warning",
       // The CLI has a fallback import for source checkouts; packaged builds
