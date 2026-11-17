@@ -511,16 +511,11 @@ fn walk_window_element(
         .ok()
         .map(|v| v.to_string())
         .unwrap_or_default();
-    let role = unsafe { element.CachedControlType() }
-        .ok()
-        .and_then(canonical_control_type_name)
-        .map(str::to_owned)
-        .or_else(|| {
-            unsafe { element.CachedLocalizedControlType() }
-                .ok()
-                .map(|v| v.to_string())
-        })
-        .unwrap_or_default();
+    let control_type = unsafe { element.CachedControlType() }.ok();
+    let localized_role = if control_type.and_then(canonical_control_type_name).is_none() {
+        unsafe { element.CachedLocalizedControlType() }.ok().map(|value| value.to_string())
+    } else { None };
+    let role = uia_control_type_name(control_type, localized_role);
     let class_name = unsafe { element.CachedClassName() }
         .ok()
         .map(|v| v.to_string())
@@ -766,10 +761,13 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         }
         element = child;
     }
-    let role = unsafe { element.CurrentControlType() }
-        .ok()
-        .and_then(canonical_control_type_name)
-        .unwrap_or_default();
+    let control_type = unsafe { element.CurrentControlType() }.ok();
+    let localized_role = if control_type.and_then(canonical_control_type_name).is_none() {
+        unsafe { element.CurrentLocalizedControlType() }.ok().map(|value| value.to_string())
+    } else {
+        None
+    };
+    let role = uia_control_type_name(control_type, localized_role);
     let label = unsafe { element.CurrentName() }
         .ok()
         .map(|value| value.to_string())
@@ -1068,16 +1066,11 @@ fn walk_desktop_elements(
     // the common ones to the same canonical English names so role matching
     // keeps working on a non-English Windows install. Fall back to the
     // localized string for the long tail of control types.
-    let role = unsafe { element.CachedControlType() }
-        .ok()
-        .and_then(canonical_control_type_name)
-        .map(|value| value.to_string())
-        .or_else(|| {
-            unsafe { element.CachedLocalizedControlType() }
-                .ok()
-                .map(|value| value.to_string())
-        })
-        .unwrap_or_default();
+    let control_type = unsafe { element.CachedControlType() }.ok();
+    let localized_role = if control_type.and_then(canonical_control_type_name).is_none() {
+        unsafe { element.CachedLocalizedControlType() }.ok().map(|value| value.to_string())
+    } else { None };
+    let role = uia_control_type_name(control_type, localized_role);
     let class_name = unsafe { element.CachedClassName() }
         .ok()
         .map(|value| value.to_string())
@@ -1148,9 +1141,24 @@ fn truncate_text(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
+fn uia_control_type_name(
+    control_type: Option<windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID>,
+    localized: Option<String>,
+) -> String {
+    control_type.and_then(canonical_control_type_name).map(str::to_owned).or(localized).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_role_matches_observation_for_long_tail_uia_controls() {
+        use windows::Win32::UI::Accessibility::{UIA_DocumentControlTypeId, UIA_PaneControlTypeId};
+        assert_eq!(uia_control_type_name(Some(UIA_DocumentControlTypeId), Some("document".into())), "document");
+        assert_eq!(uia_control_type_name(Some(UIA_PaneControlTypeId), Some("pane".into())), "pane");
+        assert_eq!(uia_control_type_name(Some(UIA_ButtonControlTypeId), Some("bouton".into())), "button");
+    }
 
     #[test]
     fn semantic_ui_automation_client_disables_automatic_target_focus() {
