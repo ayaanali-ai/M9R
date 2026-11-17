@@ -217,7 +217,11 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         try {
           const view = deps.store.readWorkingContext(authToken, id);
           if ("checkpoints" in view && view.checkpoints.length) {
-            const serialized = JSON.stringify(view);
+            // Live peer delivery has its own once-per-message path below.
+            // Keep the checkpoint fingerprint independent of recent message
+            // history so a peer arrival is not appended twice at this boundary.
+            const { recentMessages: _recentMessages, ...checkpointView } = view;
+            const serialized = JSON.stringify(checkpointView);
             const key = `${identity.sessionId}\0${id}`;
             const fingerprint = createHash("sha256").update(serialized).digest("hex");
             if (shownWorkingContexts.get(key) !== fingerprint) {

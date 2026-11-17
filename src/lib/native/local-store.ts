@@ -2145,10 +2145,10 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     },
 
     /** Trusted delivery path; external recovery uses the authenticated reader. */
-    renderWorkingContextForTask(id: string): string {
+    renderWorkingContextForTask(id: string, viewerSessionId?: string): string {
       const tasks = readState().tasks;
       const task = tasks.find(item => item.id === id);
-      return task ? renderWorkingContext(tasks, task) : "";
+      return task ? renderWorkingContext(tasks, task, viewerSessionId) : "";
     },
 
     /** Recovery reads do not claim work, advance inbox cursors, or grant input authority. */
@@ -2168,7 +2168,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       }
       const offset = options.offset ?? 0;
       if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid working-context offset.");
-      return workingContextView(s.tasks, task, offset);
+      return workingContextView(s.tasks, task, offset, identity.sessionId);
     },
 
     /** CAS prevents concurrent/reconstructed clients from overwriting a newer snapshot. */

@@ -674,7 +674,7 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
       // M9R-owned process generation, never once per owner message.
       const needsBootstrap = profile.provider !== "claude-code"
         && bootstrappedGenerations.get(profile.connectionId) !== generation;
-      const workingContext = deps.store.renderWorkingContextForTask?.(taskId);
+      const workingContext = deps.store.renderWorkingContextForTask?.(taskId, context.sessionId);
       const turnText = workingContext ? `${text}\n\n${workingContext}` : text;
       const providerPrompt = needsBootstrap ? `${context.prompt}\n\n${turnText}` : turnText;
       const task = { taskId, connectionId: profile.connectionId, handle: profile.handle, provider: profile.provider, cwd: profile.cwd, generation, prompt: providerPrompt } as const;

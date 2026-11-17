@@ -84,6 +84,50 @@ test("working context is exposed over MCP, delivered once per change and recover
   } finally { t.done(); }
 });
 
+test("a new handoff recovers bounded session-specific team history even when nobody saved a checkpoint", async () => {
+  const t = setup();
+  try {
+    const owner = t.store.addTask({ from: "you", to: "codex", goal: "Work together on one document", origin: "human_typed",
+      broadcastId: "checkpointless-team", idempotencyKey: "checkpointless-root" }).task;
+    t.store.markDelivered([owner.id], "x1");
+    const incoming = t.store.addTask({ from: "claude", to: "codex", goal: "I am preparing the document", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "c1", targetSession: "x1", replyToTaskId: owner.id, idempotencyKey: "checkpointless-incoming" }).task;
+    t.store.markDelivered([incoming.id], "x1");
+    const outgoing = t.store.addTask({ from: "codex", to: "claude", goal: "I will wait for your handoff", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "x1", targetSession: "c1", replyToTaskId: owner.id, idempotencyKey: "checkpointless-outgoing" }).task;
+    t.store.addTask({ from: "claude", to: "codex", goal: "Undelivered message must stay in the inbox", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "c1", targetSession: "x1", replyToTaskId: owner.id, idempotencyKey: "checkpointless-pending" });
+    t.store.addTask({ from: "claude", to: "codex", goal: "Other session must stay private", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "c1", targetSession: "another-session", replyToTaskId: owner.id, idempotencyKey: "checkpointless-foreign" });
+    const current = t.store.addTask({ from: "claude", to: "codex", goal: "Current handoff is already in this turn", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "c1", targetSession: "x1", replyToTaskId: owner.id, idempotencyKey: "checkpointless-current" }).task;
+    const prompt = t.store.renderWorkingContextForTask(current.id, "x1");
+    assert.match(prompt, /I am preparing the document/);
+    assert.match(prompt, /I will wait for your handoff/);
+    assert.doesNotMatch(prompt, /Current handoff is already in this turn|Undelivered message must stay in the inbox|Other session must stay private/);
+    assert.doesNotMatch(t.store.renderWorkingContextForTask(current.id, "another-session"), /I will wait for your handoff/);
+    t.store.markDelivered([current.id], "x1");
+    const recovered = JSON.parse(await t.call("m9r_working_context", { token: t.codex, taskId: current.id, action: "read" }));
+    assert.deepEqual(recovered.recentMessages.map((message: { taskId: string }) => message.taskId), [incoming.id, outgoing.id]);
+    assert.equal(recovered.recentMessages[1].recipientDeliveryRecorded, false, "a sent message is not claimed as delivered");
+    for (let index = 0; index < 4; index++) t.store.addTask({ from: "codex", to: "claude", goal: `Update ${index}: ${"x".repeat(300)}`,
+      origin: "agent_initiated", standingRuleApplies: true, fromSession: "x1", targetSession: "c1",
+      replyToTaskId: owner.id, idempotencyKey: `bounded-history-${index}` });
+    const bounded = JSON.parse(await t.call("m9r_working_context", { token: t.codex, taskId: current.id, action: "read" }));
+    assert.equal(bounded.recentMessages.length, 3);
+    assert.ok(bounded.recentMessages.every((message: { text: string; truncated: boolean }) => message.text.length <= 240 && message.truncated));
+    t.store.saveWorkingContext(t.codex, current.id, 0, { decisions: [], currentEditor: "codex", artifacts: [], observedState: [],
+      unresolved: [], nextStep: "Finish the document" });
+    const boundary = (t.server as unknown as ToolServer)._registeredTools.m9r_agents.handler;
+    assert.match(JSON.stringify(await boundary({ token: t.codex, activeWindowMinutes: 10 })), /Finish the document/);
+    t.store.addTask({ from: "codex", to: "claude", goal: "One new sent note", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "x1", targetSession: "c1", replyToTaskId: owner.id, idempotencyKey: "boundary-note" });
+    assert.doesNotMatch(JSON.stringify(await boundary({ token: t.codex, activeWindowMinutes: 10 })), /Updated durable working context|One new sent note/,
+      "changing recent history alone does not repeat checkpoints or duplicate the sender's message at every tool boundary");
+    assert.equal(t.store.getTask(owner.id)?.resultSummary, undefined, "reading history never changes completion");
+  } finally { t.done(); }
+});
+
 test("desktop stage MCP tools default to the current owner desktop", () => {
   const t = setup();
   try {

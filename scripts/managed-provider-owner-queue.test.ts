@@ -761,6 +761,35 @@ test("explicit resume starts a new turn with durable M9R context and no provider
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a checkpointless provider continuation receives its own bounded team history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-checkpointless-"));
+  const store = createLocalStore(root);
+  let gated: ReturnType<typeof gatedConnection> | undefined;
+  const owner = createManagedProviderOwner({ agents: [{ handle: "codex", provider: "codex", folder: root }], storeRoot: root,
+    repoRoot: root, brokerPort: 0, store, env: {}, createConnection: profile => (gated = gatedConnection(profile)).connection });
+  try {
+    assert.equal(owner.deliver("codex", "Work together on one document.").ok, true);
+    for (let attempt = 0; attempt < 100 && !gated?.sent.length; attempt++) await new Promise(done => setTimeout(done, 10));
+    assert.ok(gated?.sent.length);
+    const session = owner.sessionIdOf("codex")!;
+    const original = store.getTask("T1")!;
+    store.addTask({ from: "codex", to: "claude", goal: "I will wait for your handoff", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: session, targetSession: "claude-session", replyToTaskId: original.id, idempotencyKey: "prior-note" });
+    owner.stop("codex");
+    gated!.release();
+    for (let attempt = 0; attempt < 100 && store.getTask(original.id)?.receipt?.state !== "paused"; attempt++) await new Promise(done => setTimeout(done, 10));
+    gated!.holdOpen();
+    assert.equal(owner.resume?.("codex"), true);
+    for (let attempt = 0; attempt < 100 && gated!.sent.length < 2; attempt++) await new Promise(done => setTimeout(done, 10));
+    assert.equal(gated!.sent.length, 2);
+    assert.match(gated!.sent[1].prompt, /I will wait for your handoff/);
+    assert.equal(gated!.sent[1].prompt.match(/I will wait for your handoff/g)?.length, 1, "the prior message is not duplicated in the provider prompt");
+    assert.match(gated!.sent[1].prompt, /agent-reported data/);
+    assert.match(gated!.sent[1].prompt, /"recipientDeliveryRecorded":false/);
+    gated!.release();
+  } finally { gated?.release(); await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a mid-turn gap between two tool calls is recorded, not left as silence indistinguishable from a stuck broker", async () => {
   // Before this phase existed, stageTiming only covered the edges of a turn:
   // dispatch-to-first-action ("first-visible-action") and last-action-to-completion

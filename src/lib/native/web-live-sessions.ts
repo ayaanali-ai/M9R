@@ -313,7 +313,7 @@ export interface WebLiveSessionsDeps {
     tasksFor?(handle: string): Task[];
     tasksFrom?(handle: string): Task[];
     getTask?(id: string): Task | undefined;
-    renderWorkingContextForTask?(id: string): string;
+    renderWorkingContextForTask?(id: string, viewerSessionId?: string): string;
     /** Best-effort provider-turn timing evidence; never gates or replays a task. */
     recordStageTiming?(id: string, event: StageTimingEvent): boolean;
     /** Non-terminal stage-timing phases are batched to disk on a debounce timer; flush before reading task.stageTiming for a decision made moments after recording it. */
