@@ -298,6 +298,21 @@ test("a cursor is reaped promptly once its receipt is paused/failed/uncertain, w
   } finally { await f.service.close(); f.cleanup(); }
 });
 
+test("a cursor is reaped promptly when its task authorization is revoked after priming", async () => {
+  const f = fixture(true, undefined, undefined, false, undefined, 10_000_000);
+  const waitForReaperTick = () => new Promise((resolve) => setTimeout(resolve, 600));
+  try {
+    await f.service.prepare(f.identity.token, f.task.id, "owner-preview");
+    await f.service.act(f.identity.token, f.task.id, { kind: "cursor", x: 12, y: 15 }, "owner-preview");
+    assert.deepEqual(f.cursorEvents, ["show:session-one"]);
+
+    f.store.setApproval(f.task.id, "denied");
+    await waitForReaperTick();
+    assert.deepEqual(f.cursorEvents, ["show:session-one", "close:session-one"],
+      "revoking task approval must remove its presentation promptly instead of leaving it until the age safety net");
+  } finally { await f.service.close(); f.cleanup(); }
+});
+
 test("a cursor is never primed in the first place for a task whose receipt is already paused/failed/uncertain", async () => {
   // resolveCursorTarget() only excluded a "canceled" receipt, while taskActive() in this same file (the
   // reaper's own reference predicate, confirmed correct by the two tests above) also excludes "failed",

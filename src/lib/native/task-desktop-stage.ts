@@ -349,7 +349,11 @@ export function createTaskDesktopStageService(input: {
     // progressing. "retryable" is deliberately left out -- it can still be re-dispatched.
     return Boolean(task) && task!.resultSummary === undefined
       && task!.lifecycle?.state !== "completed" && task!.lifecycle?.state !== "failed"
-      && !["canceled", "failed", "uncertain", "paused"].includes(task!.receipt?.state ?? "");
+      && !["canceled", "failed", "uncertain", "paused"].includes(task!.receipt?.state ?? "")
+      // Authorization can be revoked or expire after a marker is already visible.
+      // Keep cleanup eligibility aligned with authorize() and resolveCursorTarget().
+      && !["pending", "denied", "expired"].includes(task!.approval)
+      && task!.delivery?.state !== "done";
   };
   const stageDeps = { nativeHostPath: existsSync(bundledHost) ? bundledHost : undefined, taskActive, ...input.stage, root, terminal: true };
   const ownsManager = !input.manager;
@@ -566,6 +570,7 @@ export function createTaskDesktopStageService(input: {
   // token-refresh or policy-reload race than a genuinely revoked session. Only
   // tear the cursor down after several consecutive failed ticks.
   const cursorAuthFailures = new Map<string, number>();
+  const cursorHideFailures = new Map<string, number>();
   const CURSOR_REVOKE_AFTER_FAILURES = 3;
   // Safety net, independent of task state: a task that never reaches a terminal lifecycle (stuck at
   // "acknowledged" forever, say) would otherwise keep its cursor alive indefinitely, since the normal
@@ -616,6 +621,7 @@ export function createTaskDesktopStageService(input: {
     // (mcp-server.ts). Match taskActive()'s exclusion list here too.
     if (!task || task.resultSummary || ["canceled", "failed", "uncertain", "paused"].includes(task.receipt?.state ?? "")
       || task.approval === "pending" || task.approval === "denied" || task.approval === "expired"
+      || task.delivery?.state === "done"
       || task.lifecycle?.state === "completed" || task.lifecycle?.state === "failed") return undefined;
     if (ownerOnly && (task.origin !== "human_typed" || normalizeHandle(task.from) !== "you")) return undefined;
     const bearer = token ? input.store.verifyIdentity(token) : null;
@@ -912,6 +918,7 @@ export function createTaskDesktopStageService(input: {
       try { await driver.closeAgentCursor(streamIdentity); } catch { cursorClosed = false; /* stop remains effective even if marker cleanup fails */ }
       const cursorKey = cursorIdentityKey(streamIdentity);
       if (cursorClosed) {
+        cursorHideFailures.delete(cursorKey);
         activeAgentCursors.delete(cursorKey);
         cursorPresentationTask.delete(cursorKey);
       }
@@ -1869,7 +1876,18 @@ export function createTaskDesktopStageService(input: {
     activeAgentCursors.delete(key);
     cursorPresentationTask.delete(key);
     cursorAuthFailures.delete(key);
+    cursorHideFailures.delete(key);
     return true;
+  }
+
+  function reportCursorHideFailure(key: string, active: { identity: CuaAgentCursorIdentity; taskId: string }, category: string, error: unknown): void {
+    const failures = (cursorHideFailures.get(key) ?? 0) + 1;
+    cursorHideFailures.set(key, failures);
+    // Test doubles may intentionally omit the visual-only seam. In production
+    // the driver always has it; report only its real failures, with bounded log volume.
+    if (typeof driver.closeAgentCursor === "function" && (failures === 1 || failures % 12 === 0)) {
+      console.error(`[cursor-lifecycle] ${category}-hide-failed task=${active.taskId} session=${active.identity.sessionId} consecutiveFailures=${failures} reason=${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   const cursorReaper = setInterval(() => {
@@ -1881,17 +1899,20 @@ export function createTaskDesktopStageService(input: {
         // canceled) would otherwise hold its cursor indefinitely -- taskActive() alone never goes false
         // for it. Force the same cleanup once the cursor has clearly outlived any legitimate task.
         const expired = Date.now() - active.primedAt >= CURSOR_MAX_LIFETIME_MS;
-        console.error(`[cursor-lifecycle] reap-check key=${key} task=${active.taskId} taskActive=${taskActive(active.taskId)} expired=${expired} ageMs=${Date.now() - active.primedAt}`);
         if (!taskActive(active.taskId) || expired) {
           ownerWorkPolicy.revokeTask({ agent: active.identity.handle, provider: active.identity.handle,
             sessionId: active.identity.sessionId, taskId: active.taskId });
           try {
             await driver.closeAgentCursor(active.identity);
+            cursorHideFailures.delete(key);
             // The visible marker is task-scoped; the native input host is
             // agent-session-scoped and must survive a completed task so the
             // next task keeps the same independent stream identity/process.
             finishCursorHide(key, active);
-          } catch { /* retry terminal-task cleanup on the next tick */ }
+          } catch (error) {
+            reportCursorHideFailure(key, active, "terminal", error);
+            /* retry terminal-task cleanup on the next tick */
+          }
           continue;
         }
         let authorized = false;
@@ -1909,11 +1930,18 @@ export function createTaskDesktopStageService(input: {
         }
         const failures = (cursorAuthFailures.get(key) ?? 0) + 1;
         cursorAuthFailures.set(key, failures);
+        if (failures === 1 || failures === CURSOR_REVOKE_AFTER_FAILURES) {
+          console.error(`[cursor-lifecycle] authorization-${failures === 1 ? "unavailable" : "revoked"} task=${active.taskId} session=${active.identity.sessionId} consecutiveFailures=${failures}`);
+        }
         if (failures < CURSOR_REVOKE_AFTER_FAILURES) continue;
         try {
           await driver.closeAgentCursor(active.identity);
+          cursorHideFailures.delete(key);
           if (finishCursorHide(key, active)) manager.closeInputStream?.(agentInputStreamId(active.identity));
-        } catch { /* retry revocation on the next tick; Driver idle-hide is the fail-safe */ }
+        } catch (error) {
+          reportCursorHideFailure(key, active, "revoke", error);
+          /* retry revocation on the next tick; Driver idle-hide is the fail-safe */
+        }
       }
     };
     const result = reaperPending.then(reconcile, reconcile);
@@ -1929,6 +1957,7 @@ export function createTaskDesktopStageService(input: {
     await Promise.all([...stageQueues.values(), reaperPending]);
     activeAgentCursors.clear();
     cursorPresentationTask.clear();
+    cursorHideFailures.clear();
     observedRegionRevisions.clear();
     observedSurfaceRevisions.clear();
     try {
