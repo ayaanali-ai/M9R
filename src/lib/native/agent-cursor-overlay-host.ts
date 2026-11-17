@@ -20,7 +20,7 @@ export interface AgentCursorOverlayHost {
   /** Start the transparent renderer before the first task, without showing a marker. */
   warm?(): Promise<boolean>;
   upsert(point: AgentCursorOverlayPoint): Promise<boolean>;
-  say(input: { id: string; to: string; toColor: Rgb; text: string }): Promise<boolean>;
+  say(input: { id: string; text: string }): Promise<boolean>;
   /** True once the marker is confirmed hidden (or was already not visible). False on a dropped/timed-out ack -- the caller must retry rather than forget the marker. */
   hide(id: string): Promise<boolean>;
   close(): Promise<void>;
@@ -279,10 +279,8 @@ export function createAgentCursorOverlayHost(input: {
       // transport itself. Require a currently acknowledged sender marker and
       // bound every string before it reaches the native renderer.
       const text = message.text.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 160);
-      const to = message.to.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 28);
-      if (!visible.has(message.id) || !text || !to
-        || message.toColor.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)) return false;
-      return send({ cmd: "say", id: message.id, to, toColor: message.toColor, text });
+      if (!visible.has(message.id) || !text) return false;
+      return send({ cmd: "say", id: message.id, text });
     },
     async hide(id) {
       return hide(id);

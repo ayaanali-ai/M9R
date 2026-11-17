@@ -56,16 +56,57 @@ const BUBBLE_FADE_IN_MS: f32 = 220.0;
 const BUBBLE_HOLD_MS: f32 = 2900.0;
 const BUBBLE_FADE_OUT_MS: f32 = 700.0;
 const BUBBLE_TOTAL_MS: f32 = BUBBLE_FADE_IN_MS + BUBBLE_HOLD_MS + BUBBLE_FADE_OUT_MS;
+const BUBBLE_MAX_CHARS: usize = 48;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
 #[derive(Clone, Debug)]
 pub struct Bubble {
-    pub to_label: String,
-    pub to_color: Rgb,
     pub text: String,
     pub started_at: Instant,
+}
+
+/// Flatten chat text to one compact line and cap it before rendering. DirectWrite
+/// applies a second width-aware ellipsis so unusually wide glyphs still fit.
+pub fn normalize_bubble_text(text: &str) -> String {
+    let line = text.chars().map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = line.chars();
+    let bounded = chars.by_ref().take(BUBBLE_MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        let mut shortened = bounded.chars().take(BUBBLE_MAX_CHARS - 1).collect::<String>();
+        shortened.push('…');
+        shortened
+    } else { bounded }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BubblePlacement {
+    pub left: f32,
+    pub top: f32,
+    pub tail_tip_x: f32,
+    pub tail_tip_y: f32,
+}
+
+/// Place the bubble over the marker with its tail aimed at the live marker
+/// position. This is evaluated from the animated marker coordinates every frame.
+pub fn bubble_placement(cursor_x: f32, cursor_y: f32, bubble_height: f32) -> BubblePlacement {
+    BubblePlacement {
+        left: cursor_x - 5.0,
+        top: cursor_y - bubble_height - 14.0,
+        tail_tip_x: cursor_x + 17.0,
+        tail_tip_y: cursor_y + 18.0,
+    }
+}
+
+pub fn bubble_ink_color(fill: Rgb) -> Rgb {
+    let linear = |channel: u8| {
+        let value = channel as f32 / 255.0;
+        if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+    };
+    let luminance = 0.2126 * linear(fill.0) + 0.7152 * linear(fill.1) + 0.0722 * linear(fill.2);
+    if luminance > 0.42 { Rgb(22, 24, 28) } else { Rgb(255, 255, 255) }
 }
 
 #[derive(Clone, Debug)]
@@ -237,23 +278,15 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                 });
         }
         "say" => {
-            let to_label = value
-                .get("to")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let to_color = parse_color(value.get("toColor")).unwrap_or(Rgb(200, 200, 200));
             let text = value
                 .get("text")
                 .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+                .map(normalize_bubble_text)
+                .unwrap_or_default();
             if let Some(agent) = guard.get_mut(&id) {
                 agent.bubble = Some(Bubble {
-                    to_label,
-                    to_color,
                     text,
-                    started_at: Instant::now(),
+                    started_at: now,
                 });
             }
         }
@@ -282,18 +315,6 @@ pub fn bubble_opacity(elapsed_ms: f32) -> Option<f32> {
     Some((1.0 - into_fade / BUBBLE_FADE_OUT_MS).clamp(0.0, 1.0))
 }
 
-/// Small vertical slide that accompanies the opacity fade (matches the
-/// preview's `translateY(-6px)` entrance and `translateY(-4px)` exit).
-fn bubble_slide_px(elapsed_ms: f32, opacity: f32) -> f32 {
-    if elapsed_ms < BUBBLE_FADE_IN_MS {
-        -6.0 * (1.0 - opacity)
-    } else if elapsed_ms >= BUBBLE_FADE_IN_MS + BUBBLE_HOLD_MS {
-        -4.0 * (1.0 - opacity)
-    } else {
-        0.0
-    }
-}
-
 /// Raw marker outline in the preview's 100x100 viewBox space. The body is
 /// this polygon filled AND stroked 22 units wide with round joins, which is
 /// what turns four sharp corners into the thick rounded paper-plane blob.
@@ -305,19 +326,6 @@ const FLAG_STROKE: f32 = 22.0;
 const FACE_TILT_DEG: f32 = -22.0;
 /// Pivot of the face cluster in viewBox space (between eyes and mouth).
 const FACE_PIVOT: (f32, f32) = (48.0, 52.0);
-
-/// Glyph shown in the bubble's agent logo tile.
-fn agent_glyph(label: &str) -> String {
-    let lower = label.to_ascii_lowercase();
-    if lower.starts_with("codex") {
-        return "X".to_string();
-    }
-    label
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default()
-}
 
 /// Window creation, Direct2D/DirectWrite drawing, and the stdin-driven live
 /// loop (Windows-only, used by `--spawn-cursor-overlay`). The same
@@ -336,7 +344,7 @@ pub mod win {
     };
     use windows::Win32::Graphics::Direct2D::{
         D2D1CreateFactory, ID2D1Brush, ID2D1DCRenderTarget, ID2D1DeviceContext, ID2D1Factory,
-        ID2D1Geometry, ID2D1Layer, ID2D1PathGeometry, ID2D1RenderTarget, ID2D1StrokeStyle,
+        ID2D1Layer, ID2D1PathGeometry, ID2D1RenderTarget, ID2D1StrokeStyle,
         CLSID_D2D1GaussianBlur, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_ROUND,
         D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_SOLID,
         D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -350,10 +358,10 @@ pub mod win {
     use windows::Win32::Graphics::DirectWrite::{
         DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
         IDWriteTextLayout, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
-        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
-        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-        DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
-        DWRITE_WORD_WRAPPING_NO_WRAP,
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        DWRITE_TEXT_METRICS,
+        DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
     };
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
     use windows::Win32::Graphics::Gdi::{
@@ -383,8 +391,6 @@ pub mod win {
 
     // Palette taken from the approved preview's CSS.
     const PANEL: Rgb = Rgb(0x1c, 0x20, 0x26);
-    const TEXT: Rgb = Rgb(0xe8, 0xeb, 0xef);
-    const MUTED: Rgb = Rgb(0x8a, 0x93, 0x9e);
     const WHITE: Rgb = Rgb(255, 255, 255);
     const BLACK: Rgb = Rgb(0, 0, 0);
 
@@ -405,8 +411,11 @@ pub mod win {
     }
 
     // Provider logos (pill/src/assets/providers/*.svg, viewBox 0 0 24 24, evenodd).
+    #[allow(dead_code)]
     const LOGO_CLAUDE_D: &str = "M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z";
+    #[allow(dead_code)]
     const LOGO_CODEX_D: &str = "M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z";
+    #[allow(dead_code)]
     const LOGO_OPENCODE_D: &str = "M16 6H8v12h8V6zm4 16H4V2h16v20z";
 
     /// Minimal SVG path-data tokenizer (numbers, single-char arc flags).
@@ -665,7 +674,6 @@ pub mod win {
     /// text formats are device-independent and built once; brushes are
     /// cheap and created per draw against the bound DC render target.
     pub(crate) struct Renderer {
-        factory: ID2D1Factory,
         dwrite: IDWriteFactory,
         rt: ID2D1DCRenderTarget,
         /// Same object as `rt`, queried for the Direct2D 1.1 effect API
@@ -674,14 +682,10 @@ pub mod win {
         flag: ID2D1PathGeometry,
         highlight: ID2D1PathGeometry,
         mouth: ID2D1PathGeometry,
+        bubble_tail: ID2D1PathGeometry,
         round: ID2D1StrokeStyle,
         fmt_chip: IDWriteTextFormat,
-        fmt_to: IDWriteTextFormat,
         fmt_msg: IDWriteTextFormat,
-        fmt_logo: IDWriteTextFormat,
-        logo_claude: ID2D1PathGeometry,
-        logo_codex: ID2D1PathGeometry,
-        logo_opencode: ID2D1PathGeometry,
     }
 
     impl Renderer {
@@ -759,18 +763,11 @@ pub mod win {
                 };
                 let fmt_chip = fmt(DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0)?;
                 fmt_chip.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-                let fmt_to = fmt(DWRITE_FONT_WEIGHT_NORMAL, 11.0)?;
-                fmt_to.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
                 let fmt_msg = fmt(DWRITE_FONT_WEIGHT_NORMAL, 13.0)?;
-                let fmt_logo = fmt(DWRITE_FONT_WEIGHT_BOLD, 11.0)?;
-                fmt_logo.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-                fmt_logo.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                fmt_msg.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                let bubble_tail = svg_path_geometry(&factory, "M 0 0 L 30 0 L 14 32 Z")?;
 
-                let logo_claude = svg_path_geometry(&factory, LOGO_CLAUDE_D)?;
-                let logo_codex = svg_path_geometry(&factory, LOGO_CODEX_D)?;
-                let logo_opencode = svg_path_geometry(&factory, LOGO_OPENCODE_D)?;
-
-                Ok(Self { factory, dwrite, rt, dc, flag, highlight, mouth, round, fmt_chip, fmt_to, fmt_msg, fmt_logo, logo_claude, logo_codex, logo_opencode })
+                Ok(Self { dwrite, rt, dc, flag, highlight, mouth, bubble_tail, round, fmt_chip, fmt_msg })
             }
         }
 
@@ -925,45 +922,31 @@ pub mod win {
                 if let Some(bubble) = &agent.bubble {
                     let elapsed = now.saturating_duration_since(bubble.started_at).as_millis() as f32;
                     if let Some(opacity) = bubble_opacity(elapsed) {
-                        self.draw_bubble(
-                            agent,
-                            bubble,
-                            chip_x,
-                            chip_y + chip_h + 6.0 + bubble_slide_px(elapsed, opacity),
-                            opacity,
-                        )?;
+                        self.draw_bubble(agent, bubble, opacity)?;
                     }
                 }
                 Ok(())
             }
         }
 
-        fn draw_bubble(&self, agent: &AgentState, bubble: &Bubble, bx: f32, by: f32, opacity: f32) -> R<()> {
+        fn draw_bubble(&self, agent: &AgentState, bubble: &Bubble, opacity: f32) -> R<()> {
             unsafe {
                 let rt: &ID2D1RenderTarget = &self.rt;
-                const PAD_L: f32 = 14.0;
-                const PAD_R: f32 = 12.0;
+                const PAD_X: f32 = 14.0;
                 const PAD_Y: f32 = 10.0;
-                const LOGO: f32 = 22.0;
-                const GAP: f32 = 10.0;
-                const MAX_W: f32 = 260.0;
-                let text_max = MAX_W - PAD_L - PAD_R - LOGO - GAP;
-
-                let to_brush = rt.CreateSolidColorBrush(&col(bubble.to_color, 1.0), None)?;
-                let to_text = format!("to {}", bubble.to_label);
-                let to = self.text(&to_text, &self.fmt_to, 1000.0, 40.0)?;
-                let name_range = DWRITE_TEXT_RANGE { startPosition: 3, length: wide(&bubble.to_label).len() as u32 };
-                to.layout.SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, name_range)?;
-                to.layout.SetDrawingEffect(&to_brush, name_range)?;
-                let mut tm = DWRITE_TEXT_METRICS::default();
-                to.layout.GetMetrics(&mut tm)?;
-                let to_w = tm.width;
-                let msg = self.text(&bubble.text, &self.fmt_msg, text_max, 1000.0)?;
-
-                let content_w = to_w.max(msg.w).min(text_max);
-                let content_h = to.h + 2.0 + msg.h;
-                let bw = (PAD_L + LOGO + GAP + content_w + PAD_R).ceil();
-                let bh = (PAD_Y * 2.0 + content_h.max(LOGO)).ceil();
+                const MAX_TEXT_W: f32 = 300.0;
+                let msg = self.text(&bubble.text, &self.fmt_msg, MAX_TEXT_W, 40.0)?;
+                let ellipsis = self.dwrite.CreateEllipsisTrimmingSign(&self.fmt_msg)?;
+                msg.layout.SetTrimming(&DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    delimiter: 0,
+                    delimiterCount: 0,
+                }, &ellipsis)?;
+                let bw = (msg.w.min(MAX_TEXT_W) + PAD_X * 2.0).max(64.0).ceil();
+                let bh = (msg.h.max(18.0) + PAD_Y * 2.0).ceil();
+                let placement = bubble_placement(agent.x, agent.y, bh);
+                let bx = placement.left;
+                let by = placement.top;
                 let card = rrect(bx, by, bw, bh, 12.0);
 
                 // One layer carries the whole card's fade so overlapping
@@ -980,72 +963,16 @@ pub mod win {
                 };
                 rt.PushLayer(&fade, None::<&ID2D1Layer>);
 
-                // box-shadow: 0 10px 24px rgba(0,0,0,.35)
-                let shadow = self.shadow((bx, by, bw, bh), 10.0, (0.0, 10.0), 0.35, |t, shift, b| {
-                    t.SetTransform(&shift);
-                    t.FillRoundedRectangle(&card, b);
-                    Ok(())
-                });
-                rt.SetTransform(&Matrix3x2::identity());
                 let body = (|| -> R<()> {
-                    shadow?;
-                    // Translucent panel (crisp fallback for backdrop blur).
-                    let fill = rt.CreateSolidColorBrush(&col(PANEL, 0.80), None)?;
+                    // The speaker's identity color fills both body and tail.
+                    // The base is redrawn over the tail seam for one clean shape.
+                    let fill = rt.CreateSolidColorBrush(&col(agent.color, 1.0), None)?;
+                    rt.SetTransform(&(Matrix3x2::translation(placement.tail_tip_x - 14.0, placement.tail_tip_y - 32.0)));
+                    rt.FillGeometry(&self.bubble_tail, &fill, None::<&ID2D1Brush>);
+                    rt.SetTransform(&Matrix3x2::identity());
                     rt.FillRoundedRectangle(&card, &fill);
-
-                    // Accent bar, clipped to the card's rounded outline.
-                    let card_geom: ID2D1Geometry = self.factory.CreateRoundedRectangleGeometry(&card)?.cast()?;
-                    let clip = D2D1_LAYER_PARAMETERS {
-                        contentBounds: infinite,
-                        geometricMask: ManuallyDrop::new(Some(card_geom)),
-                        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                        maskTransform: Matrix3x2::identity(),
-                        opacity: 1.0,
-                        opacityBrush: ManuallyDrop::new(None),
-                        layerOptions: D2D1_LAYER_OPTIONS_NONE,
-                    };
-                    rt.PushLayer(&clip, None::<&ID2D1Layer>);
-                    let accent = rt.CreateSolidColorBrush(&col(agent.color, 1.0), None)?;
-                    rt.FillRectangle(&rect(bx, by, 4.0, bh), &accent);
-                    rt.PopLayer();
-                    drop(ManuallyDrop::into_inner(clip.geometricMask));
-
-                    let border = rt.CreateSolidColorBrush(&col(WHITE, 0.08), None)?;
-                    rt.DrawRoundedRectangle(&rrect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, 11.5), &border, 1.0, None::<&ID2D1StrokeStyle>);
-
-                    // Agent logo tile.
-                    let lx = bx + PAD_L;
-                    let ly = by + PAD_Y;
-                    rt.FillRoundedRectangle(&rrect(lx, ly, LOGO, LOGO, 6.0), &accent);
-                    let white = rt.CreateSolidColorBrush(&col(WHITE, 1.0), None)?;
-                    let lower = agent.label.to_ascii_lowercase();
-                    let logo_geom = if lower.starts_with("claude") {
-                        Some(&self.logo_claude)
-                    } else if lower.starts_with("codex") {
-                        Some(&self.logo_codex)
-                    } else if lower.starts_with("open") {
-                        Some(&self.logo_opencode)
-                    } else {
-                        None
-                    };
-                    if let Some(g) = logo_geom {
-                        let inner = LOGO * 0.78;
-                        let inset = (LOGO - inner) / 2.0;
-                        let s = inner / 24.0;
-                        rt.SetTransform(&(Matrix3x2::scale(s, s) * Matrix3x2::translation(lx + inset, ly + inset)));
-                        rt.FillGeometry(g, &white, None);
-                        rt.SetTransform(&Matrix3x2::identity());
-                    } else {
-                        let glyph = self.text(&agent_glyph(&agent.label), &self.fmt_logo, LOGO, LOGO)?;
-                        rt.DrawTextLayout(v2(lx, ly), &glyph.layout, &white, D2D1_DRAW_TEXT_OPTIONS_NONE);
-                    }
-
-                    // "to <listener>" + message.
-                    let tx = lx + LOGO + GAP;
-                    let muted = rt.CreateSolidColorBrush(&col(MUTED, 1.0), None)?;
-                    rt.DrawTextLayout(v2(tx, ly - 1.0), &to.layout, &muted, D2D1_DRAW_TEXT_OPTIONS_NONE);
-                    let text = rt.CreateSolidColorBrush(&col(TEXT, 1.0), None)?;
-                    rt.DrawTextLayout(v2(tx, ly - 1.0 + to.h + 2.0), &msg.layout, &text, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    let ink = rt.CreateSolidColorBrush(&col(bubble_ink_color(agent.color), 1.0), None)?;
+                    rt.DrawTextLayout(v2(bx + PAD_X, by + (bh - msg.h) / 2.0), &msg.layout, &ink, D2D1_DRAW_TEXT_OPTIONS_NONE);
                     Ok(())
                 })();
                 rt.PopLayer();
@@ -1408,8 +1335,6 @@ pub mod win {
                 label: "Codex".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: None,
                 bubble: Some(Bubble {
-                    to_label: "Claude Code".to_string(),
-                    to_color: claude,
                     text: "Mind if I grab the sidebar? You've got the API.".to_string(),
                     started_at: now - Duration::from_millis(500),
                 }),
@@ -1426,8 +1351,6 @@ pub mod win {
                 label: "OpenCode".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: Some(now + Duration::from_secs(5)),
                 bubble: Some(Bubble {
-                    to_label: "Codex".to_string(),
-                    to_color: codex,
                     text: "Heads up, I'm touching the config too.".to_string(),
                     started_at: now - Duration::from_millis(500),
                 }),
@@ -1490,6 +1413,48 @@ mod movement_tests {
     fn upsert(state: &SharedState, id: &str, x: f32, y: f32, now: Instant) {
         let line = format!(r#"{{"cmd":"upsert","id":"{id}","x":{x},"y":{y}}}"#);
         assert!(apply_command_at(state, &line, now));
+    }
+
+    #[test]
+    fn chatter_text_is_one_line_and_truncated_with_an_ellipsis() {
+        assert_eq!(normalize_bubble_text("  review\nthis\tfirst  "), "review this first");
+        let long = normalize_bubble_text(&"word ".repeat(20));
+        assert_eq!(long.chars().count(), BUBBLE_MAX_CHARS);
+        assert!(long.ends_with('…'));
+        assert!(!long.contains('\n'));
+    }
+
+    #[test]
+    fn bubble_tail_anchor_tracks_the_live_cursor_position() {
+        let first = bubble_placement(100.0, 80.0, 42.0);
+        let moved = bubble_placement(260.0, 140.0, 42.0);
+        assert_eq!(moved.tail_tip_x - first.tail_tip_x, 160.0);
+        assert_eq!(moved.tail_tip_y - first.tail_tip_y, 60.0);
+        assert_eq!(first.tail_tip_x, 117.0);
+        assert_eq!(first.tail_tip_y, 98.0);
+        assert_eq!(first.top + 42.0, 66.0, "bubble body stays just above the cursor while its tail points down to it");
+        assert!(first.top < 80.0);
+    }
+
+    #[test]
+    fn bubble_ink_contrasts_with_dark_and_light_agent_identity_fills() {
+        assert_eq!(bubble_ink_color(Rgb(20, 40, 80)), Rgb(255, 255, 255));
+        assert_eq!(bubble_ink_color(Rgb(240, 180, 70)), Rgb(22, 24, 28));
+    }
+
+    #[test]
+    fn a_new_agent_message_replaces_the_prior_bubble_and_uses_the_supplied_clock() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let now = Instant::now();
+        upsert(&state, "codex", 10.0, 20.0, now);
+        assert!(apply_command_at(&state, r#"{"cmd":"say","id":"codex","to":"Claude","toColor":[1,2,3],"text":"first"}"#, now));
+        let later = now + Duration::from_millis(500);
+        assert!(apply_command_at(&state, r#"{"cmd":"say","id":"codex","to":"Claude","toColor":[1,2,3],"text":"second"}"#, later));
+        let guard = state.lock().unwrap();
+        let bubble = guard["codex"].bubble.as_ref().unwrap();
+        assert_eq!(bubble.text, "second");
+        assert_eq!(bubble.started_at, later);
+        assert!(bubble_opacity(0.0).is_some());
     }
 
     #[test]

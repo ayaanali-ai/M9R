@@ -478,7 +478,7 @@ function withRoot(run: (root: string) => Promise<void>): Promise<void> {
 
 function testCursorOverlayHost(upsert: (point: { id: string; label: string; color: readonly [number, number, number]; x: number; y: number }) => Promise<boolean> = async () => true,
   hidden: string[] = [], closed: { count: number } = { count: 0 },
-  say: (message: { id: string; to: string; toColor: readonly [number, number, number]; text: string }) => Promise<boolean> = async () => true) {
+  say: (message: { id: string; text: string }) => Promise<boolean> = async () => true) {
   return {
     upsert,
     say,
@@ -1615,9 +1615,9 @@ test("uses the M9R marker at verified screen points for the full agent session a
   assert.equal(closed.count, 1, "broker shutdown closes the shared overlay process");
 }));
 
-test("A2A cursor chatter uses the registered sender marker and a real recipient label", async () => withRoot(async (root) => {
+test("A2A cursor chatter uses only the registered speaker marker and message text", async () => withRoot(async (root) => {
   await registerStage(root);
-  const messages: Array<{ id: string; to: string; toColor: readonly [number, number, number]; text: string }> = [];
+  const messages: Array<{ id: string; text: string }> = [];
   const points: Array<{ id: string; label: string; color: readonly [number, number, number]; x: number; y: number }> = [];
   const identity = { handle: "codex", sessionId: "a2a-cursor-speaker" };
   const recipientIdentity = { handle: "claude", sessionId: "a2a-cursor-recipient" };
@@ -1635,13 +1635,11 @@ test("A2A cursor chatter uses the registered sender marker and a real recipient 
   assert.equal((await driver.showAgentCursor("stage", recipientIdentity)).visible, true);
   assert.equal(await driver.sayAgentCursor(identity, recipientIdentity, "Review the title"), true);
   assert.equal(messages.length, 1);
-  const { id, ...bubble } = messages[0]!;
-  assert.deepEqual(bubble, {
-    to: "Claude",
-    toColor: points.find((point) => point.label === "Claude")!.color,
+  assert.deepEqual(messages[0], {
+    id: points.find((point) => point.label === "Codex")!.id,
     text: "Review the title",
   });
-  assert.match(id, /^agent-[a-f0-9]{64}$/);
+  assert.match(messages[0]!.id, /^agent-[a-f0-9]{64}$/);
   await driver.shutdown();
 }));
 

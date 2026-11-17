@@ -1203,25 +1203,16 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
 
   async function sayAgentCursor(
     fromIdentity: CuaAgentCursorIdentity,
-    toIdentity: CuaAgentCursorIdentity,
+    _toIdentity: CuaAgentCursorIdentity,
     text: string,
   ): Promise<boolean> {
     if (!cursorOverlayHost) return false;
     try {
       const from = agentCursorDetails(fromIdentity);
-      const to = agentCursorDetails(toIdentity);
       const speaker = agentSessions.get(from.key);
       const speakerPresentation = speaker && cursorOverlayPresentations.get(speaker.session);
       if (!speakerPresentation) return false;
-      const recipient = agentSessions.get(to.key);
-      return await cursorOverlayHost.say({
-        id: speakerPresentation.id,
-        to: recipient?.session ?? publicCursorLabel(to.handle),
-        // When the recipient has no active cursor session, use a neutral
-        // accent instead of implying a color identity that is not on screen.
-        toColor: recipient ? assignCursorColor(to.key) : [200, 200, 200],
-        text,
-      });
+      return await cursorOverlayHost.say({ id: speakerPresentation.id, text });
     } catch {
       return false;
     }

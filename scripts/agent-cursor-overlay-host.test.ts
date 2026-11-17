@@ -117,20 +117,20 @@ test("A2A bubbles require an acknowledged visible sender and sanitize bounded te
   }) as never;
   const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess, pathExists: () => true });
 
-  assert.equal(await host.say({ id: "agent-codex", to: "Claude", toColor: [230, 120, 70], text: "hello" }), false,
+  assert.equal(await host.say({ id: "agent-codex", text: "hello" }), false,
     "an invisible sender cannot produce a free-floating bubble");
   assert.equal(launched.length, 0, "a rejected bubble does not start the renderer");
   assert.equal(await host.upsert({ id: "agent-codex", label: "Codex", color: [40, 140, 230], x: 20, y: 30 }), true);
-  assert.equal(await host.say({ id: "agent-codex", to: "Claude", toColor: [230, 120, 70], text: "  review\nthis\tfirst  " }), true);
+  assert.equal(await host.say({ id: "agent-codex", text: "  review\nthis\tfirst  " }), true);
   assert.deepEqual(launched[0]?.commands.at(-1), {
-    cmd: "say", id: "agent-codex", to: "Claude", toColor: [230, 120, 70], text: "review this first", requestId: 2,
+    cmd: "say", id: "agent-codex", text: "review this first", requestId: 2,
   });
   launched[0]!.kill();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(await host.say({ id: "agent-codex", to: "Claude", toColor: [230, 120, 70], text: "after renderer exit" }), false,
+  assert.equal(await host.say({ id: "agent-codex", text: "after renderer exit" }), false,
     "a dead renderer cannot acknowledge a bubble for a marker it no longer owns");
   await host.hide("agent-codex");
-  assert.equal(await host.say({ id: "agent-codex", to: "Claude", toColor: [230, 120, 70], text: "after hide" }), false);
+  assert.equal(await host.say({ id: "agent-codex", text: "after hide" }), false);
   await host.close();
 });
 
@@ -139,7 +139,7 @@ test("a timed-out upsert still sends a real hide and cannot speak as a confirmed
   const host = createAgentCursorOverlayHost({ executablePath: "fixture.exe", pathExists: () => true, spawnProcess: (() => child) as never });
   try {
     assert.equal(await host.upsert({ id: "uncertain", label: "Codex", x: 10, y: 10, color: [1, 2, 3] }), false);
-    assert.equal(await host.say({ id: "uncertain", to: "Claude", toColor: [1, 2, 3], text: "hello" }), false);
+    assert.equal(await host.say({ id: "uncertain", text: "hello" }), false);
     assert.equal(await host.hide("uncertain"), true);
     assert.deepEqual(child.commands.map(command => command.cmd), ["upsert", "hide"],
       "lost acknowledgement does not prove the renderer never displayed the marker");
