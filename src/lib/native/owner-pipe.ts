@@ -1,6 +1,8 @@
 /**
  * Request/response transport for actions owned by the local OS user.
  * Windows uses a named pipe; POSIX uses a mode-0600 Unix socket.
+ * Reaching the pipe is not owner authorization: the broker separately validates
+ * the protected owner credential for owner mutations and session tokens for agents.
  */
 import { chmodSync, existsSync, rmSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
@@ -12,6 +14,8 @@ export interface OwnerPipeRequest {
   method: "GET" | "POST";
   path: string;
   body?: unknown;
+  /** Protected local owner credential. Agent routes continue to use session tokens. */
+  ownerKey?: string;
 }
 
 export interface OwnerPipeOptions {

@@ -75,3 +75,14 @@ test("computer-use programs do not receive Node ambient capabilities", async () 
   });
   assert.deepEqual(result.value, { process: "undefined", require: "undefined", fetch: "undefined" });
 });
+
+test("a returned program cannot leave a background continuation that dispatches later input", async () => {
+  const calls: string[] = [];
+  const result = await runComputerUseProgram({ code: `
+    void (async () => { await m9r.sleep(30); await m9r.act({ late: true }); })().catch(() => {});
+    return "finished";
+  ` }, { async observe() { return {}; }, async act() { calls.push("late input"); return {}; }, async sleep() {} });
+  assert.equal(result.value, "finished");
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.deepEqual(calls, [], "a completed invocation no longer owns computer capabilities");
+});

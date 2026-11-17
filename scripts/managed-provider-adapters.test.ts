@@ -52,7 +52,7 @@ test("Claude reports its own live model catalog and switches models on the runni
     spawn: () => fake.child as never,
   });
   await connection.start();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  for (let attempt = 0; attempt < 100 && !connection.capabilities().models; attempt++) await new Promise(resolve => setImmediate(resolve));
   const capabilities = connection.capabilities();
   assert.deepEqual(capabilities.models?.map((model) => model.id), ["default", "opus", "sonnet"]);
   assert.equal(capabilities.currentModel, "default");

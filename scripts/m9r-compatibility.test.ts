@@ -14,7 +14,7 @@ test("an old .oathlock install upgrades by copying into .m9r, keeps the source, 
     writeFileSync(join(root, ".m9r", "agents", "claude.json"), "new config wins", "utf8");
 
     const result = migrateLegacyM9rDirectory(root);
-    assert.deepEqual(result, { copiedFiles: 0, preservedFiles: 1, skippedSymlinks: 0, legacyDirectoryPresent: true });
+    assert.deepEqual(result, { copiedFiles: 0, preservedFiles: 1, skippedSymlinks: 0, skippedGeneratedDirectories: 0, skippedUnreadableEntries: 0, legacyDirectoryPresent: true });
     assert.equal(readFileSync(join(root, ".m9r", "agents", "claude.json"), "utf8"), "new config wins");
     assert.equal(readFileSync(join(root, ".oathlock", "agents", "claude.json"), "utf8"), "legacy config", "upgrade must not delete the old user data");
   } finally {
@@ -37,7 +37,7 @@ test("legacy environment variables are read as M9R names, while explicit M9R val
 test("an install with no .oathlock directory is a no-op", () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-empty-upgrade-"));
   try {
-    assert.deepEqual(migrateLegacyM9rDirectory(root), { copiedFiles: 0, preservedFiles: 0, skippedSymlinks: 0, legacyDirectoryPresent: false });
+    assert.deepEqual(migrateLegacyM9rDirectory(root), { copiedFiles: 0, preservedFiles: 0, skippedSymlinks: 0, skippedGeneratedDirectories: 0, skippedUnreadableEntries: 0, legacyDirectoryPresent: false });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

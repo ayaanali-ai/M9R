@@ -219,5 +219,20 @@
   "mcp-inbox.test.ts",
   "multiplayer-runtime.test.ts",
   "pill-shells.test.ts",
-  "pill-state.test.ts"
+  "pill-state.test.ts",
+  "owner-pipe.test.ts",
+  "m9r-compatibility.test.ts",
+  "managed-provider-adapters.test.ts",
+  "managed-provider-supervisor.test.ts",
+  "logical-task-context.test.ts",
+  "computer-execution-loop.test.ts",
+  "computer-use-program.test.ts",
+  "multiplayer-task-context.test.ts",
+  "multiplayer-a2a.test.ts",
+  "native-hook-server.test.ts",
+  "live-session-core.test.ts",
+  "multiplayer-dispatch-fence.test.ts",
+  "multiplayer-cursor-chatter.test.ts",
+  "windows-desktop-stage.test.ts",
+  "task-stage-actions.test.ts"
 ]

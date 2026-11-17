@@ -31,7 +31,7 @@ import type { DeliveryDeps } from "./codex-delivery";
 import { renameStateFile } from "./atomic-file";
 import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, pullCloudNotes, pushCloudNote, saveCloudConfig } from "./cloud-memory";
 import { requestOwnerPipe } from "./owner-pipe";
-import { ownerPipePath } from "./web-broker-paths";
+import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { canQueue, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { isAgentContext, isHumanContext, isProtectedAction } from "./approval-core";
 import { runAllow, runDecision, runLink, runObservationStats, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTaskLog, runTasks, runUnlink } from "./approval-commands";
@@ -892,8 +892,16 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
 type DesktopPillOwnerResponse = { ok: boolean; error?: string };
 
 async function runDesktopPillOwnerRequest(io: NativeIo, path: string, body: Record<string, unknown>, label: string): Promise<number> {
+  let ownerKey: string;
+  try {
+    ownerKey = readFileSync(brokerKeyPath(nativePaths(io).m9r), "utf8").trim();
+    if (!ownerKey) throw new Error("missing owner credential");
+  } catch {
+    io.err("The desktop pill owner credential is unavailable; no owner mutation was sent.");
+    return 1;
+  }
   const result = await requestOwnerPipe<DesktopPillOwnerResponse>(ownerPipePath(nativePaths(io).m9r), {
-    method: "POST", path, body,
+    method: "POST", path, body, ownerKey,
   }, 15_000);
   if (!result) {
     io.err(`The M9R owner broker did not answer the desktop pill ${label}; no browser or inbox fallback was used.`);

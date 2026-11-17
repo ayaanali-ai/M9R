@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "plugins": [],
+    "tsBuildInfoFile": "../.workcache/native-dev.tsbuildinfo"
+  },
+  "include": [
+    "../src/lib/native/**/*.ts",
+    "./mcp-inbox.test.ts",
+    "./managed-provider-owner-queue.test.ts",
+    "./managed-provider-adapters.test.ts",
+    "./computer-execution-loop.test.ts",
+    "./task-desktop-stage.test.ts",
+    "./multiplayer-runtime.test.ts",
+    "./efficiency-metrics.test.ts",
+    "./owner-pipe.test.ts"
+  ]
+}

@@ -130,6 +130,34 @@ Separate operational chore — deciding when the recovery branch
 trunk, and cleaning up any stray worktrees. Not part of the guard code above,
 not blocking it.
 
+## 6. Development feedback (never a candidate or install receipt)
+
+- `npm run check:native` checks all native TypeScript production sources and the
+  selected workflow fixtures, then runs the 24-file critical native test profile.
+  Its scoped TypeScript cache is `.workcache/native-dev.tsbuildinfo`; it does not
+  change the full project config or its release gate. This profile is for native
+  changes, not frontend or Rust acceptance.
+- `npm run check:full` runs the unchanged full-project TypeScript check and the
+  aggregate release test manifest. Both commands normally run their two checks
+  concurrently; append `-- --serial` to measure a serial comparison.
+- Each invocation writes elapsed times, exit codes and logs to a unique directory
+  under `.workcache/code-check/`. Reports explicitly say `developmentOnly: true`
+  and `releaseAcceptance: false`. Failure stays failure; no automatic retries or
+  passing-result cache is used. Local broker tests need permission to bind/connect
+  to localhost; a sandbox `EACCES` is not a passing result.
+- `run-test-suite.mjs` batches named profiles with the same process isolation,
+  concurrency bound and Windows argument-size bound as the full suite. It reports
+  batch and total durations. The release manifest must include every critical
+  native test named by `NATIVE_TEST_FILES`; deleting one fails the gate.
+- Native Rust or pill changes still require the appropriate component checks.
+  This workflow does not reuse or install component binaries, remove full gates,
+  avoid the clean-tree requirement, or replace the fresh pill build in section 2.
+
+Guard 3A/3B/3C and the candidate/install scripts are unchanged: they run their own
+full checks even if a development report already exists. Eleven previously omitted
+workflow suites plus four surface/mutation suites were added to the manifest in
+this pass; the existing retired-delivery exclusions were not broadened.
+
 ## Verifying these guards still work
 
 Each guard was confirmed by deliberately tripping it, not just by reading the

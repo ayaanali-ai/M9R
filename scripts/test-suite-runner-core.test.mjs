@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { splitTestFilesIntoBatches, validateTestFileManifest } from "./test-suite-runner-core.mjs";
+import { readFileSync } from "node:fs";
+import { NATIVE_TEST_FILES, codeCheckPlan, requireNativeReleaseCoverage, testNodeArgs, testSummary, splitTestFilesIntoBatches, validateTestFileManifest } from "./test-suite-runner-core.mjs";
 
 test("test batches preserve every filename and stay below the Windows argument budget", () => {
   const files = ["one.test.ts", "two.test.ts", "three.test.ts", "four.test.ts"];
@@ -24,4 +25,34 @@ test("full test manifests reject missing files and preserve the declared order",
   const files = ["first.test.ts", "second.test.mjs"];
   assert.deepEqual(validateTestFileManifest(files, [...files, "not-in-manifest.test.ts"]), files);
   assert.throws(() => validateTestFileManifest(files, ["first.test.ts"]), /references a missing test file/);
+});
+
+test("the actual release manifest cannot silently omit critical native workflow coverage", () => {
+  const files = JSON.parse(readFileSync(new URL("./test-files.json", import.meta.url), "utf8"));
+  requireNativeReleaseCoverage(files);
+  for (const file of NATIVE_TEST_FILES) assert.throws(() => requireNativeReleaseCoverage(files.filter(item => item !== file)), /missing/);
+});
+
+test("named suites batch the same validated files with bounded Node test concurrency", () => {
+  const args = testNodeArgs(["one.test.ts", "two.test.ts"]);
+  assert.ok(args.includes("--test")); assert.ok(args.includes("--test-concurrency=8"));
+  assert.deepEqual(args.slice(-2), ["./scripts/one.test.ts", "./scripts/two.test.ts"]);
+  assert.throws(() => testNodeArgs(["one.test.ts"], 0));
+  assert.throws(() => testNodeArgs(["one.test.ts"], 99));
+  assert.throws(() => testNodeArgs(["../one.test.ts"]));
+  assert.deepEqual(testSummary("ℹ tests 10\nℹ pass 8\nℹ fail 1\nℹ skipped 1"), { tests: 10, pass: 8, fail: 1, skipped: 1 });
+  assert.deepEqual(testSummary("# tests 10\n# pass 8\n# fail 1\n# skipped 1"), { tests: 10, pass: 8, fail: 1, skipped: 1 });
+});
+
+test("development profiles never substitute scoped checks for the full project/release test gate", () => {
+  const native = codeCheckPlan("native"), full = codeCheckPlan("full");
+  assert.equal(native[0].args.at(-1), "scripts/tsconfig.native-dev.json");
+  assert.equal(full[0].args.at(-1), "."); assert.equal(full[1].args.at(-1), "all");
+  const scoped = JSON.parse(readFileSync(new URL("./tsconfig.native-dev.json", import.meta.url), "utf8"));
+  assert.equal(scoped.extends, "../tsconfig.json");
+  assert.ok(scoped.include.includes("../src/lib/native/**/*.ts"));
+  assert.equal(scoped.compilerOptions.tsBuildInfoFile, "../.workcache/native-dev.tsbuildinfo");
+  const root = JSON.parse(readFileSync(new URL("../tsconfig.json", import.meta.url), "utf8"));
+  assert.ok(root.include.includes("**/*.tsx"));
+  assert.throws(() => codeCheckPlan("skip-tests"));
 });

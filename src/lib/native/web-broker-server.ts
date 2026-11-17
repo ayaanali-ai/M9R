@@ -2,7 +2,8 @@
  * Local transport for the owner broker:
  * - authenticated native desktop stage/action routes; browser-extension command routes are not registered.
  * - a local named pipe/Unix socket for read-only status plus narrowly scoped, session-token-authorized agent task
- *   mutations; owner approvals, authority changes, and arbitrary store writes are never accepted on this pipe.
+ *   mutations; owner approvals and authority changes require the protected owner credential.
+ *   Arbitrary store writes are never accepted on this pipe.
  * - the broker-owned desktop/owner-pipe routes. The former browser-extension
  *   websocket and isolated-browser transports are retired and are not started
  *   by production code.
@@ -773,7 +774,12 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             : ownerReply(false, { error: typeof value.error === "string" ? value.error.slice(0, 500) : "resident provider-session owner refused delivery" });
         });
       }
-      if (request.method === "POST" && ownerOnlyPaths.has(request.path)) return handleOwnerRequest(request);
+      if (request.method === "POST" && ownerOnlyPaths.has(request.path)) {
+        if (typeof request.ownerKey !== "string" || !sameSecret(request.ownerKey, options.key)) {
+          return ownerReply(false, { error: "owner credential is required for this mutation" });
+        }
+        return handleOwnerRequest(request);
+      }
       if (request.method === "POST" && request.path === "/web/mcp/store") {
         if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
         const result = applyAgentMcpStoreMutation(options.agentMcpStore, request.body, options.multiplayerRuntime);
