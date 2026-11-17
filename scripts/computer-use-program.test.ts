@@ -54,8 +54,11 @@ test("a timed-out program's still-running continuation can never reach a later m
   // its caller already gave up and returned a timeout.
   const order: string[] = [];
   await assert.rejects(
-    runComputerUseProgram({ timeoutMs: 20, code: `
-      await m9r.sleep(60);
+    // Leave VM startup headroom under the full concurrent suite. The sleep
+    // still exceeds the total deadline by 3x; this tests async continuation
+    // fencing rather than whether a busy machine can enter a VM in 20ms.
+    runComputerUseProgram({ timeoutMs: 200, code: `
+      await m9r.sleep(600);
       await m9r.act({ afterTimeout: true });
     ` }, {
       async observe() { return {}; },
@@ -64,8 +67,8 @@ test("a timed-out program's still-running continuation can never reach a later m
     }),
     /timed out/,
   );
-  // Let the script's sleep(60) actually elapse and attempt its post-timeout act().
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  // Let the script's sleep(600) actually elapse and attempt its post-timeout act().
+  await new Promise((resolve) => setTimeout(resolve, 700));
   assert.deepEqual(order, [], "no m9r call started after the host returned a timeout may ever reach the real desktop capability");
 });
 
