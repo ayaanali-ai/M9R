@@ -49,7 +49,7 @@ export interface MultiplayerA2ARouter {
   readonly runId: string;
   readonly roster: MultiplayerRoster;
   /** Validate and route one structured message without invoking a model. */
-  send(message: A2AMessage): A2ARouteResult;
+  send(message: A2AMessage, options?: { allowSharedRoot?: boolean }): A2ARouteResult;
   /** Subscribe to accepted, delivered, duplicate, and expiry events. */
   subscribe(listener: (event: A2ARouterEvent) => void): () => void;
   /** Read recent accepted messages for a recipient without polling a provider. */
@@ -228,7 +228,7 @@ export function createMultiplayerA2ARouter(
     runId: roster.runId,
     roster,
 
-    send(input) {
+    send(input, sendOptions) {
       let message: A2AMessage;
       try { message = parseA2AMessage(input); }
       catch (error) { return resultError(error instanceof Error ? error.message : "invalid A2A message"); }
@@ -271,7 +271,11 @@ export function createMultiplayerA2ARouter(
           return resultError(`A2A conversation reached its ${MAX_A2A_CONVERSATION_MESSAGES}-message bound. Start a new owner task to continue.`);
         }
         if (conversationMessages > 0 && !message.replyToMessageId) {
-          return resultError("A2A follow-up must reply to an existing message in the same conversation; a new root would reset the loop bound.");
+          const senderAlreadyOpened = [...references.values()].some(reference => reference.conversationId === message.conversationId
+            && reference.agentId === message.agentId && reference.replyDepth === 0);
+          if (!sendOptions?.allowSharedRoot || senderAlreadyOpened) {
+            return resultError("A2A follow-up must reply to an existing message in the same conversation; a new root would reset the loop bound.");
+          }
         }
       }
       if (message.replyToMessageId && !knownMessageIds.has(message.replyToMessageId)) return resultError("A2A reply references an unknown message");

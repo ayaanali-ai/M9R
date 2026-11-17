@@ -26,7 +26,7 @@ import {
   type MultiplayerRoster,
 } from "./multiplayer-contract";
 import type { VerifiedIdentity } from "./identity-core";
-import { redactSecrets } from "./inbox-core";
+import { redactSecrets, type Task } from "./inbox-core";
 
 /**
  * The owner-broker coordination boundary.  The contracts in the multiplayer
@@ -109,6 +109,27 @@ function safeId(prefix: string, value: string): string {
   return `${prefix}-${createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
 }
 
+/** Resolve only a delivered owner broadcast shared by both named participants.
+ * Older broadcasts with conversations rooted on multiple tasks remain intact. */
+export function sharedBroadcastRoot(tasks: readonly Task[], taskId: string, identity: VerifiedIdentity, recipient: string): string | undefined {
+  const own = tasks.find(task => task.id === taskId && task.from === "you" && task.origin === "human_typed"
+    && safeHandle(task.to) === safeHandle(identity.handle) && task.broadcastId
+    && (task.approval === "approved" || task.approval === "not_needed") && task.deliveredAt && !task.retiredAt
+    && task.deliveredSession === identity.sessionId && (task.targetSession ?? identity.sessionId) === identity.sessionId);
+  if (!own?.broadcastId) return undefined;
+  // Keep the original canonical ID stable even if another recipient's older
+  // task is later retired; a retired recipient cannot start new sharing.
+  const roots = tasks.filter(task => task.from === "you" && task.origin === "human_typed"
+    && task.broadcastId === own.broadcastId);
+  if (!roots.some(task => safeHandle(task.to) === safeHandle(recipient)
+    && (task.approval === "approved" || task.approval === "not_needed") && !task.retiredAt)) return undefined;
+  const canonical = [...roots].sort((a, b) => a.seq - b.seq || Number(a.id.slice(1)) - Number(b.id.slice(1)))[0];
+  if (!canonical) return undefined;
+  const rootIds = new Set(roots.map(task => task.id));
+  if (tasks.some(task => task.a2a?.taskId && rootIds.has(task.a2a.taskId) && task.a2a.taskId !== canonical.id)) return undefined;
+  return canonical.id;
+}
+
 function storedProgressFingerprint(value: string): string {
   // Pre-hashing builds stored caller-supplied fingerprints directly. Preserve
   // already-hashed values while migrating those older values on read.
@@ -140,6 +161,7 @@ export function createMultiplayerRuntime(input: {
   priorMessages?: readonly MultiplayerA2APriorMessage[];
   initialTaskContexts?: readonly TaskContext[];
   persistTaskContext?: (context: TaskContext) => void;
+  resolveSharedBroadcastRoot?: (taskId: string, identity: VerifiedIdentity, recipient: string) => string | undefined;
 }): MultiplayerRuntime {
   const now = input.now ?? Date.now;
   const roster = input.roster;
@@ -301,7 +323,7 @@ export function createMultiplayerRuntime(input: {
     return { agentId, branchId, provider: provider.trim().slice(0, 160) || "unknown", handle: normalized };
   };
 
-  const sendFromHandle = (senderHandle: string, senderProvider: string, inputValue: MultiplayerA2ASendInput): MultiplayerSendResult => {
+  const sendFromHandle = (senderHandle: string, senderProvider: string, inputValue: MultiplayerA2ASendInput, identity?: VerifiedIdentity): MultiplayerSendResult => {
     const sender = resolveSender(senderHandle, senderProvider);
     if (!sender) return { ok: false, error: "The sender is not part of the M9R multiplayer roster." };
     const recipient = byHandle.get(safeHandle(inputValue.to))
@@ -316,7 +338,9 @@ export function createMultiplayerRuntime(input: {
     // message's values -- never the replier's own, structurally different,
     // task id, even if the caller happens to pass one. Only a thread's first
     // message (no parent) gets to establish that shared value.
-    const taskId = parentReference?.taskId ?? inputValue.taskId?.trim();
+    const sharedRoot = !inputValue.replyToMessageId && !inputValue.conversationId && identity && inputValue.taskId
+      ? input.resolveSharedBroadcastRoot?.(inputValue.taskId.trim(), identity, recipient.handle ?? recipient.agentId) : undefined;
+    const taskId = parentReference?.taskId ?? sharedRoot ?? inputValue.taskId?.trim();
     // New conversations must be task-scoped. Continue a previously durable
     // taskless thread only when the caller names its exact stored parent; the
     // existing depth and message bounds still apply to those legacy replies.
@@ -387,18 +411,28 @@ export function createMultiplayerRuntime(input: {
     if (contextStore && ["completed", "canceled"].includes(contextStore.snapshot().state) && kind !== "stop" && kind !== "supersede") {
       return { ok: false, error: "This shared task is already terminal; start a new owner task instead of waking another provider turn." };
     }
-    const result = router.send(parseA2AMessage(raw));
+    const result = router.send(parseA2AMessage(raw), { allowSharedRoot: Boolean(sharedRoot) });
     if (!result.ok) return result;
     if (taskId && contextStore && !persistContext(taskId, contextStore)) return { ok: false, error: contextPersistenceError(taskId) };
     const receipt = enqueueForRecipient(result.message);
     return { ...result, delivery: receipt };
   };
 
+  const contextIdFor = (identity: VerifiedIdentity, taskId: string): string => {
+    if (contexts.has(taskId) || !input.resolveSharedBroadcastRoot) return taskId;
+    for (const agent of roster.agents) {
+      if (safeHandle(agent.handle ?? agent.agentId) === safeHandle(identity.handle)) continue;
+      const root = input.resolveSharedBroadcastRoot(taskId, identity, agent.handle ?? agent.agentId);
+      if (root && contexts.has(root)) return root;
+    }
+    return taskId;
+  };
+
   return {
     runId: roster.runId,
     roster,
     send(identity, inputValue) {
-      return sendFromHandle(identity.handle, identity.provider, inputValue);
+      return sendFromHandle(identity.handle, identity.provider, inputValue, identity);
     },
     sendFromHandle,
     applyControl(control) {
@@ -419,7 +453,7 @@ export function createMultiplayerRuntime(input: {
     },
     readTaskContext(identity, taskId) {
       const sender = resolveSender(identity.handle, identity.provider);
-      const context = contexts.get(taskId);
+      const context = contexts.get(contextIdFor(identity, taskId));
       if (!sender || !context || !context.snapshot().participants.some((participant) => participant.agentId === sender.agentId)) {
         return { ok: false, error: `No shared task state is available to this agent for ${taskId}.` };
       }
@@ -427,7 +461,8 @@ export function createMultiplayerRuntime(input: {
     },
     claimWork(identity, request) {
       const sender = resolveSender(identity.handle, identity.provider);
-      const context = contexts.get(request.taskId);
+      const contextId = contextIdFor(identity, request.taskId);
+      const context = contexts.get(contextId);
       if (!sender || !context || !context.snapshot().participants.some((participant) => participant.agentId === sender.agentId)) {
         return { ok: false, error: `No shared task state is available to this agent for ${request.taskId}.` };
       }
@@ -444,12 +479,13 @@ export function createMultiplayerRuntime(input: {
       };
       const result = context.claimAssignment(assignment);
       if (!result.ok) return { ok: false, error: result.error, context: result.context };
-      if (!persistContext(request.taskId, context)) return { ok: false, error: contextPersistenceError(request.taskId), context: result.context };
+      if (!persistContext(contextId, context)) return { ok: false, error: contextPersistenceError(contextId), context: result.context };
       return { ok: true, duplicate: result.duplicate, context: result.context };
     },
     completeWork(identity, taskId, assignmentId) {
       const sender = resolveSender(identity.handle, identity.provider);
-      const context = contexts.get(taskId);
+      const contextId = contextIdFor(identity, taskId);
+      const context = contexts.get(contextId);
       const assignment = context?.snapshot().assignments.find((item) => item.assignmentId === assignmentId);
       if (!sender || !context || !assignment || assignment.agentId !== sender.agentId) {
         return { ok: false, error: "This shared-work assignment is not owned by this agent." };
@@ -459,12 +495,13 @@ export function createMultiplayerRuntime(input: {
       }
       const result = context.completeAssignment(assignmentId, now());
       if (!result.ok) return { ok: false, error: result.error, context: result.context };
-      if (!persistContext(taskId, context)) return { ok: false, error: contextPersistenceError(taskId), context: result.context };
+      if (!persistContext(contextId, context)) return { ok: false, error: contextPersistenceError(contextId), context: result.context };
       return { ok: true, duplicate: result.duplicate, context: result.context };
     },
     releaseWork(identity, taskId, assignmentId) {
       const sender = resolveSender(identity.handle, identity.provider);
-      const context = contexts.get(taskId);
+      const contextId = contextIdFor(identity, taskId);
+      const context = contexts.get(contextId);
       const assignment = context?.snapshot().assignments.find((item) => item.assignmentId === assignmentId);
       if (!sender || !context || !assignment || assignment.agentId !== sender.agentId) {
         return { ok: false, error: "This shared-work assignment is not owned by this agent." };
@@ -475,7 +512,7 @@ export function createMultiplayerRuntime(input: {
       }
       const prior = assignment.status;
       const snapshot = context.releaseAssignment(assignmentId, now());
-      if (!persistContext(taskId, context)) return { ok: false, error: contextPersistenceError(taskId), context: snapshot };
+      if (!persistContext(contextId, context)) return { ok: false, error: contextPersistenceError(contextId), context: snapshot };
       return { ok: true, duplicate: prior === "released", context: snapshot };
     },
     snapshot() {

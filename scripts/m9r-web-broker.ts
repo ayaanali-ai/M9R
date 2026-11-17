@@ -28,7 +28,7 @@ import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
 import { createMultiplayerInboxDelivery } from "@/lib/native/multiplayer-inbox-delivery";
-import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
+import { createMultiplayerRuntime, sharedBroadcastRoot } from "@/lib/native/multiplayer-runtime";
 import { subscribeA2ACursorChatter } from "@/lib/native/multiplayer-cursor-chatter";
 import type { MultiplayerRoster } from "@/lib/native/multiplayer-contract";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
@@ -138,6 +138,7 @@ async function main(): Promise<void> {
   }] : []);
   const multiplayer = createMultiplayerRuntime({
     roster: multiplayerRoster,
+    resolveSharedBroadcastRoot: (taskId, identity, recipient) => sharedBroadcastRoot(store.snapshot().tasks, taskId, identity, recipient),
     knownMessages: store.snapshot().tasks.flatMap((task) => task.a2a?.wireMessage ? [task.a2a.wireMessage] : []),
     initialTaskContexts: store.listMultiplayerTaskContexts(),
     persistTaskContext: (context) => { store.setMultiplayerTaskContext(context); },

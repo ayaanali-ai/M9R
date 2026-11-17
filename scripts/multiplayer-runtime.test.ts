@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createMultiplayerRuntime } from "../src/lib/native/multiplayer-runtime";
+import { createMultiplayerRuntime, sharedBroadcastRoot } from "../src/lib/native/multiplayer-runtime";
 import { createMultiplayerInboxDelivery } from "../src/lib/native/multiplayer-inbox-delivery";
 import { createLocalStore } from "../src/lib/native/local-store";
 import { renderA2AConversation } from "../src/lib/native/inbox-core";
@@ -16,6 +16,76 @@ const roster = {
     { agentId: "agent-claude", branchId: "branch-claude", provider: "claude-code", handle: "claude" },
   ],
 };
+
+test("both delivered broadcast recipients start one durable conversation without weakening root and reply guards", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-broadcast-conversation-"));
+  try {
+    const store = createLocalStore(root);
+    const claudeIdentity = { handle: "claude", provider: "claude-code", sessionId: "claude-session" };
+    const codexIdentity = { handle: "codex", provider: "codex", sessionId: "codex-session" };
+    const claudeToken = store.issueIdentity(claudeIdentity.handle, claudeIdentity.provider, claudeIdentity.sessionId).token;
+    const codexToken = store.issueIdentity(codexIdentity.handle, codexIdentity.provider, codexIdentity.sessionId).token;
+    const claude = store.addTask({ from: "you", to: "claude", goal: "Work together", origin: "human_typed", broadcastId: "shared", idempotencyKey: "claude" }).task;
+    const codex = store.addTask({ from: "you", to: "codex", goal: "Work together", origin: "human_typed", broadcastId: "shared", idempotencyKey: "codex" }).task;
+    assert.equal(sharedBroadcastRoot(store.snapshot().tasks, claude.id, claudeIdentity, "codex"), undefined,
+      "an undelivered owner task cannot be used to join a shared conversation");
+    store.markDelivered([claude.id], claudeIdentity.sessionId);
+    store.markDelivered([codex.id], codexIdentity.sessionId);
+    const delivery = createMultiplayerInboxDelivery({ store, agents: roster.agents.map(agent => ({ handle: agent.handle!, agentId: agent.agentId })),
+      sessionIdOf: handle => handle === "claude" ? claudeIdentity.sessionId : codexIdentity.sessionId });
+    const makeRuntime = () => createMultiplayerRuntime({ roster, delivery,
+      resolveSharedBroadcastRoot: (taskId, identity, recipient) => sharedBroadcastRoot(store.snapshot().tasks, taskId, identity, recipient),
+      knownMessages: store.snapshot().tasks.flatMap(task => task.a2a?.wireMessage ? [task.a2a.wireMessage] : []),
+      initialTaskContexts: store.listMultiplayerTaskContexts(), persistTaskContext: context => { store.setMultiplayerTaskContext(context); } });
+    const firstInput = { to: "codex", taskId: claude.id, kind: "delegate" as const, summary: "Preparing the document",
+      progressKind: "observation" as const, progressFingerprint: "preparing", idempotencyKey: "first" };
+    const secondInput = { to: "claude", taskId: codex.id, kind: "surface-handoff" as const, summary: "Tell me when ready",
+      progressKind: "observation" as const, progressFingerprint: "waiting", idempotencyKey: "second" };
+    const runtime = makeRuntime();
+    const throughBroker = (token: string, message: typeof firstInput | typeof secondInput) =>
+      applyAgentMcpStoreMutation(store, { action: "a2a", token, ...message }, runtime);
+    const firstResponse = throughBroker(claudeToken, firstInput);
+    const secondResponse = throughBroker(codexToken, secondInput);
+    assert.equal(firstResponse.status, 200);
+    assert.equal(secondResponse.status, 200);
+    const first = firstResponse.body as Extract<ReturnType<typeof runtime.send>, { ok: true }>;
+    const second = secondResponse.body as Extract<ReturnType<typeof runtime.send>, { ok: true }>;
+    assert.ok(first.ok && second.ok);
+    assert.equal(first.message.conversationId, second.message.conversationId);
+    assert.equal(first.message.taskId, claude.id);
+    assert.equal(second.message.taskId, claude.id);
+    assert.notEqual(first.delivery.taskId, second.delivery.taskId);
+    const third = runtime.send(codexIdentity, { ...secondInput, summary: "Another unrelated root", idempotencyKey: "third" });
+    assert.equal(third.ok, false, "a participant cannot reset the thread by repeatedly starting roots");
+    const restarted = makeRuntime();
+    const retry = restarted.send(codexIdentity, secondInput);
+    assert.ok(retry.ok && retry.duplicate);
+    assert.equal(retry.message.messageId, second.message.messageId);
+    assert.equal(restarted.readTaskContext(codexIdentity, codex.id).context?.taskId, claude.id,
+      "the second recipient can address shared state using its own assigned task ID");
+    assert.equal(restarted.readTaskContext({ ...codexIdentity, sessionId: "foreign" }, codex.id).ok, false);
+    assert.equal(restarted.claimWork(codexIdentity, { taskId: codex.id, assignmentId: "verify-doc", workKey: "verify-doc", summary: "Verify" }).ok, true);
+    assert.equal(restarted.completeWork(claudeIdentity, claude.id, "verify-doc").ok, false,
+      "sharing a conversation does not transfer ownership of another agent's assignment");
+    assert.equal(restarted.completeWork(codexIdentity, codex.id, "verify-doc").ok, true);
+    const reply = restarted.send(claudeIdentity, { to: "codex", taskId: claude.id, replyToMessageId: second.message.messageId,
+      kind: "surface-handoff", summary: "Ready", progressKind: "artifact-changed", progressFingerprint: "ready" });
+    assert.ok(reply.ok);
+    assert.equal(reply.message.conversationId, first.message.conversationId);
+    assert.equal(reply.message.replyToMessageId, second.message.messageId);
+    assert.equal(sharedBroadcastRoot(store.snapshot().tasks, codex.id, { ...codexIdentity, sessionId: "foreign" }, "claude"), undefined);
+    assert.equal(sharedBroadcastRoot(store.snapshot().tasks, codex.id, codexIdentity, "other"), undefined);
+    const legacy = store.snapshot().tasks.map(task => task.a2a
+      ? { ...task, a2a: { ...task.a2a, taskId: codex.id } } : task);
+    assert.equal(sharedBroadcastRoot(legacy, codex.id, codexIdentity, "claude"), undefined,
+      "a preexisting thread rooted at the other task is not silently migrated");
+    const other = store.addTask({ from: "you", to: "claude", goal: "Unrelated work", origin: "human_typed",
+      broadcastId: "other-broadcast", idempotencyKey: "unrelated" }).task;
+    store.markDelivered([other.id], claudeIdentity.sessionId);
+    assert.equal(sharedBroadcastRoot(store.snapshot().tasks, other.id, claudeIdentity, "codex"), undefined,
+      "an agent from another broadcast cannot be joined to this workflow");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("owner runtime accepts one structured teammate message and invokes delivery once", async () => {
   const delivered: string[] = [];
