@@ -1458,15 +1458,41 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
           .describe("Peer context task IDs shown during this turn that you fully addressed. Do not list unread messages or unfinished requests. Records them handled with this result, without another acknowledgement turn."),
         replyMessageId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/).optional()
           .describe("When finishing a peer message you already fully answered with m9r_team_message, name that exact outgoing messageId. M9R validates its route and reuses it instead of creating a duplicate result reply. Omit when a new result reply is needed."),
+        ownerTaskResult: z.object({ taskId: z.string().regex(/^T[0-9]{1,12}$/), summary: z.string().min(1).max(20_000),
+          completion: taskCompletionReportSchema }).strict().optional()
+          .describe("When completing a peer message also finishes your linked owner assignment, report that owner task separately here in the same call. Include it only after verifying all owner requirements; no completion is inferred from a peer result."),
       },
     },
-    async ({ token, taskId: requestedTaskId, summary, completion, handledPeerTaskIds, replyMessageId }) => {
+    async ({ token, taskId: requestedTaskId, summary, completion, handledPeerTaskIds, replyMessageId, ownerTaskResult }) => {
       const report = taskCompletionReport(summary, completion);
       const { identity, token: authToken } = await authenticate(token);
       const taskId = resolveResultTaskId(identity, requestedTaskId);
       const existing = deps.store.getTask?.(taskId);
       if (!existing) throw new Error(`No task ${taskId} found.`);
       if (existing.to !== identity.handle && existing.to !== roomHandle(identity, identity.handle)) throw new Error(`Task ${taskId} was not sent to you (@${identity.handle}), refusing to report a result for it.`);
+      const linkedOwner = (() => {
+        if (existing.origin !== "agent_initiated" || inRoom(identity)) return undefined;
+        const seen = new Set<string>();
+        let parent = existing;
+        while (!seen.has(parent.id)) {
+          seen.add(parent.id);
+          const parentId = parent.a2a?.taskId ?? parent.replyToTaskId ?? parent.parentTaskId;
+          if (!parentId) break;
+          const next = deps.store.getTask(parentId);
+          if (!next) break;
+          parent = next;
+          if (parent.from !== "you") continue;
+          return parent.to === identity.handle ? parent : parent.broadcastId
+            ? deps.store.tasksForSession(identity.handle, identity.sessionId).find(task => task.from === "you" && task.broadcastId === parent.broadcastId)
+            : undefined;
+        }
+        return undefined;
+      })();
+      if (ownerTaskResult && (report.status !== "completed" || ownerTaskResult.completion.status !== "completed"
+        || !linkedOwner || linkedOwner.id !== ownerTaskResult.taskId || linkedOwner.deliveredSession !== identity.sessionId
+        || linkedOwner.receipt?.state === "paused" || linkedOwner.receipt?.state === "canceled" || linkedOwner.receipt?.state === "failed")) {
+        throw new Error("An owner result requires a completed peer result and the linked owner task delivered to this session; no result was recorded.");
+      }
       // The current result already resolves its own task. Prompt delivery is
       // durable presentation evidence too, including after MCP reconnect.
       const peerIds = [...new Set(handledPeerTaskIds ?? [])].filter(id => id !== taskId);
@@ -1502,26 +1528,20 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       // Completing a peer message is not proof that the owner's objective is
       // finished. Keep that distinction visible after handoffs/context resets.
       let ownerReminder = "";
-      if (report.status === "completed" && existing.origin === "agent_initiated" && !inRoom(identity)) {
-        const seen = new Set<string>();
-        let parent = existing;
-        while (!seen.has(parent.id)) {
-          seen.add(parent.id);
-          const parentId = parent.a2a?.taskId ?? parent.replyToTaskId ?? parent.parentTaskId;
-          if (!parentId) break;
-          const next = deps.store.getTask(parentId);
-          if (!next) break;
-          parent = next;
-          if (parent.from !== "you") continue;
-          const ownerTask = parent.to === identity.handle ? parent : parent.broadcastId
-            ? deps.store.tasksForSession(identity.handle, identity.sessionId).find(task => task.from === "you" && task.broadcastId === parent.broadcastId)
-            : undefined;
-          if (ownerTask && !ownerTask.resultSummary && ownerTask.deliveredSession === identity.sessionId
-            && ownerTask.receipt?.state !== "paused" && ownerTask.receipt?.state !== "canceled" && ownerTask.receipt?.state !== "failed") {
-            ownerReminder = ` This resolves peer message ${taskId}, not owner task ${ownerTask.id}. Continue any remaining owner requirements. Only once all are verified, report m9r_result with taskId ${ownerTask.id}; otherwise preserve its incomplete outcome.`;
-          }
-          break;
+      if (ownerTaskResult && linkedOwner) {
+        try {
+          const ownerReport = taskCompletionReport(ownerTaskResult.summary, ownerTaskResult.completion);
+          const recorded = deps.web?.recordAgentTaskResult
+            ? await deps.web.recordAgentTaskResult(authToken, linkedOwner.id, ownerTaskResult.summary, ownerReport)
+            : deps.store.recordTaskResult(authToken, linkedOwner.id, ownerTaskResult.summary, ownerReport);
+          ownerReminder = recorded.ok ? ` Explicitly recorded the linked owner result for ${linkedOwner.id}.`
+            : ` The peer result was recorded, but the linked owner result was not: ${recorded.error ?? "owner broker refused it"}. Report ${linkedOwner.id} separately after resolving the error.`;
+        } catch {
+          ownerReminder = ` The peer result was recorded, but the linked owner result could not be confirmed. Inspect ${linkedOwner.id} before retrying its result.`;
         }
+      } else if (report.status === "completed" && linkedOwner && !linkedOwner.resultSummary && linkedOwner.deliveredSession === identity.sessionId
+        && linkedOwner.receipt?.state !== "paused" && linkedOwner.receipt?.state !== "canceled" && linkedOwner.receipt?.state !== "failed") {
+        ownerReminder = ` This resolves peer message ${taskId}, not owner task ${linkedOwner.id}. Continue any remaining owner requirements. Only once all are verified, report m9r_result with taskId ${linkedOwner.id}; otherwise preserve its incomplete outcome.`;
       }
       return { content: [{ type: "text", text: report.status === "incomplete"
         ? `Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed.${inRoom(identity) ? " M9R will deliver the reply to the sender's room." : (answerText || " The sender can retrieve the blocker with m9r_inbox.")}`

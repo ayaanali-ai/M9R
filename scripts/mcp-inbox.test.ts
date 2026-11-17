@@ -1142,6 +1142,60 @@ test("root completion survives reconstructed MCP context without inferring compl
   } finally { t.done(); }
 });
 
+test("a verified peer handoff can explicitly complete its linked owner assignment in the same result call", async () => {
+  const t = setup();
+  try {
+    const owner = t.store.addTask({ from: "you", to: "codex", goal: "Append, verify, and save", origin: "human_typed", broadcastId: "handoff", idempotencyKey: "owner-codex" }).task;
+    const peerOwner = t.store.addTask({ from: "you", to: "claude", goal: "Append, verify, and save", origin: "human_typed", broadcastId: "handoff", idempotencyKey: "owner-claude" }).task;
+    t.store.markDelivered([owner.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: owner.id, summary: "Waiting for the handoff",
+      completion: { status: "incomplete", remainingWork: ["Append, verify, and save"] } });
+    const child = t.store.addTask({ from: "claude", to: "codex", goal: "Ready for you to append", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "c1", targetSession: "x1", idempotencyKey: "handoff-child",
+      a2a: { taskId: peerOwner.id, conversationId: "handoff-conversation", messageId: "handoff-message", senderAgentId: "agent-claude",
+        recipientAgentId: "agent-codex", replyDepth: 0, kind: "surface-handoff", summary: "Ready for you to append" } }).task;
+    t.store.markDelivered([child.id], "x1");
+    const report = (t.server as unknown as ToolServer)._registeredTools.m9r_result.handler;
+    const result = { token: t.codex, taskId: child.id, summary: "Appended the second activity and saved",
+      completion: { status: "completed", remainingWork: [] },
+      ownerTaskResult: { taskId: owner.id, summary: "Both activities verified in the saved file", completion: { status: "completed", remainingWork: [] } } };
+    await assert.rejects(report({ ...result, ownerTaskResult: { ...result.ownerTaskResult, taskId: peerOwner.id } }), /linked owner task/);
+    assert.equal(t.store.getTask(child.id)?.receipt?.state, "provider_received", "invalid owner routing records neither result");
+    assert.equal(t.store.getTask(owner.id)?.receipt?.state, "uncertain");
+    const response = await report(result);
+    assert.match(response.content[0].text, new RegExp(`Explicitly recorded the linked owner result for ${owner.id}`));
+    assert.equal(t.store.getTask(child.id)?.receipt?.state, "completed");
+    assert.equal(t.store.getTask(owner.id)?.receipt?.state, "completed");
+    assert.notEqual(t.store.getTask(peerOwner.id)?.receipt?.state, "completed", "one agent cannot complete a teammate's owner task");
+    const repeated = await report(result);
+    assert.match(repeated.content[0].text, new RegExp(`Explicitly recorded the linked owner result for ${owner.id}`),
+      "a retry after a lost response reuses the same recorded outcomes");
+  } finally { t.done(); }
+});
+
+test("a broker refusal of the linked owner result is reported without undoing or inventing the peer result", async () => {
+  const t = setup();
+  try {
+    const owner = t.store.addTask({ from: "you", to: "codex", goal: "Save the file", origin: "human_typed", idempotencyKey: "partial-owner" }).task;
+    t.store.markDelivered([owner.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: owner.id, summary: "Waiting for review",
+      completion: { status: "incomplete", remainingWork: ["Verify the file"] } });
+    const child = t.store.addTask({ from: "claude", to: "codex", goal: "Review the file", origin: "agent_initiated",
+      standingRuleApplies: true, targetSession: "x1", fromSession: "c1", replyToTaskId: owner.id, idempotencyKey: "partial-child" }).task;
+    t.store.markDelivered([child.id], "x1");
+    const remote = createM9rMcpServer({ store: t.store, web: { recordAgentTaskResult: async (token, taskId, summary, completion, handled, reply) =>
+      taskId === owner.id ? { ok: false, error: "temporary store refusal" } : t.store.recordTaskResult(token, taskId, summary, completion, handled, reply) } });
+    try {
+      const report = (remote as unknown as ToolServer)._registeredTools.m9r_result.handler;
+      const response = await report({ token: t.codex, taskId: child.id, summary: "File verified", completion: { status: "completed", remainingWork: [] },
+        ownerTaskResult: { taskId: owner.id, summary: "Saved file verified", completion: { status: "completed", remainingWork: [] } } });
+      assert.match(response.content[0].text, /peer result was recorded, but the linked owner result was not: temporary store refusal/);
+      assert.equal(t.store.getTask(child.id)?.receipt?.state, "completed");
+      assert.equal(t.store.getTask(owner.id)?.receipt?.state, "uncertain");
+    } finally { await remote.close(); }
+  } finally { t.done(); }
+});
+
 test("explicit task selection survives older operation activity and is invalidated by pause", async () => {
   const dispatched: string[] = [];
   const t = setup({ web: { taskStageAction: async (_token, taskId) => {
