@@ -326,7 +326,7 @@ function build() {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"'));
   }
-  for (const name of ["computer-use-recovery", "computer-use-latency", "task-completion-contract"]) {
+  for (const name of ["computer-use-recovery", "computer-use-latency", "task-completion-contract", "task-working-context", "observation-payload"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"'));
   }
