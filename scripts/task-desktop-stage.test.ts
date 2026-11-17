@@ -1,6 +1,6 @@
 import { serializeStageFailure } from "../src/lib/native/stage-errors";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -665,6 +665,32 @@ test("a stage operation id makes a replay return its durable receipt without mov
     assert.equal(first.operationReceipt?.status, "applied");
     assert.equal(replay.operationReceipt?.status, "already_applied");
     assert.equal(replay.actionExecuted, false);
+  } finally { f.cleanup(); }
+});
+
+test("same-size atomic state replacement cannot hide a settled operation behind a cached running receipt", () => {
+  const f = fixture(true);
+  try {
+    const operation = { handle: "codex", sessionId: "session-one", taskId: f.task.id,
+      operationId: "same-size-receipt", fingerprint: "a".repeat(64) };
+    f.store.claimStageOperation(operation);
+    const path = join(f.root, "state.json");
+    const fixedTime = new Date("2026-11-16T00:00:00Z");
+    utimesSync(path, fixedTime, fixedTime);
+    assert.equal(f.store.inspectStageOperation(operation)?.state, "in_progress");
+    const before = statSync(path);
+    const next = JSON.parse(readFileSync(path, "utf8"));
+    next.stageOperations[0].state = "applied"; // running/applied have equal byte lengths
+    const replacement = join(f.root, "replacement.json");
+    writeFileSync(replacement, JSON.stringify(next));
+    utimesSync(replacement, fixedTime, fixedTime);
+    renameStateFile(replacement, path);
+    assert.equal(statSync(path).mtimeMs, before.mtimeMs);
+    assert.equal(statSync(path).size, before.size);
+    assert.equal(f.store.inspectStageOperation(operation)?.state, "applied");
+    f.store.claimStageOperation(operation);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).stageOperations[0].state, "applied",
+      "a subsequent write must not resurrect the cached running state");
   } finally { f.cleanup(); }
 });
 

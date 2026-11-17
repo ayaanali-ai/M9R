@@ -564,13 +564,18 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   // re-reconciling the whole file on every call -- or even just
   // structuredClone()-ing a multi-MB result on every call -- was burning a
   // full CPU core continuously, since some callers poll every 150ms; skip
-  // straight to the cached object when the file's mtime+size haven't moved.
+  // straight to the cached object when the file identity and metadata haven't
+  // moved. Same-size atomic replacements can retain the same mtime.
   function readState(): StoreState {
-    if (!existsSync(statePath)) return emptyState();
-    const stat = statSync(statePath);
-    const fileBytes = stat.size;
+    if (!existsSync(statePath)) {
+      cachedState = undefined;
+      cachedStateFingerprint = undefined;
+      return emptyState();
+    }
+    const stat = statSync(statePath, { bigint: true });
+    const fileBytes = Number(stat.size);
     if (fileBytes > maxStateBytes) throw new LocalStateCapacityError(fileBytes, maxStateBytes);
-    const fingerprint = `${stat.mtimeMs}:${fileBytes}`;
+    const fingerprint = `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${stat.size}`;
     if (cachedState && cachedStateFingerprint === fingerprint) return cachedState;
     const parsedState = parseAndReconcileState();
     cachedState = parsedState;
@@ -645,6 +650,9 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const tmp = `${statePath}.tmp-${process.pid}`;
       writeFileSync(tmp, serialized, "utf8");
       renameWithRetry(tmp, statePath);
+      // Never reuse a pre-write snapshot, even if filesystem timestamps collide.
+      cachedState = undefined;
+      cachedStateFingerprint = undefined;
       return out;
     } finally {
       rmSync(join(lockPath, ownerName));
