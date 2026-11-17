@@ -17,6 +17,48 @@ const roster = {
   ],
 };
 
+test("a teammate can send a bounded informational update without pretending it is delegated work", () => {
+  const delivered: string[] = [];
+  const runtime = createMultiplayerRuntime({ roster, delivery: message => { delivered.push(message.messageId); return { ok: true, taskId: "T9" }; } });
+  const sent = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: "shared-work", kind: "update",
+    summary: "I'm preparing the document; I'll tell you when it's ready.", progressKind: "observation", progressFingerprint: "preparing",
+    idempotencyKey: "informational-update" });
+  assert.ok(sent.ok);
+  assert.equal(sent.message.kind, "update");
+  assert.equal(sent.delivery.state, "queued");
+  const reply = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: "shared-work", kind: "help-request",
+    summary: "Which format should I use?", replyToMessageId: sent.message.messageId,
+    progressKind: "observation", progressFingerprint: "question-about-format" });
+  assert.ok(reply.ok, "an update can still receive a useful reply");
+  assert.equal(reply.message.replyToMessageId, sent.message.messageId);
+  assert.equal(delivered.length, 2);
+  const retry = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: "shared-work", kind: "update",
+    summary: "I'm preparing the document; I'll tell you when it's ready.", progressKind: "observation", progressFingerprint: "preparing",
+    idempotencyKey: "informational-update" });
+  assert.ok(retry.ok && retry.duplicate);
+  assert.equal(delivered.length, 2, "retry does not queue a second update");
+});
+
+test("informational updates retain the existing no-progress and recovery guards", () => {
+  const delivered: string[] = [];
+  const runtime = createMultiplayerRuntime({ roster, delivery: message => { delivered.push(message.messageId); return { ok: true, taskId: `T${delivered.length}` }; } });
+  let parent: string | undefined;
+  for (let index = 0; index < 3; index++) {
+    const sent = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: "update-work", kind: "update",
+      summary: `Still inspecting, update ${index}`, progressKind: "observation", progressFingerprint: "same-state",
+      idempotencyKey: `update-${index}`, ...(parent ? { replyToMessageId: parent } : {}) });
+    assert.ok(sent.ok);
+    assert.equal(sent.delivery.state, index === 2 ? "held-no-progress" : "queued");
+    parent = sent.message.messageId;
+  }
+  const changed = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: "update-work", kind: "update",
+    summary: "The document is ready.", progressKind: "artifact-changed", progressFingerprint: "document-ready",
+    idempotencyKey: "ready-update", replyToMessageId: parent });
+  assert.ok(changed.ok);
+  assert.equal(changed.delivery.state, "queued");
+  assert.equal(delivered.length, 3);
+});
+
 test("both delivered broadcast recipients start one durable conversation without weakening root and reply guards", () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-broadcast-conversation-"));
   try {

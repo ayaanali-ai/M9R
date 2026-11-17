@@ -277,7 +277,7 @@ export function applyAgentMcpStoreMutation(
         || (value.kind !== undefined && typeof value.kind !== "string") || (value.priority !== undefined && typeof value.priority !== "string")) {
         return { status: 400, body: { ok: false, error: "Invalid structured M9R teammate message." } };
       }
-      const actionableKinds = new Set(["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"]);
+      const actionableKinds = new Set(["update", "help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"]);
       if (typeof value.taskId === "string" && actionableKinds.has(String(value.kind ?? "delegate"))
         && (typeof value.progressFingerprint !== "string" || typeof value.progressKind !== "string")) {
         return { status: 400, body: { ok: false, error: "A task-bound teammate message needs a progressFingerprint and progressKind. Use a stable fingerprint of the current task state so M9R can stop repeated no-progress handoffs." } };

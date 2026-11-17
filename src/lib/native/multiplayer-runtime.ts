@@ -346,7 +346,7 @@ export function createMultiplayerRuntime(input: {
     // existing depth and message bounds still apply to those legacy replies.
     if (!taskId && !parentReference) return { ok: false, error: "A structured teammate conversation must belong to a shared task. Use m9r_send for a separate delegated task." };
     const kind = inputValue.kind ?? "delegate";
-    const actionableKinds = new Set<A2AMessageKind>(["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"]);
+    const actionableKinds = new Set<A2AMessageKind>(["update", "help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"]);
     if (taskId && actionableKinds.has(kind) && (!inputValue.progressFingerprint || !inputValue.progressKind)) {
       return { ok: false, error: "A task-bound teammate message needs a progressFingerprint and progressKind so repeated no-progress turns can be held safely." };
     }

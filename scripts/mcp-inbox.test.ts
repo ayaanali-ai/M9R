@@ -644,6 +644,51 @@ test("m9r_send never claims a message was sent when it actually landed pending",
   } finally { t.done(); }
 });
 
+test("a completed informational update does not generate an acknowledgement, while an incomplete outcome is returned", async () => {
+  const t = setup();
+  try {
+    const makeUpdate = (key: string) => t.store.addTask({ from: "claude", to: "codex", goal: "I'm preparing the document.",
+      origin: "agent_initiated", fromSession: "c1", targetSession: "x1", standingRuleApplies: true, idempotencyKey: key,
+      a2a: { taskId: "T90", conversationId: "update-room", messageId: key, senderAgentId: "agent-claude", recipientAgentId: "agent-codex",
+        replyDepth: 0, kind: "update", summary: "I'm preparing the document." } }).task;
+    const update = makeUpdate("informational-message");
+    t.store.markDelivered([update.id], "x1");
+    const response = await t.call("m9r_result", { token: t.codex, taskId: update.id, summary: "Noted the update.",
+      completion: { status: "completed", remainingWork: [] } });
+    assert.match(response, /No automatic reply was queued/);
+    assert.equal(t.store.getTask(update.id)?.receipt?.state, "completed");
+    assert.equal(t.store.tasksFor("claude").filter(task => task.replyToTaskId === update.id).length, 0);
+    const blocked = makeUpdate("informational-blocker");
+    t.store.markDelivered([blocked.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: blocked.id, summary: "I need clarification before proceeding.",
+      completion: { status: "incomplete", remainingWork: ["Clarify which document"] } });
+    assert.ok(t.store.tasksFor("claude").some(task => task.replyToTaskId === blocked.id && task.goal.includes("Clarify which document")),
+      "a genuine blocker is still returned to the sender");
+    const conversational = makeUpdate("update-with-question");
+    t.store.markDelivered([conversational.id], "x1");
+    const reply = t.store.addTask({ from: "codex", to: "claude", goal: "Which document format should I use?", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "x1", targetSession: "c1", idempotencyKey: "meaningful-question",
+      a2a: { taskId: "T90", conversationId: "update-room", messageId: "meaningful-question", senderAgentId: "agent-codex",
+        recipientAgentId: "agent-claude", replyDepth: 1, replyToMessageId: conversational.a2a!.messageId,
+        kind: "help-request", summary: "Which document format should I use?" } }).task;
+    t.store.setDelivery(reply.id, { state: "deferred" });
+    const explicit = await t.call("m9r_result", { token: t.codex, taskId: conversational.id, summary: "Asked about the format.",
+      completion: { status: "completed", remainingWork: [] }, replyMessageId: "meaningful-question" });
+    assert.match(explicit, /already sent a structured reply/);
+    assert.equal(t.store.tasksFor("claude").filter(task => task.id === reply.id || task.replyToTaskId === conversational.id).length, 1,
+      "a real question survives and no duplicate result is sent");
+    const request = t.store.addTask({ from: "claude", to: "codex", goal: "Please check the file.", origin: "agent_initiated",
+      standingRuleApplies: true, fromSession: "c1", targetSession: "x1", idempotencyKey: "real-request",
+      a2a: { taskId: "T90", conversationId: "request-room", messageId: "request-message", senderAgentId: "agent-claude",
+        recipientAgentId: "agent-codex", replyDepth: 0, kind: "verification-request", summary: "Please check the file." } }).task;
+    t.store.markDelivered([request.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: request.id, summary: "The file is correct.",
+      completion: { status: "completed", remainingWork: [] } });
+    assert.ok(t.store.tasksFor("claude").some(task => task.replyToTaskId === request.id && task.goal.includes("The file is correct")),
+      "a genuine request still returns its result");
+  } finally { t.done(); }
+});
+
 test("a structured A2A reply suppresses the duplicate automatic task-result reply", async () => {
   const t = setup();
   try {
@@ -1029,6 +1074,23 @@ test("a teammate's plain result reply surfaces mid-turn even though it carries n
     await Promise.all([claudeConn.client.close(), claudeConn.server.close(), codexConn.client.close(), codexConn.server.close()]);
     rmSync(storeRoot, { recursive: true, force: true });
   }
+});
+
+test("team-message schema exposes informational updates without normalizing them into work requests", async () => {
+  let received: Record<string, unknown> | undefined;
+  const t = setup({ web: { sendA2A: async (_token, input) => { received = input as unknown as Record<string, unknown>;
+    return { ok: true, message: { messageId: "update-message", conversationId: "update-thread" },
+      delivery: { state: "queued", taskId: "T99" }, recipientAgentIds: ["codex"] } as never; } } });
+  try {
+    const args = { token: t.claude, to: "codex", taskId: "T1", summary: "I'm preparing the document.",
+      kind: "update", progressKind: "observation", progressFingerprint: "preparing" };
+    const schema = (t.server as unknown as ToolServer)._registeredTools.m9r_team_message.inputSchema as { safeParse(input: unknown): { success: boolean } };
+    assert.equal(schema.safeParse(args).success, true);
+    await t.call("m9r_team_message", args);
+    assert.equal(received?.kind, "update");
+    assert.equal(received?.summary, args.summary);
+    await assert.rejects(t.call("m9r_team_message", { ...args, progressFingerprint: undefined }), /progressFingerprint/);
+  } finally { t.done(); }
 });
 
 test("long progress messages preserve their text and normalize progress routing before broker delivery", async () => {

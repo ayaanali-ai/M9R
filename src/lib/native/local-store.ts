@@ -2985,6 +2985,10 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           && candidate.receipt?.state !== "canceled" && candidate.receipt?.state !== "paused" && candidate.receipt?.state !== "failed"
           && candidate.delivery?.state !== "failed" && candidate.lifecycle?.state !== "failed");
         if (explicitReply) return { answerTaskId: explicitReply.id, answerDelivery: "explicit-reply-queued" as const };
+        // An explicit informational update does not ask for an acknowledgement.
+        // Incomplete outcomes still return their blocker to the sender, and a
+        // real structured reply remains independently routable above.
+        if (task.a2a?.kind === "update" && report.status === "completed") return { answerDelivery: "not-applicable" as const };
         const replyDepth = task.replyDepth + 1;
         if (replyDepth > MAX_AGENT_REPLY_DEPTH) return { answerDelivery: "depth-limit" as const };
         const replyKey = `agent-result:${task.id}`;

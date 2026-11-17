@@ -77,23 +77,29 @@ test("busy agents exchange a verification request and answer without acknowledge
     const request = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: claudeRoot.id, kind: "verification-request",
       summary: "Please check the shared artifact independently", progressKind: "artifact-changed", progressFingerprint: "artifact-ready" });
     assert.equal(request.ok, true); if (!request.ok) return;
+    const update = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: claudeRoot.id, kind: "update",
+      replyToMessageId: request.message.messageId, summary: "The saved file is on the desktop.",
+      progressKind: "artifact-changed", progressFingerprint: "file-saved" });
+    assert.equal(update.ok, true); if (!update.ok) return;
     const call = async (handle: string, name: string, args: Record<string, unknown>) => {
       const server = servers[handle === "codex" ? 0 : 1] ?? createM9rMcpServer({ store });
       servers[handle === "codex" ? 0 : 1] = server;
       const tools = (server as unknown as { _registeredTools: Record<string, { handler(args: unknown): Promise<{ content: Array<{ text?: string }> }> }> })._registeredTools;
       return tools[name].handler({ token: store.identityTokenFor(handle, owner.sessionIdOf(handle)!)!, ...args });
     };
-    assert.match(JSON.stringify(await call("codex", "m9r_agents", { activeWindowMinutes: 10 })), /check the shared artifact independently/);
+    const duringWork = JSON.stringify(await call("codex", "m9r_agents", { activeWindowMinutes: 10 }));
+    assert.match(duringWork, /check the shared artifact independently/);
+    assert.match(duringWork, /The saved file is on the desktop/);
     const answer = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: codexRoot.id, kind: "edit-confirmation",
       replyToMessageId: request.message.messageId, summary: "The synthetic verification is complete; here is the result", progressKind: "postcondition-verified", progressFingerprint: "artifact-checked" });
     assert.equal(answer.ok, true); if (!answer.ok) return;
-    await call("codex", "m9r_result", { taskId: codexRoot.id, summary: "Synthetic check completed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [request.delivery.taskId] });
+    await call("codex", "m9r_result", { taskId: codexRoot.id, summary: "Synthetic check completed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [request.delivery.taskId, update.delivery.taskId] });
     assert.match(JSON.stringify(await call("claude", "m9r_agents", { activeWindowMinutes: 10 })), /synthetic verification is complete/);
     await call("claude", "m9r_result", { taskId: claudeRoot.id, summary: "Synthetic verification reviewed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [answer.delivery.taskId] });
     for (const connection of connections.values()) connection.release();
     await new Promise(done => setTimeout(done, 400));
     assert.equal([...connections.values()].reduce((sum, connection) => sum + connection.sent.length, 0), 2, "one original provider turn per agent; no acknowledgement-only wakeups");
-    assert.equal(store.snapshot().tasks.length, 4, "two owner assignments plus the useful request and answer only");
+    assert.equal(store.snapshot().tasks.length, 5, "two assignments plus the useful request, update and answer; no acknowledgements");
     assert.ok(store.snapshot().tasks.every(task => task.receipt?.state === "completed"));
   } finally {
     for (const connection of connections.values()) connection.release();
@@ -474,6 +480,51 @@ test("managed provider bridge returns A2A results to the pinned sender session",
     await new Promise((resolve) => setTimeout(resolve, 350));
     assert.equal(store.getTask(wrongSession.id)?.deliveredAt, undefined,
       "a targeted teammate task waits instead of spilling into a different provider session");
+  } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an informational teammate update reaches the managed provider once with its full text and no forced acknowledgement", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-conversation-update-"));
+  const store = createLocalStore(root);
+  const sessions = new Map<string, string>();
+  const connections = new Map<string, ReturnType<typeof gatedConnection>>();
+  const owner = createManagedProviderOwner({ agents: [{ handle: "claude", provider: "claude-code", folder: root },
+    { handle: "codex", provider: "codex", folder: root }], storeRoot: root, repoRoot: root, brokerPort: 0, store, env: {},
+    createConnection: (profile, context) => { sessions.set(profile.handle, context.sessionId); const connection = gatedConnection(profile);
+      connection.release(); connections.set(profile.handle, connection); return connection.connection; } });
+  try {
+    assert.deepEqual((await owner.start()).failures, []);
+    const fullText = `I'm preparing the document. ${"The handoff will follow once the first part is ready. ".repeat(7)}`;
+    const excerpt = `${fullText.slice(0, 277)}...`;
+    const details = { messageText: fullText, artifact: "shared document" };
+    const candidate = store.addTask({ from: "codex", to: "claude", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: sessions.get("codex"), targetSession: sessions.get("claude"), idempotencyKey: "human-update",
+      goal: `[M9R team conversation conversation-one; task T90; message message-one; kind update] @codex: ${excerpt}\nStructured details: ${JSON.stringify(details)}`,
+      a2a: { taskId: "T90", conversationId: "conversation-one", messageId: "message-one", senderAgentId: "agent-codex",
+        recipientAgentId: "agent-claude", replyDepth: 0, kind: "update", summary: excerpt,
+        wireMessage: { schemaVersion: 1, runId: "run-one", branchId: "branch-codex", agentId: "agent-codex", taskId: "T90",
+          conversationId: "conversation-one", messageId: "message-one", recipient: { kind: "agent", agentId: "agent-claude" },
+          kind: "update", priority: "normal", idempotencyKey: "human-update", createdAt: Date.now(), summary: excerpt, details, replyDepth: 0 } } }).task;
+    store.setDelivery(candidate.id, { state: "deferred" });
+    for (let attempt = 0; attempt < 200 && !connections.get("claude")?.sent.length; attempt++) await new Promise(done => setTimeout(done, 10));
+    const prompt = connections.get("claude")?.sent[0]?.prompt ?? "";
+    assert.match(prompt, new RegExp(candidate.id));
+    assert.equal(prompt.split(fullText).length - 1, 1, "the complete teammate message appears exactly once");
+    assert.doesNotMatch(prompt, /\[M9R team conversation/, "the transport envelope is not repeated in the conversational text");
+    assert.match(prompt, /shared document/);
+    assert.match(prompt, /shared task: T90/);
+    assert.match(prompt, /message: message-one/);
+    assert.match(prompt, /no reply is required/i);
+    const legacy = store.addTask({ from: "codex", to: "claude", origin: "agent_initiated", standingRuleApplies: true,
+      fromSession: sessions.get("codex"), targetSession: sessions.get("claude"), idempotencyKey: "legacy-message",
+      goal: "Legacy full text with context that is absent from the short summary.",
+      a2a: { taskId: "T90", conversationId: "conversation-one", messageId: "legacy-message", senderAgentId: "agent-codex",
+        recipientAgentId: "agent-claude", replyDepth: 0, kind: "delegate", summary: "Legacy short summary" } }).task;
+    store.setDelivery(legacy.id, { state: "deferred" });
+    for (let attempt = 0; attempt < 200 && (connections.get("claude")?.sent.length ?? 0) < 2; attempt++) await new Promise(done => setTimeout(done, 10));
+    const legacyPrompt = connections.get("claude")?.sent[1]?.prompt ?? "";
+    assert.match(legacyPrompt, /Legacy full text with context that is absent from the short summary/,
+      "older durable messages without a structured envelope keep their original text");
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
 

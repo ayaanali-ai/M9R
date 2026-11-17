@@ -1023,12 +1023,12 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_team_message",
     {
-      description: "Send one structured peer message to a connected M9R agent inside an existing shared task. taskId is required; use m9r_send when assigning a separate task. Reuse the task's conversationId after the first message; replyToMessageId must be the exact messageId you are answering. Include a progressFingerprint and progressKind on actionable messages so M9R can hold repeated no-progress turns. The owner sees `summary` rendered as a speech bubble next to your cursor: write it the way you would actually say it to a teammate over chat (plain, specific, first person, no 'acknowledgement', 'recipient', or 'provider turn' language) -- `kind`/`progressKind`/`details` carry the routing metadata so `summary` itself never has to. If the teammate's last message proposed something different from your own view (a different plan, value, or approach), do not just restate your own proposal as 'agreed' -- name the specific thing they proposed and say what you're keeping, changing, or compromising on before treating it as settled. Send one concise message; do not poll for a reply or send acknowledgements just to keep the conversation alive. If prior thread context is missing, call m9r_inbox once with conversationId. The result distinguishes durable inbox queueing from provider receipt or start.",
+      description: "Talk directly to a teammate about the shared task. Use update for information that needs no answer, help-request for a real question, and surface-handoff when the other person can act now; use m9r_send for a separate assignment. Keep your message natural and specific: propose, disagree, ask, or report what matters without scripted greetings or acknowledgement-only replies. An update saying you will hand over later is not a handoff yet. taskId is required; use the conversationId and exact replyToMessageId when answering a prior message. Include progressFingerprint and progressKind to identify the observed state and prevent repeated no-progress turns. The owner sees summary in a cursor bubble, so make it readable on its own; details carry extra context. If prior context is missing, retrieve it once with m9r_inbox. Queueing does not mean the teammate has received or acted on a message.",
       inputSchema: {
         ...AUTH_FIELD,
         to: z.string().min(1).max(80).describe("Recipient handle without @."),
         summary: z.string().min(1).max(1_000).describe("The teammate message. Longer than 280 characters is preserved in details.messageText with a short cursor-bubble excerpt."),
-        kind: z.enum(["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request", "stop", "supersede", "operation-completed"]).default("delegate"),
+        kind: z.enum(["update", "help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request", "stop", "supersede", "operation-completed"]).default("delegate"),
         priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
         taskId: z.string().min(1).max(128).describe("Required shared task identifier; separate assigned work belongs in m9r_send."),
         conversationId: z.string().min(1).max(128).optional(),
@@ -1049,7 +1049,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         details = { ...details, messageText: summary };
         summary = `${summary.slice(0, 277)}...`;
       }
-      if (["help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"].includes(kind)
+      if (["update", "help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"].includes(kind)
         && (!progressFingerprint || !progressKind)) {
         throw new Error("A task-bound teammate message needs a progressFingerprint and progressKind so repeated no-progress turns can be held safely.");
       }
@@ -1516,7 +1516,9 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         if (!recorded.ok) throw new Error(recorded.error ?? `The owner broker could not record the result for ${taskId}.`);
         answer = recorded;
       }
-      const answerText = answer?.answerDelivery === "explicit-reply-queued" && answer.answerTaskId
+      const answerText = answer?.answerDelivery === "not-applicable" && existing.a2a?.kind === "update" && report.status === "completed"
+        ? " No automatic reply was queued for this informational update; send a teammate message if you have something useful to add."
+        : answer?.answerDelivery === "explicit-reply-queued" && answer.answerTaskId
         ? ` The teammate already sent a structured reply, durably queued as ${answer.answerTaskId}; M9R did not create a duplicate result message.`
         : answer?.answerTaskId
         ? ` Durably queued reply ${answer.answerTaskId} to @${existing.from} for its pinned M9R session; this confirms queueing, not provider receipt.`

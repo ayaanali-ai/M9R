@@ -117,6 +117,7 @@ export const multiplayerLeaseSchema = multiplayerCorrelationSchema.extend({
 });
 
 export const a2aMessageKindSchema = z.enum([
+  "update",
   "help-request",
   "help-result",
   "delegate",
