@@ -957,34 +957,34 @@ test("an unlabeled visual control carries no money signal, so it is clicked with
   } finally { f.cleanup(); }
 });
 
-test("an approved money-like stage click executes once with the approval on record", async () => {
+test("an approved money-like stage click still requires explicit foreground confirmation", async () => {
   const f = moneyFixture("Subscribe", true);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    const result = await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background") as { outcome: { status: string } };
+    const result = await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10, confirmFocusForeground: true }, "background") as { outcome: { status: string } };
     assert.equal(result.outcome.status, "confirmed");
     assert.equal(f.seen.length, 1);
     assert.deepEqual(f.clicks, [{ x: 10, y: 10 }]);
   } finally { f.cleanup(); }
 });
 
-test("a benign stage click never bothers the owner", async () => {
+test("a benign coordinate click in background mode never takes foreground input", async () => {
   const f = moneyFixture("Next", true);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background");
-    assert.equal(f.seen.length, 0, "standing approval covers non-money clicks without a hold");
-    assert.deepEqual(f.clicks, [{ x: 10, y: 10 }]);
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), /background-only delivery/);
+    assert.equal(f.seen.length, 0, "a benign coordinate click does not need a money review");
+    assert.deepEqual(f.clicks, [], "background mode must not inject the shared physical mouse");
   } finally { f.cleanup(); }
 });
 
-test("a point the driver cannot describe is treated as unlabeled and clicked without an owner hold", async () => {
+test("an unlabeled coordinate click in background mode does not inject physical input", async () => {
   const f = moneyFixture(undefined, false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background");
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 10, y: 10 }, "background"), /background-only delivery/);
     assert.equal(f.seen.length, 0, "a missing description is not a money signal");
-    assert.deepEqual(f.clicks, [{ x: 10, y: 10 }]);
+    assert.deepEqual(f.clicks, [], "background mode must not inject the shared physical mouse");
   } finally { f.cleanup(); }
 });
 
