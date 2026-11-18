@@ -2953,13 +2953,35 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
         // The recipient explicitly reported these messages handled in this turn.
         // Persist that outcome atomically with its result, without generating
         // acknowledgement messages that would themselves require another turn.
-        for (const peerId of new Set(handledPeerTaskIds)) {
+        // A verified structured reply is durable evidence that this session
+        // answered the specific review, even if its final report omitted the ID.
+        const verifiedReviews = new Map<string, Task>();
+        if (task.origin === "human_typed" && report.status === "completed") {
+          for (const answer of s.tasks) {
+            const msg = answer.a2a;
+            if (msg?.kind !== "help-result" || msg.progressKind !== "postcondition-verified"
+              || !msg.replyToMessageId || msg.taskId !== task.id || answer.from !== normalizeHandle(identity.handle)
+              || answer.fromSession !== identity.sessionId || !answer.targetSession || answer.retiredAt
+              || !["approved", "not_needed"].includes(answer.approval)
+              || ["failed", "paused", "canceled", "uncertain"].includes(answer.receipt?.state ?? "")) continue;
+            const peer = s.tasks.find(item => item.a2a?.messageId === msg.replyToMessageId
+              && item.a2a?.conversationId === msg.conversationId && item.a2a.kind === "verification-request");
+            if (!peer || peer.a2a?.taskId !== task.id || peer.to !== answer.from || peer.from !== answer.to
+              || peer.targetSession !== identity.sessionId || peer.fromSession !== answer.targetSession
+              || peer.resultSummary || peer.retiredAt || peer.dismissedAt
+              || !["approved", "not_needed"].includes(peer.approval)
+              || !["accepted", "dispatched", "provider_received", "started"].includes(peer.receipt?.state ?? "")
+              || s.stageOperations.some(op => op.taskId === peer.id && op.state === "running")) continue;
+            verifiedReviews.set(peer.id, answer);
+          }
+        }
+        for (const peerId of new Set([...handledPeerTaskIds, ...verifiedReviews.keys()])) {
           const peer = s.tasks.find(item => item.id === peerId)!;
           if (peer.resultSummary) continue;
           const at = now().toISOString();
           peer.deliveredAt ??= at;
           peer.deliveredSession = identity.sessionId;
-          peer.completion = { status: "completed", remainingWork: [], summary: `Handled during ${task.id}; the recipient explicitly reported this message fully addressed. See that task's result.`, updatedAt: at };
+          peer.completion = { status: "completed", remainingWork: [], summary: verifiedReviews.get(peerId)?.a2a?.summary ?? `Handled during ${task.id}; the recipient explicitly reported this message fully addressed. See that task's result.`, updatedAt: at };
           peer.resultSummary = peer.completion.summary;
           if (peer.delivery) peer.delivery = { ...peer.delivery, state: "done" };
           recordTaskReceipt(peer, { state: "provider_received", at, source: "provider-session", sessionId: identity.sessionId });

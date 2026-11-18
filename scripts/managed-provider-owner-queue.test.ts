@@ -74,10 +74,10 @@ test("busy agents exchange a verification request and answer without acknowledge
       delivery: createMultiplayerInboxDelivery({ store, agents: agents.map(agent => ({ handle: agent.handle, agentId: `agent-${agent.handle}` })), sessionIdOf: owner.sessionIdOf }) });
     const claudeRoot = store.tasksFor("claude").find(task => task.origin === "human_typed")!;
     const codexRoot = store.tasksFor("codex").find(task => task.origin === "human_typed")!;
-    const request = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: claudeRoot.id, kind: "verification-request",
+    const request = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: codexRoot.id, kind: "verification-request",
       summary: "Please check the shared artifact independently", progressKind: "artifact-changed", progressFingerprint: "artifact-ready" });
     assert.equal(request.ok, true); if (!request.ok) return;
-    const update = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: claudeRoot.id, kind: "update",
+    const update = runtime.sendFromHandle("claude", "claude-code", { to: "codex", taskId: codexRoot.id, kind: "update",
       replyToMessageId: request.message.messageId, summary: "The saved file is on the desktop.",
       progressKind: "artifact-changed", progressFingerprint: "file-saved" });
     assert.equal(update.ok, true); if (!update.ok) return;
@@ -90,10 +90,10 @@ test("busy agents exchange a verification request and answer without acknowledge
     const duringWork = JSON.stringify(await call("codex", "m9r_agents", { activeWindowMinutes: 10 }));
     assert.match(duringWork, /check the shared artifact independently/);
     assert.match(duringWork, /The saved file is on the desktop/);
-    const answer = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: codexRoot.id, kind: "edit-confirmation",
+    const answer = runtime.sendFromHandle("codex", "codex", { to: "claude", taskId: codexRoot.id, kind: "help-result",
       replyToMessageId: request.message.messageId, summary: "The synthetic verification is complete; here is the result", progressKind: "postcondition-verified", progressFingerprint: "artifact-checked" });
     assert.equal(answer.ok, true); if (!answer.ok) return;
-    await call("codex", "m9r_result", { taskId: codexRoot.id, summary: "Synthetic check completed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [request.delivery.taskId, update.delivery.taskId] });
+    await call("codex", "m9r_result", { taskId: codexRoot.id, summary: "Synthetic check completed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [update.delivery.taskId] });
     assert.match(JSON.stringify(await call("claude", "m9r_agents", { activeWindowMinutes: 10 })), /synthetic verification is complete/);
     await call("claude", "m9r_result", { taskId: claudeRoot.id, summary: "Synthetic verification reviewed", completion: { status: "completed", remainingWork: [] }, handledPeerTaskIds: [answer.delivery.taskId] });
     for (const connection of connections.values()) connection.release();
