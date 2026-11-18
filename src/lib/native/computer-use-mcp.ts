@@ -24,7 +24,7 @@ import { runComputerUseProgram } from "./computer-use-program";
 import { compactObservationPayload } from "./observation-payload";
 import type { WorkflowPreferenceLedger } from "./workflow-preferences";
 import type { ObservationModalityLedger } from "./observation-modality-ledger";
-import { selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
+import { requestedActionDelivery, selectActionDelivery, selectComputerUseRoute, type ComputerUseRouteDescriptor } from "./computer-use-router";
 import type { VerifiedIdentity } from "./identity-core";
 import type { ComputerOperationInput, LocalStore, StageOperationClaim } from "./local-store";
 import type { StageClientResult, WebBrokerClient } from "./web-broker-client";
@@ -1731,8 +1731,8 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       && routeCapabilities.includes(computerUseSystemCapability(action.control))) deliveryCapabilities.push("system.background-api");
     const delivery = selectActionDelivery({
       target: { capabilities: deliveryCapabilities },
-      requested: requestedForeground || mediaKeyRequest || needsExclusive ? "exclusive"
-        : record.context.kind === "desktop" && record.context.mode === "background" ? "background" : "auto",
+      requested: requestedActionDelivery(record.context.kind === "desktop" && record.context.mode === "background",
+        requestedForeground, mediaKeyRequest || needsExclusive),
       targetVisible: record.context.kind === "desktop" && record.context.view === "app",
       targetBackgroundSafe: deliveryProfile.backgroundSafe && !record.route.requiresOwnerInputLease,
       requiresPhysicalInput: deliveryProfile.requiresPhysicalInput,

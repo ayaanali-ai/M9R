@@ -72,7 +72,7 @@ function realService(root: string, store: ReturnType<typeof createLocalStore>) {
     manager,
     driver,
     stage: { env: {} },
-    readPolicy: () => ({ handles: ["codex"], controlHandles: ["codex"] }),
+    readPolicy: () => ({ handles: ["codex", "claude"], controlHandles: ["codex", "claude"] }),
     resolveStageAppForTest: () => ({ executable: NATIVE_HOST, args: ["--spawn-test-window"] }),
   });
   return {
@@ -90,14 +90,14 @@ function actionTimings(store: ReturnType<typeof createLocalStore>, taskId: strin
   return (store.getTask(taskId)?.stageTiming ?? []).filter((event) => event.phase === "action");
 }
 
-test("Phase 0 T1: two different real apps act concurrently, not serialized against each other", { timeout: 60_000 }, () =>
+test("Bilateral: two agents edit separate Windows fixtures concurrently and preserve foreground and pointer", { timeout: 60_000 }, () =>
   withRoot(async (root) => {
     const store = createLocalStore(root);
     const { manager, service, cleanup } = realService(root, store);
     const identityOne = store.issueIdentity("codex", "codex", "session-one");
-    const identityTwo = store.issueIdentity("codex", "codex", "session-two");
+    const identityTwo = store.issueIdentity("claude", "claude-code", "session-two");
     const taskOne = store.addTask({ from: "you", to: "codex", goal: "T1 window one", origin: "human_typed", idempotencyKey: "t1-one", targetSession: "session-one" }).task;
-    const taskTwo = store.addTask({ from: "you", to: "codex", goal: "T1 window two", origin: "human_typed", idempotencyKey: "t1-two", targetSession: "session-two" }).task;
+    const taskTwo = store.addTask({ from: "you", to: "claude", goal: "T1 window two", origin: "human_typed", idempotencyKey: "t1-two", targetSession: "session-two" }).task;
     try {
 
       const launchedOne = await service.launch(identityOne.token, taskOne.id, "test-window", "background");
@@ -107,6 +107,8 @@ test("Phase 0 T1: two different real apps act concurrently, not serialized again
       // Each action sleeps (via a deliberately slow text payload is not reliable timing control,
       // so instead we rely on real dispatch latency plus the queue's own timing records) -- the
       // real proof is in the recorded stageTiming windows below, not an assumption about speed.
+      const foreground = await manager.currentForegroundWindow();
+      const pointer = await manager.getOwnerCursorPosition();
       const [resultOne, resultTwo] = await Promise.all([
         service.act(identityOne.token, taskOne.id, { kind: "type", text: "from-window-one" }, "background"),
         service.act(identityTwo.token, taskTwo.id, { kind: "type", text: "from-window-two" }, "background"),
@@ -114,6 +116,7 @@ test("Phase 0 T1: two different real apps act concurrently, not serialized again
       assert.ok(resultOne, "window one's action completed");
       assert.ok(resultTwo, "window two's action completed");
 
+      store.flushStageTiming();
       const timingsOne = actionTimings(store, taskOne.id);
       const timingsTwo = actionTimings(store, taskTwo.id);
       assert.equal(timingsOne.length, 1);
@@ -138,6 +141,8 @@ test("Phase 0 T1: two different real apps act concurrently, not serialized again
       const textTwo = await waitForTestWindowContent(anchorTwo!.windowId, "from-window-two");
       assert.equal(textOne, "from-window-one", "window one received exactly its own text, never window two's");
       assert.equal(textTwo, "from-window-two", "window two received exactly its own text, never window one's");
+      assert.equal((await manager.currentForegroundWindow()).windowId, foreground.windowId);
+      assert.deepEqual(await manager.getOwnerCursorPosition(), pointer);
     } finally {
       try {
         await service.closeApp(identityOne.token, taskOne.id, "background");
@@ -168,6 +173,7 @@ test("Phase 0 T2: two concurrent actions on the same real target are serialized,
         service.act(identity.token, taskB.id, { kind: "type", text: "BBBB" }, "background"),
       ]);
 
+      store.flushStageTiming();
       const timingsA = actionTimings(store, taskA.id);
       const timingsB = actionTimings(store, taskB.id);
       assert.equal(timingsA.length, 1);

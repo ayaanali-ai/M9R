@@ -8,6 +8,13 @@ import type { TaskDeliveryMode } from "./multiplayer-task-context";
  */
 export type RequestedDelivery = "auto" | "background" | "visible" | "exclusive";
 
+/** A physical-only operation describes a limitation, never consent to leave background mode. */
+export function requestedActionDelivery(background: boolean, confirmedForeground: boolean, needsExclusive: boolean): RequestedDelivery {
+  if (confirmedForeground) return "exclusive";
+  if (background) return "background";
+  return needsExclusive ? "exclusive" : "auto";
+}
+
 export interface ActionDeliveryRequest {
   readonly target: { readonly capabilities: readonly string[] };
   readonly requested?: RequestedDelivery;

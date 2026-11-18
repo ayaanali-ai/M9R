@@ -1,6 +1,6 @@
 import { createCuaStageDriver, type CuaAgentCursorIdentity, type CuaStageTargetDescription } from "./cua-stage-driver";
 import type { WindowsSystemControlRequest } from "./windows-desktop-stage";
-import { selectActionDelivery } from "./multiplayer-action-policy";
+import { requestedActionDelivery, selectActionDelivery } from "./multiplayer-action-policy";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
 import { StageInputNotDispatchedError } from "./stage-errors";
 import { classifyWebActionRisk } from "./risk-core";
@@ -243,8 +243,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
   // Merely being in owner-preview/background mode never counts as an active
   // lease or approval.
   const requiresExclusive = profile.requiresPhysicalInput === true || profile.requiresForegroundTurn === true;
-  const requested = requestedFocus === true || mediaKeyRequest || requiresExclusive ? "exclusive"
-    : mode === "background" ? "background" : "auto";
+  const requested = requestedActionDelivery(mode === "background", requestedFocus === true, mediaKeyRequest || requiresExclusive);
   const delivery = selectActionDelivery({
     target: { capabilities: [...profile.capabilities] },
     requested,

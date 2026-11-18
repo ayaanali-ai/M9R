@@ -265,6 +265,8 @@ test("owner-preview actions use the visible route while explicit background mode
   assert.equal(options[3].confirmFocusForeground, true);
   assert.equal(options[3].allowForegroundEscalation, true);
   assert.equal(options.length, 4, "the native owner-work policy, not this planner, decides whether the foreground turn proceeds");
+  await assert.rejects(runTaskStageAction(driver, "preview", { kind: "hotkey", keys: ["Ctrl", "V"] }, identity, "background"),
+    /background-only delivery/, "a physical-only shortcut cannot implicitly acquire foreground in background mode");
 });
 
 test("Save As targets one exact app-owned dialog and keeps destination policy explicit", async () => {

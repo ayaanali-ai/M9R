@@ -11,7 +11,7 @@ import {
 
 // The action policy is kept separate from adapter selection so callers can
 // decide background/visible/exclusive delivery before choosing a route.
-export { selectActionDelivery } from "./multiplayer-action-policy";
+export { requestedActionDelivery, selectActionDelivery } from "./multiplayer-action-policy";
 export type { ActionDeliveryDecision, ActionDeliveryRequest, RequestedDelivery } from "./multiplayer-action-policy";
 
 const targetKindSchema = z.enum(["desktop", "desktop-window", "browser-chrome", "browser-tab", "browser-frame", "web-element"]);

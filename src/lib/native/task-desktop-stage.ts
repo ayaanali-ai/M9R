@@ -1021,6 +1021,12 @@ export function createTaskDesktopStageService(input: {
         // request belongs to the same identity/session that owns this stage;
         // that is the actual ownership boundary, not which taskId is attached.
         const replacement = ownedBeforeFailure && mode === "owner-preview" ? await manager.resolveWindowReplacement(name) : undefined;
+        if (ownedBeforeFailure && !replacement) {
+          throw new Error(
+            `The existing ${ownedBeforeFailure.appId} window is unavailable. M9R did not open a replacement, so the original document or tab stays the only target.`,
+            { cause: error },
+          );
+        }
         if (replacement && ownedBeforeFailure) {
           const rebound = { ...ownedBeforeFailure, windowId: replacement.windowId };
           ownedApps.set(name, rebound);
