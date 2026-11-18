@@ -46,3 +46,11 @@ test("background stage app selection documents attach-only behavior", () => {
   assert.match(stageAppTool, /without starting, presenting, or focusing an app/);
   assert.match(stageAppTool, /refuses when there are zero or multiple matches/);
 });
+
+test("semantic append is exposed as a verified background-safe text operation", () => {
+  const server = readFileSync(resolve("src/lib/native/mcp-server.ts"), "utf8");
+  const actions = readFileSync(resolve("src/lib/native/task-stage-actions.ts"), "utf8");
+  assert.match(server, /kind: z\.literal\("append_element"\)[\s\S]*Append to an exact accessible text field[\s\S]*verifies the full resulting value/);
+  assert.match(actions, /case "append_element"[\s\S]*input\.text\.replace[\s\S]*backgroundSafe: true/);
+  assert.match(server, /Use newline to append as a new line while preserving the field's current newline style/);
+});

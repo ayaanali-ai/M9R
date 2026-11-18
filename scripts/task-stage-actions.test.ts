@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { parseTaskStageAction, runTaskStageAction, taskStageActionDeliveryProfile } from "../src/lib/native/task-stage-actions";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
+import { composeAppendedValue } from "../src/lib/native/cua-stage-driver";
 import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
 import { createWebBrokerClient, type WebBrokerClient } from "../src/lib/native/web-broker-client";
 import { TASK_STAGE_POLICY_FILE } from "../src/lib/native/task-desktop-stage";
@@ -25,6 +26,10 @@ test("desktop action parser accepts common pointer and keyboard actions but reje
     { kind: "save_as", view: "app", path: "C:\\Users\\owner\\Desktop\\M9R Benchmark\\F1-Run1\\house.png", createParentDirectories: true });
   assert.deepEqual(parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "down" }),
     { kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "down" });
+  assert.deepEqual(parseTaskStageAction({ kind: "append_element", view: "app", ref: "window-ui-element-a-1", text: "new line", separator: "newline", expectedRole: "Edit" }),
+    { kind: "append_element", view: "app", ref: "window-ui-element-a-1", text: "new line", separator: "newline", expectedRole: "Edit" });
+  assert.throws(() => parseTaskStageAction({ kind: "append_element", ref: "window-ui-element-a-1", text: "new line" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "append_element", view: "app", ref: "window-ui-element-a-1", text: "new line", separator: "paragraph" }), /Invalid append text or separator/);
   assert.deepEqual(parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "right", granularity: "large", expectedRole: "Pane" }),
     { kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "right", granularity: "large", expectedRole: "Pane" });
   assert.throws(() => parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "bottom" }), /Invalid accessibility scroll direction/);
@@ -49,6 +54,8 @@ test("delivery profiles distinguish semantic background routes from shared and f
   assert.deepEqual(taskStageActionDeliveryProfile({ kind: "capture" }), { capabilities: ["observe.accessibility"], backgroundSafe: true });
   assert.deepEqual(taskStageActionDeliveryProfile({ kind: "click_element", ref: "e1" }),
     { capabilities: ["input.click.element"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "append_element", ref: "e1", text: "line", separator: "newline" }),
+    { capabilities: ["input.text.replace"], backgroundSafe: true });
   assert.deepEqual(taskStageActionDeliveryProfile({ kind: "click", x: 10, y: 20 }),
     { capabilities: ["input.shared-os"], backgroundSafe: false, requiresPhysicalInput: true });
   assert.deepEqual(taskStageActionDeliveryProfile({ kind: "focus" }),
@@ -59,6 +66,15 @@ test("delivery profiles distinguish semantic background routes from shared and f
     { capabilities: ["system.background-api"], backgroundSafe: true });
   assert.deepEqual(taskStageActionDeliveryProfile({ kind: "window_frame", x: 0, y: 0, width: 400, height: 300 }),
     { capabilities: ["window.frame.no-activate"], backgroundSafe: true });
+});
+
+test("append value composition preserves existing content and newline style", () => {
+  assert.equal(composeAppendedValue("first", "second", "newline"), "first\nsecond");
+  assert.equal(composeAppendedValue("first\r\nsecond", "third", "newline"), "first\r\nsecond\r\nthird");
+  assert.equal(composeAppendedValue("first\n", "second", "newline"), "first\nsecond");
+  assert.equal(composeAppendedValue("first", "second", "none"), "firstsecond");
+  assert.equal(composeAppendedValue("", "first", "newline"), "first");
+  assert.throws(() => composeAppendedValue("existing", "too long", "newline", 10), /verification limit/);
 });
 
 test("type-then-Enter is one exact app-stage batch and reports a typed pre-dispatch refusal on step two as partial", async () => {
@@ -96,6 +112,17 @@ test("type-then-Enter is one exact app-stage batch and reports a typed pre-dispa
   await assert.rejects(runTaskStageAction(refusesText, "preview", { kind: "type_then_enter", view: "app", text: "query" }, identity),
     (error: unknown) => error instanceof DesktopInputNotDispatchedError && error.dispatchState === "not-dispatched");
   assert.equal(calls.includes("unexpected key"), false, "the key step never runs after a typed text refusal");
+});
+
+test("semantic append uses the dedicated background-safe append adapter", async () => {
+  const identity = { handle: "codex", sessionId: "session" };
+  const calls: unknown[][] = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const } };
+  const driver = { appendElement: async (...args: unknown[]) => { calls.push(args); return proof; } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  await runTaskStageAction(driver, "agent", { kind: "append_element", view: "app", ref: "field-1", text: "new line", separator: "newline", expectedRole: "Edit" }, identity, "background");
+  assert.deepEqual(calls, [["agent", "field-1", "new line", "newline", identity,
+    { expectedRole: "Edit", deliveryMode: "background" }]]);
 });
 
 test("owner-preview actions route through desktop-wide driver methods", async () => {

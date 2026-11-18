@@ -1144,7 +1144,7 @@ export function createTaskDesktopStageService(input: {
       let mutationRegionId: string | undefined;
       let fenceTransaction: MutationFenceTransaction | undefined;
       if (input.mutationFence) {
-        if (effectiveAction.kind === "replace_element" && effectiveAction.view === "app" && selected
+        if ((effectiveAction.kind === "replace_element" || effectiveAction.kind === "append_element") && effectiveAction.view === "app" && selected
           && typeof driver.valueMutationRegion === "function") {
           mutationRegionId = await driver.valueMutationRegion(name, effectiveAction.ref,
             { role: effectiveAction.expectedRole, label: effectiveAction.expectedLabel }, identity);

@@ -184,6 +184,15 @@ export interface CuaStageActionProof {
   saveAs?: { path: string; directory: string; fileName: string; persisted: boolean; sizeBytes?: string; directoryCreated?: boolean };
 }
 
+/** Construct an additive text-field value while preserving its existing line-ending style. */
+export function composeAppendedValue(existing: string, text: string, separator: "none" | "newline", maxChars = 4096): string {
+  const lineBreak = separator === "newline" && existing.length > 0 && !/[\r\n]$/.test(existing)
+    ? (existing.includes("\r\n") ? "\r\n" : "\n") : "";
+  const value = `${existing}${lineBreak}${text}`;
+  if (value.length > maxChars) throw new RangeError(`Appended value exceeds the ${maxChars}-character verification limit.`);
+  return value;
+}
+
 function sameWindowFrame(
   requested: { x: number; y: number; width: number; height: number },
   actual: { x: number; y: number; width: number; height: number },
@@ -3870,6 +3879,58 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     }, cursorIdentity);
   }
 
+  /** Append to one observed ValuePattern field without moving focus or risking a replace-vs-insert guess. */
+  async function appendElement(name: string, ref: string, text: string, separator: "none" | "newline",
+    cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions & { expectedRole?: string; expectedLabel?: string } = {}): Promise<CuaStageActionProof> {
+    return withRegisteredWindow(name, async ({ session, pid, windowId, capture: captureWindow, elementByToken }) => {
+      assertNotAbortedBeforeInput(options.signal);
+      const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
+      if (!selected?.element.elementToken || selected.element.enabled === false || !selected.nativeElement?.actions?.readValue
+        || !selected.nativeElement.actions?.setValue || typeof manager.invokeWindowElement !== "function") {
+        throw new DesktopInputNotDispatchedError(
+          "Append requires the exact observed text field to support background UI Automation read and replace; no text was sent.",
+          "background-unavailable",
+        );
+      }
+      const element = {
+        path: selected.nativeElement.path,
+        expectedRole: selected.nativeElement.role,
+        expectedLabel: selected.nativeElement.label,
+        expectedClassName: selected.nativeElement.className,
+        expectedAutomationId: selected.nativeElement.automationId,
+        ...(selected.nativeElement.runtimeId?.length ? { expectedRuntimeId: selected.nativeElement.runtimeId } : {}),
+      };
+      const before = await manager.invokeWindowElement(pid, windowId.toString(), { ...element, action: "readValue", maxChars: 4096 });
+      if (before.redacted || !before.read || typeof before.value !== "string" || before.truncated) {
+        throw new DesktopInputNotDispatchedError(
+          "Append needs a complete readable value for the exact text field. Nothing was changed.", "target-identity");
+      }
+      const priorValue = before.value;
+      let nextValue: string;
+      try { nextValue = composeAppendedValue(priorValue, text, separator); }
+      catch {
+        throw new DesktopInputNotDispatchedError(
+          "Append would exceed the 4096-character limit needed for a complete read-back. Nothing was changed.", "target-identity");
+      }
+      const screenPoint = elementScreenPoint(selected.screenRect);
+      if (cursorIdentity && screenPoint) await moveElementCursorToScreen(session, screenPoint);
+      assertNotAbortedBeforeInput(options.signal);
+      const dispatched = await invokeWindowElementTimed(pid, windowId.toString(), { ...element, action: "setValue", text: nextValue });
+      if (!dispatched.dispatched) {
+        throw new DesktopInputNotDispatchedError(
+          "Windows did not accept the exact text-field update; no text was appended.", "background-unavailable");
+      }
+      const after = await manager.invokeWindowElement(pid, windowId.toString(), { ...element, action: "readValue", maxChars: 4096 });
+      const verified = after.read === true && after.redacted !== true && after.truncated !== true && after.value === nextValue;
+      return {
+        capture: stageCapture(await captureWindow(), now),
+        outcome: verified
+          ? { status: "confirmed", summary: "Appended the requested text to the exact observed field and verified the complete resulting value." }
+          : { status: "unverifiable", summary: "The text-field update may have been applied, but a fresh complete read did not confirm the expected appended value. Inspect before retrying." },
+      };
+    }, cursorIdentity);
+  }
+
   // One typical UI text line is roughly this many pixels tall; the installed
   // Cua Driver only exposes line/page scrolling for native windows, not pixel
   // scrolling, so a pixel request is converted to its nearest line-scroll
@@ -4113,7 +4174,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
   }
 
   return { capture, readStructure, readElementValue, readDesktopStructure, describeTarget, describeElementTarget, valueMutationRegion, observedValueMutationRegions, showAgentCursor, sayAgentCursor, moveCursor, listWindows, listVisibleWindows, click, typeText, scroll, scrollDelta, scrollElement, drag,
-    clickElement, replaceElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
+    clickElement, replaceElement, appendElement, windowFrame, snapWindow, windowState, focusWindow, systemControl, invokeMenu, clipboardRead, clipboardWrite,
     captureDesktop, describeDesktopTarget, moveDesktopCursor, clickDesktop, typeTextDesktop, scrollDesktop, scrollDeltaDesktop, dragDesktop,
     pressKey, hotkey, pressKeyDesktop, hotkeyDesktop, closeAgentCursor, shutdown,
     clickPopup, pressKeyPopup, hotkeyPopup, typeTextPopup, capturePopup, describePopupTarget, saveAs, confirmDialogButton };

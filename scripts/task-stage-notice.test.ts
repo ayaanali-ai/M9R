@@ -59,6 +59,9 @@ test("task delivery describes actual stage modes and typed dispatch recovery", a
     assert.match(context, /do not wait for the user to name tools or provide command syntax/);
     assert.match(context, /mode "background" to attach to the unique existing window/);
     assert.match(context, /Never substitute a new window, provider-owned browser, or another app/);
+    assert.match(context, /avoid interrupting them[\s\S]*select background mode even if they do not use the literal word/);
+    assert.match(context, /For a request to append text[\s\S]*Do not use replace_element or replace-mode typing/);
+    assert.match(context, /reads and preserves the current complete value/);
     assert.match(context, /view "app" for the selected app window and view "desktop" for desktop-wide inspection or interaction/);
     assert.match(context, /continue from that exact result instead of assuming the app was already selected/);
     assert.match(context, /background[\s\S]*never creates or switches a Windows virtual desktop/);
