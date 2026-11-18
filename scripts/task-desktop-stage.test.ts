@@ -947,13 +947,13 @@ test("a money-like stage click waits for the owner and never executes on deny", 
   } finally { f.cleanup(); }
 });
 
-test("an unlabeled visual control carries no money signal, so it is clicked without an owner hold", async () => {
+test("an unlabeled visual control carries no money signal, but background coordinates still cannot inject input", async () => {
   const f = moneyFixture("", false);
   try {
     await f.service.prepare(f.identity.token, f.task.id, "background");
-    await f.service.act(f.identity.token, f.task.id, { kind: "click", x: 2, y: 3 }, "background", "unlabeled-control");
+    await assert.rejects(f.service.act(f.identity.token, f.task.id, { kind: "click", x: 2, y: 3 }, "background", "unlabeled-control"), /background-only delivery/);
     assert.equal(f.seen.length, 0, "icons, thumbnails and canvases are ordinary controls, not purchases");
-    assert.deepEqual(f.clicks, [{ x: 2, y: 3 }]);
+    assert.deepEqual(f.clicks, [], "background mode must not inject the shared physical mouse");
   } finally { f.cleanup(); }
 });
 
