@@ -1694,138 +1694,23 @@ export function createTaskDesktopStageService(input: {
       const beforeTargetWindows = await matchesLaunchedWindows(beforeLaunchWindows);
       const beforeTargetWindowKeys = new Set(beforeTargetWindows.map(windowIdentityKey));
       const beforeBrowserWindows = personalBrowser ? beforeLaunchWindowKeys : undefined;
-      // A background task may ask to use an app that the owner already has
-      // open. Bind the one exact matching window instead of starting another
-      // copy. If more than one window matches, fail closed rather than guess;
-      // the owner-preview path remains the explicit route for visible launch
-      // and selection.
-      if (beforeTargetWindows.length > 1) {
-        throw new Error(`More than one existing ${appId} window matches this background request. No new window was opened; select the exact target first.`);
+      // Background mode only attaches to an existing, uniquely identified
+      // app window. It never starts or presents a new app; owner-preview is
+      // the explicit route for visible launch and target selection.
+      if (beforeTargetWindows.length !== 1) {
+        const reason = beforeTargetWindows.length > 1
+          ? `More than one existing ${appId} window matches this background request. Select the exact target first.`
+          : `No existing ${appId} window matches this background request. Open or select the target first.`;
+        throw new DesktopInputNotDispatchedError(`${reason} Background mode will not open a new window.`, "target-identity");
       }
-      if (beforeTargetWindows.length === 1) {
-        const existing = beforeTargetWindows[0]!;
-        if (!Number.isSafeInteger(existing.pid)) throw new Error(`The existing ${appId} window has no verified process identity. No new window was opened.`);
-        authorize(token, taskId, mode);
-        if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-        await manager.attachWindow(name, String(existing.pid), existing.windowId, appId);
-        ownedApps.set(name, { taskId, appId, pid: existing.pid, windowId: existing.windowId, ownsProcess: false });
-        bindBrowserSpace(name, approved.executable, existing.pid, existing.windowId);
-        return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: false });
-      }
-      // A new process can activate itself even with STARTUPINFO's hidden hint.
-      // Until a specific launcher proves otherwise, ask before that side effect.
-      await ownerWorkPolicy.authorize({ op: "launch", windowId: `app:${appId}` });
-      launchAttempted = true;
-      const child = launchStageApp(ownedBrowserLaunch(root, name, approved), { windowsHide: true, cwd: stageAppLaunchCwd(task.cwd) });
-      let spawnError: Error | undefined;
-      child?.on("error", (error) => { spawnError = error; });
-      try {
-        const discoveryStartedAtMs = Date.now();
-        const discoveryStartedTick = performance.now();
-        let discoveryAttempts = 0;
-        let discoveryCompletedAt: { atMs: number; tick: number } | undefined;
-        try {
-        for (let attempt = 0; attempt < 40; attempt++) {
-          discoveryAttempts = attempt + 1;
-          authorize(token, taskId, mode);
-          if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-          // Personal Chromium commonly exits its launcher PID immediately after
-          // handing the request to the already-running browser process. The
-          // Cua window list, not that transient PID, is the ownership proof.
-          const processPid = child?.pid;
-          if (!child || spawnError || child.killed || !processPid) {
-            throw new Error("The approved app did not start a persistent owned process.");
-          }
-          let selectedPid = child.pid;
-          let selectedWindowId: string | undefined;
-          let candidateWindows: BrowserWindowCandidate[];
-          if (personalBrowser) {
-            const candidate = selectPersonalBrowserWindow(browserKind!, await listVisibleWindows(), beforeBrowserWindows!);
-            if (!candidate) {
-              await delay(100);
-              continue;
-            }
-            selectedPid = candidate.pid;
-            selectedWindowId = candidate.windowId;
-            candidateWindows = [candidate];
-          } else {
-            // Prefer exact child-process windows, but keep polling after the
-            // launcher exits: many ordinary Windows apps hand off to an
-            // existing/app-model process before the child receives its exit
-            // event. The pre-launch snapshot prevents adopting an unrelated
-            // already-open window.
-            let exactProcessWindows: BrowserWindowCandidate[] = [];
-            try {
-              exactProcessWindows = (await manager.listOwnedWindowsForProcess(processPid)).map((window) => ({
-                ...window,
-                appName: window.processName ?? window.className ?? "",
-                ...(window.processPath ? { processPath: window.processPath } : {}),
-                ...(window.appUserModelId ? { appUserModelId: window.appUserModelId } : {}),
-              })).filter((window) => stageWindowMatchesApp(window, approved));
-            } catch {
-              // A launcher can disappear before its transient process can be
-              // enumerated. The desktop-wide window snapshot below remains
-              // the safe hand-off path.
-            }
-            // A launcher PID is not automatically the app window identity.
-            // AppsFolder and other delegated launches can use Explorer as a
-            // dispatcher; only keep same-process HWNDs that also prove the
-            // resolved target's exact app identity.
-            const visibleWindows = await listVisibleWindows();
-            const delegatedWindows = (await matchesLaunchedWindows(visibleWindows))
-              .filter((window) => !beforeTargetWindowKeys.has(windowIdentityKey(window)));
-            const candidates = [...exactProcessWindows, ...delegatedWindows.filter((window) =>
-              !exactProcessWindows.some((exact) => exact.pid === window.pid && exact.windowId === window.windowId))];
-            candidateWindows = candidates;
-            const selected = selectTargetAppWindow(candidateWindows);
-            if (selected) selectedPid = selected.pid;
-          }
-          const selectedWindow = selectTargetAppWindow(candidateWindows);
-          if (selectedWindow) {
-            discoveryCompletedAt = { atMs: Date.now(), tick: performance.now() };
-            authorize(token, taskId, mode);
-            if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
-            selectedWindowId = selectedWindow.windowId;
-            selectedPid = selectedWindow.pid;
-            if (selectedPid === undefined) throw new Error("The approved app did not expose a process id.");
-            const ownedPid = selectedPid;
-            // App launch binds the exact HWND on the owner's visible desktop.
-            // The retired background-stage path moved this window through
-            // private virtual-desktop APIs, which made ordinary launches slow
-            // and could leave the owner unable to see or target the app.
-            await manager.presentOwnerWindow(name, ownedPid, selectedWindowId);
-            await manager.attachWindow(name, String(ownedPid), selectedWindowId, appId);
-            ownedApps.set(name, {
-              taskId,
-              appId,
-              pid: ownedPid,
-              ...(personalBrowser ? {} : { process: child }),
-              ownsProcess: !personalBrowser,
-              windowId: selectedWindowId,
-            });
-            bindBrowserSpace(name, approved.executable, ownedPid, selectedWindowId);
-            return finishLaunch({ name, taskId, appId, running: true });
-          }
-          await delay(100);
-        }
-        throw new Error(personalBrowser
-          ? `Personal ${browserKind === "chrome" ? "Chrome" : "Edge"} did not expose a new task window; the existing personal window was left untouched.`
-          : "The app exposes no supported exact-process window; it requires an app-specific launch adapter.");
-          } finally {
-            recordStageTiming(taskId, {
-              phase: "launch-discovery",
-              startedAt: new Date(discoveryStartedAtMs).toISOString(),
-              endedAt: new Date(discoveryCompletedAt?.atMs ?? Date.now()).toISOString(),
-              durationMs: (discoveryCompletedAt?.tick ?? performance.now()) - discoveryStartedTick,
-              status: discoveryCompletedAt ? "ok" : "error",
-              ...(operationId ? { operationId } : {}),
-              detail: `path=stage-launch;pollAttempts=${discoveryAttempts};maxAttempts=40;window=${discoveryCompletedAt ? "found" : "not-found"}`,
-            });
-          }
-      } catch (error) {
-        if (child && child.exitCode === null && !child.killed) child.kill();
-        throw error;
-      }
+      const existing = beforeTargetWindows[0]!;
+      if (!Number.isSafeInteger(existing.pid)) throw new DesktopInputNotDispatchedError(`The existing ${appId} window has no verified process identity. No new window was opened.`, "target-identity");
+      authorize(token, taskId, mode);
+      if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
+      await manager.attachWindow(name, String(existing.pid), existing.windowId, appId);
+      ownedApps.set(name, { taskId, appId, pid: existing.pid, windowId: existing.windowId, ownsProcess: false });
+      bindBrowserSpace(name, approved.executable, existing.pid, existing.windowId);
+      return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: false });
       } catch (error) {
         if (receiptInput) {
           if (error instanceof DesktopInputNotDispatchedError && !launchAttempted) {

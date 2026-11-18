@@ -1089,7 +1089,7 @@ test("background launch attaches one exact existing app window without presentin
   const f = fixture(true, (root) => ({ executable: join(root, "notepad.exe"), args: [] }));
   try {
     f.setVisibleWindows([{ pid: 321, windowId: "789", processName: "notepad.exe", title: "bilateral-native.txt - Notepad", width: 900, height: 600 }]);
-    const result = await f.service.launch(f.identity.token, f.task.id, "notepad", "background");
+    const result = await f.service.launch(f.identity.token, f.task.id, "notepad", "background", "reuse-exact-window");
     assert.equal(result.reused, true);
     assert.deepEqual(f.presentedWindows, [], "background binding must not raise the existing target");
     const registry = JSON.parse(readFileSync(join(f.root, "windows-stages.json"), "utf8")) as {
@@ -1097,6 +1097,8 @@ test("background launch attaches one exact existing app window without presentin
     };
     assert.equal(registry.stages[0]?.appId, "notepad");
     assert.deepEqual(registry.stages[0]?.anchor, { pid: 321, windowId: "789" });
+    const state = JSON.parse(readFileSync(join(f.root, "state.json"), "utf8")) as { stageOperations: Array<{ taskId: string; state: string }> };
+    assert.equal(state.stageOperations.find((operation) => operation.taskId === f.task.id)?.state, "applied");
   } finally { f.cleanup(); }
 });
 
@@ -1107,10 +1109,28 @@ test("background launch refuses to guess among multiple existing app windows", a
       { pid: 321, windowId: "789", processName: "notepad.exe", title: "first.txt - Notepad", width: 900, height: 600 },
       { pid: 322, windowId: "790", processName: "notepad.exe", title: "second.txt - Notepad", width: 900, height: 600 },
     ]);
-    await assert.rejects(f.service.launch(f.identity.token, f.task.id, "notepad", "background"), /More than one existing notepad window/);
+    await assert.rejects(f.service.launch(f.identity.token, f.task.id, "notepad", "background", "ambiguous-target"),
+      (error) => error instanceof DesktopInputNotDispatchedError && error.code === "target-identity" && /More than one existing notepad window/.test(error.message));
     assert.deepEqual(f.presentedWindows, [], "an ambiguous background target must not be presented or launched");
     assert.equal(Boolean(f.store.getTask(f.task.id)?.stageTiming?.some((event) => event.phase === "launch-discovery")), false,
       "ambiguity must be resolved before process launch or new-window polling");
+    const state = JSON.parse(readFileSync(join(f.root, "state.json"), "utf8")) as { stageOperations: Array<{ taskId: string }> };
+    assert.equal(state.stageOperations.some((operation) => operation.taskId === f.task.id), false,
+      "a pre-dispatch target refusal releases its receipt instead of leaving an uncertain operation");
+  } finally { f.cleanup(); }
+});
+
+test("background launch refuses before process start when no exact existing app window is visible", async () => {
+  const f = fixture(true, (root) => ({ executable: join(root, "notepad.exe"), args: [] }));
+  try {
+    await assert.rejects(f.service.launch(f.identity.token, f.task.id, "notepad", "background", "missing-target"),
+      (error) => error instanceof DesktopInputNotDispatchedError && error.code === "target-identity" && /No existing notepad window/.test(error.message));
+    assert.deepEqual(f.presentedWindows, [], "a missing background target must not be presented or launched");
+    assert.equal(Boolean(f.store.getTask(f.task.id)?.stageTiming?.some((event) => event.phase === "launch-discovery")), false,
+      "a missing target must be reported before process launch or new-window polling");
+    const state = JSON.parse(readFileSync(join(f.root, "state.json"), "utf8")) as { stageOperations: Array<{ taskId: string }> };
+    assert.equal(state.stageOperations.some((operation) => operation.taskId === f.task.id), false,
+      "a pre-dispatch target refusal releases its receipt instead of leaving an uncertain operation");
   } finally { f.cleanup(); }
 });
 
