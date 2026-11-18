@@ -65,10 +65,10 @@ test("approvals are reported once, queue in order, and mark the asking agent", (
   assert.equal(State.defaultView(), "overview");
 });
 
-test("agent run states map to display states, and a finished run earns a finished badge", () => {
+test("agent run states map to display states; idle is availability, not a completion receipt", () => {
   State.apply(snap({ agents: [{ handle: "claude", provider: "claude", state: "working", activity: ["x"] }] }));
   State.apply(snap({ agents: [{ handle: "claude", provider: "claude", state: "idle", activity: ["x", "done"] }] }));
-  assert.equal(State.tasks[0].pillBadge, "finished");
+  assert.equal(State.tasks[0].pillBadge, null, "a provider snapshot's idle state is availability, not a task completion receipt");
   State.apply(snap({ agents: [{ handle: "claude", provider: "claude", state: "failed", activity: [] }] }));
   assert.equal(State.tasks[0].state, "error");
   assert.equal(State.tasks[0].pillBadge, "error");
