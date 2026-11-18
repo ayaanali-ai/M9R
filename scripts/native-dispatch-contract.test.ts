@@ -35,3 +35,14 @@ test("retired extension browser routes fail explicitly while native desktop tool
   assert.doesNotMatch(mcp, /deps\.web\.(?:run|runBatch)\s*\(/);
   assert.doesNotMatch(server, /WEB_EXTENSION_ROUTE_ENABLED/);
 });
+
+test("background stage app selection documents attach-only behavior", () => {
+  const server = readFileSync(resolve("src/lib/native/mcp-server.ts"), "utf8");
+  const start = server.indexOf('server.registerTool("m9r_stage_app"');
+  const end = server.indexOf('server.registerTool("m9r_stage_action"', start);
+  assert.ok(start >= 0 && end > start, "stage app tool registration is present");
+  const stageAppTool = server.slice(start, end);
+  assert.match(stageAppTool, /mode=background, operation=launch is attach-only/);
+  assert.match(stageAppTool, /without starting, presenting, or focusing an app/);
+  assert.match(stageAppTool, /refuses when there are zero or multiple matches/);
+});
