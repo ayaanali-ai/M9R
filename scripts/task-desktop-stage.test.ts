@@ -1102,6 +1102,28 @@ test("background launch attaches one exact existing app window without presentin
   } finally { f.cleanup(); }
 });
 
+test("a session can switch background app targets without closing the previously attached window", async () => {
+  const f = fixture(true, (root, appId) => ({ executable: join(root, `${appId}.exe`), args: [] }));
+  try {
+    f.setVisibleWindows([
+      { pid: 321, windowId: "789", processName: "notepad.exe", title: "bilateral-native.txt - Notepad", width: 900, height: 600 },
+      { pid: 322, windowId: "790", processName: "chrome.exe", title: "Bilateral owner document - Google Chrome", width: 1200, height: 800 },
+    ]);
+    await f.service.launch(f.identity.token, f.task.id, "notepad", "background", "switch-notepad");
+    const followup = f.store.addTask({ from: "you", to: "codex", goal: "Continue in the existing browser", origin: "human_typed",
+      idempotencyKey: "switch-to-chrome", targetSession: "session-one" }).task;
+    await f.service.prepare(f.identity.token, followup.id, "background");
+    const switched = await f.service.launch(f.identity.token, followup.id, "chrome", "background", "switch-chrome");
+    assert.equal(switched.reused, true);
+    assert.deepEqual(f.presentedWindows, [], "background app switching must not focus either window");
+    const registry = JSON.parse(readFileSync(join(f.root, "windows-stages.json"), "utf8")) as {
+      stages: Array<{ appId?: string; anchor?: { pid: number; windowId: string } | null }>;
+    };
+    assert.equal(registry.stages[0]?.appId, "chrome");
+    assert.deepEqual(registry.stages[0]?.anchor, { pid: 322, windowId: "790" });
+  } finally { f.cleanup(); }
+});
+
 test("background launch refuses to guess among multiple existing app windows", async () => {
   const f = fixture(true, (root) => ({ executable: join(root, "notepad.exe"), args: [] }));
   try {

@@ -1667,11 +1667,25 @@ export function createTaskDesktopStageService(input: {
           } catch { /* the personal browser window may have been closed; launch a fresh one */ }
         }
         if (running) {
-          // Same stage, same identity/session (see authorize()) -- a real session
-          // naturally issues a fresh taskId for a follow-up launch of the app it
-          // already has running. Only a genuinely different app is a real conflict.
-          if (prior.appId !== appId) throw new Error("This session already has an unfinished stage app.");
-          return finishLaunch({ name, taskId, appId, running: true });
+          if (prior.appId === appId) return finishLaunch({ name, taskId, appId, running: true });
+
+          // A stage belongs to one authenticated agent session, not one app.
+          // Once the current task has selected a new target, detach the old
+          // window mapping (never close its user-owned process) so switching
+          // from e.g. Notepad to Chrome does not strand the session on the old
+          // app. Keep the refusal when another task is actively using this
+          // same stage; that is a real concurrency conflict.
+          const assignment = manager.list().find((stage) => stage.name === name)?.agentAssignment;
+          if (assignment?.taskId && assignment.taskId !== taskId && taskActive(assignment.taskId)) {
+            throw new Error("Another active task is using this agent session's selected app. Wait for it to finish before switching apps.");
+          }
+        }
+        // Also clear the durable anchor when the old target disappeared. Merely
+        // dropping the in-memory cache leaves a stale registry entry that can
+        // make a later discard claim there is no selected app to detach.
+        const persisted = manager.list().find((stage) => stage.name === name);
+        if (persisted?.anchor?.pid === prior.pid && persisted.anchor.windowId === prior.windowId) {
+          manager.clearOwnedAnchor(name, prior.pid, prior.windowId);
         }
         ownedApps.delete(name);
         browserSpaces.remove(`space-${name}`);
@@ -1743,7 +1757,7 @@ export function createTaskDesktopStageService(input: {
     const { name: queueName, identity: streamIdentity } = authorize(token, taskId, mode);
     const run = async () => {
       const { name } = authorize(token, taskId, mode);
-      const app = ownedApps.get(name);
+      const app = ownedApps.get(name) ?? recoverPersistedApp(name, taskId);
       // Same stage, same identity/session (see authorize()) -- not gated on the exact
       // taskId that originally launched it, for the same reason as elsewhere in this file.
       if (!app) throw new Error("This task has no broker-owned app to discard.");
