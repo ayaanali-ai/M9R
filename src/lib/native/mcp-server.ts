@@ -5,6 +5,7 @@
  * tool argument. An optional token field remains only for unbound legacy MCP registrations.
  */
 
+import { fetchPublicMedia } from "./public-media";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { McpServer, type RegisteredTool, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -811,6 +812,15 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
     },
   );
 
+  server.registerTool("m9r_media_fetch", {
+    description: "Fetch a display-sized real photo from Wikimedia Commons by topic or a YouTube video's thumbnail by video URL in the background. Returns a local JPEG for clipboard_write imagePath and a source page for the caption.",
+    inputSchema: { ...AUTH_FIELD, kind: z.enum(["photo", "youtube_thumbnail"]), input: z.string().trim().min(1).max(500) },
+  }, async ({ token, kind, input }) => {
+    const identity = await requireIdentity(token);
+    await requireRoomFileAccess(identity);
+    const asset = await fetchPublicMedia(deps.store.root, kind, input);
+    return { content: [{ type: "text", text: JSON.stringify(asset) }] };
+  });
   server.registerTool("m9r_stage_app", {
     description: "Stage mode defaults to owner-preview: open a normal installed app on the owner's Windows desktop or restore the existing personal browser without a separate profile. An explicit owner-preview launch selects and verifies the exact app window, then focuses it when the requested task needs interaction. Use m9r_stage_action for explicitly requested icon clicks. Pass mode \"background\" only for an explicitly requested headless operation: supported UI Automation actions may run without taking focus, while actions requiring physical input are not dispatched. M9R does not create, switch, or move Windows Task View desktops. In background mode, launch an installed app using the owner's active access policy or discard an app owned by this task; preserve the task result first.",
     inputSchema: { ...AUTH_FIELD, taskId: z.string().regex(/^T[0-9]{1,12}$/).optional().describe("Omit to use this session's current pending task."), operation: z.enum(["launch", "discard"]), mode: z.enum(["background", "owner-preview"]).default("owner-preview"), appId: STAGE_APP_REF.optional(), operationId: z.string().regex(/^[a-zA-Z0-9._:-]{1,128}$/).optional() },

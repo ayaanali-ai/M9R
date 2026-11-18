@@ -92,6 +92,6 @@ function fallback(task: AgentTask): string {
     case "waiting": return "Thinking it through";
     case "blocked": return "Waiting on your OK";
     case "stopped": return "Paused until you need it";
-    default: return "Ready when you are";
+    default: return "Available";
   }
 }

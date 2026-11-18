@@ -280,10 +280,9 @@ class AppState {
     const waiting = new Set(this.approvals.map((a) => a.agent));
     const newFinished: string[] = [];
     this.tasks = snapshot.agents.map((a) => {
-      const prev = this.tasks.find((t) => t.id === a.handle);
       const steps = a.activity.slice(-20);
-      const finished = prev !== undefined && prev.state === "working" && a.state === "idle";
-      if (finished) newFinished.push(a.handle);
+      // Provider snapshots carry availability, not a task completion receipt.
+
       return {
         id: a.handle,
         name: a.handle,
@@ -299,7 +298,7 @@ class AppState {
         steps,
         ...(a.task ? { task: a.task } : {}),
         ...(this.collaboration?.agents.find((presence) => presence.agentId === a.handle)?.state ? { presenceState: this.collaboration.agents.find((presence) => presence.agentId === a.handle)!.state } : {}),
-        pillBadge: waiting.has(a.handle) ? "approval" : a.state === "failed" ? "error" : finished ? "finished" : prev?.pillBadge ?? null,
+        pillBadge: waiting.has(a.handle) ? "approval" : a.state === "failed" ? "error" : null,
       };
     });
     if (!this.focusId || !this.tasks.some((t) => t.id === this.focusId)) this.focusId = this.tasks[0]?.id ?? null;

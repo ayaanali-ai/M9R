@@ -1902,6 +1902,18 @@ export function createTaskDesktopStageService(input: {
         if (!taskActive(active.taskId) || expired) {
           ownerWorkPolicy.revokeTask({ agent: active.identity.handle, provider: active.identity.handle,
             sessionId: active.identity.sessionId, taskId: active.taskId });
+          // A completed peer turn can temporarily own the marker while its recipient
+          // still has an active owner assignment in the same provider session.
+          if (!expired && input.store.getTask(active.taskId)?.origin !== "human_typed") {
+            const ownerTasks = input.store.snapshot().tasks.filter(task =>
+              task.origin === "human_typed" && normalizeHandle(task.to) === normalizeHandle(active.identity.handle)
+              && (task.targetSession ?? task.deliveredSession) === active.identity.sessionId && taskActive(task.id));
+            if (ownerTasks.length === 1 && resolveCursorTarget(undefined, ownerTasks[0].id, true)) {
+              activeAgentCursors.set(key, { ...active, taskId: ownerTasks[0].id });
+              cursorPresentationTask.set(key, ownerTasks[0].id);
+              continue;
+            }
+          }
           try {
             await driver.closeAgentCursor(active.identity);
             cursorHideFailures.delete(key);
