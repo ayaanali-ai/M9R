@@ -1085,6 +1085,35 @@ test("owner-preview reuses the exact durable HWND without querying a Windows des
   } finally { f.cleanup(); }
 });
 
+test("background launch attaches one exact existing app window without presenting or starting another", async () => {
+  const f = fixture(true, (root) => ({ executable: join(root, "notepad.exe"), args: [] }));
+  try {
+    f.setVisibleWindows([{ pid: 321, windowId: "789", processName: "notepad.exe", title: "bilateral-native.txt - Notepad", width: 900, height: 600 }]);
+    const result = await f.service.launch(f.identity.token, f.task.id, "notepad", "background");
+    assert.equal(result.reused, true);
+    assert.deepEqual(f.presentedWindows, [], "background binding must not raise the existing target");
+    const registry = JSON.parse(readFileSync(join(f.root, "windows-stages.json"), "utf8")) as {
+      stages: Array<{ appId?: string; anchor?: { pid: number; windowId: string } }>;
+    };
+    assert.equal(registry.stages[0]?.appId, "notepad");
+    assert.deepEqual(registry.stages[0]?.anchor, { pid: 321, windowId: "789" });
+  } finally { f.cleanup(); }
+});
+
+test("background launch refuses to guess among multiple existing app windows", async () => {
+  const f = fixture(true, (root) => ({ executable: join(root, "notepad.exe"), args: [] }));
+  try {
+    f.setVisibleWindows([
+      { pid: 321, windowId: "789", processName: "notepad.exe", title: "first.txt - Notepad", width: 900, height: 600 },
+      { pid: 322, windowId: "790", processName: "notepad.exe", title: "second.txt - Notepad", width: 900, height: 600 },
+    ]);
+    await assert.rejects(f.service.launch(f.identity.token, f.task.id, "notepad", "background"), /More than one existing notepad window/);
+    assert.deepEqual(f.presentedWindows, [], "an ambiguous background target must not be presented or launched");
+    assert.equal(Boolean(f.store.getTask(f.task.id)?.stageTiming?.some((event) => event.phase === "launch-discovery")), false,
+      "ambiguity must be resolved before process launch or new-window polling");
+  } finally { f.cleanup(); }
+});
+
 test("a persisted ApplicationFrameHost HWND is not reused after Windows changes its app identity", async () => {
   const settingsAumid = "Microsoft.Windows.Settings_8wekyb3d8bbwe!App";
   const calculatorAumid = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App";

@@ -1694,6 +1694,24 @@ export function createTaskDesktopStageService(input: {
       const beforeTargetWindows = await matchesLaunchedWindows(beforeLaunchWindows);
       const beforeTargetWindowKeys = new Set(beforeTargetWindows.map(windowIdentityKey));
       const beforeBrowserWindows = personalBrowser ? beforeLaunchWindowKeys : undefined;
+      // A background task may ask to use an app that the owner already has
+      // open. Bind the one exact matching window instead of starting another
+      // copy. If more than one window matches, fail closed rather than guess;
+      // the owner-preview path remains the explicit route for visible launch
+      // and selection.
+      if (beforeTargetWindows.length > 1) {
+        throw new Error(`More than one existing ${appId} window matches this background request. No new window was opened; select the exact target first.`);
+      }
+      if (beforeTargetWindows.length === 1) {
+        const existing = beforeTargetWindows[0]!;
+        if (!Number.isSafeInteger(existing.pid)) throw new Error(`The existing ${appId} window has no verified process identity. No new window was opened.`);
+        authorize(token, taskId, mode);
+        if (!readPolicy().controlHandles?.includes(normalizeHandle(identity.handle))) throw new Error("Stage computer control was revoked.");
+        await manager.attachWindow(name, String(existing.pid), existing.windowId, appId);
+        ownedApps.set(name, { taskId, appId, pid: existing.pid, windowId: existing.windowId, ownsProcess: false });
+        bindBrowserSpace(name, approved.executable, existing.pid, existing.windowId);
+        return finishLaunch({ name, taskId, appId, running: true, reused: true, view: "app", foregroundConfirmed: false });
+      }
       // A new process can activate itself even with STARTUPINFO's hidden hint.
       // Until a specific launcher proves otherwise, ask before that side effect.
       await ownerWorkPolicy.authorize({ op: "launch", windowId: `app:${appId}` });
