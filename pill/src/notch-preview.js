@@ -147,7 +147,7 @@ if (host) {
   document.querySelector("aside")?.remove();
   sheet.querySelector("strong")?.remove();
   thread.setAttribute("aria-label", "Conversation");
-  $("form button").setAttribute("aria-label", "Send message");
+  $("form > button").setAttribute("aria-label", "Send message");
   const navigation = document.createElement("nav");
   navigation.setAttribute("aria-label", "Pill navigation");
   for (const [label, surface] of [["Home", "home"], ["Settings", "settings"]]) {
