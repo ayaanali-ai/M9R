@@ -1128,7 +1128,11 @@ export function createTaskDesktopStageService(input: {
         sessionId: identity.sessionId,
         taskId,
         operationId,
-        fingerprint: createHash("sha256").update(JSON.stringify({ mode, action: effectiveAction })).digest("hex"),
+        fingerprint: createHash("sha256").update(JSON.stringify({
+          mode, action: effectiveAction.kind === "append_element"
+            ? { ...effectiveAction, captureOnSuccess: undefined }
+            : effectiveAction,
+        })).digest("hex"),
       } : undefined;
       if (receiptInput) {
         const claim = input.store.claimStageOperation(receiptInput);

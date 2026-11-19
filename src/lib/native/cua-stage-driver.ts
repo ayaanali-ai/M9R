@@ -3881,7 +3881,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
 
   /** Append to one observed ValuePattern field without moving focus or risking a replace-vs-insert guess. */
   async function appendElement(name: string, ref: string, text: string, separator: "none" | "newline",
-    cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions & { expectedRole?: string; expectedLabel?: string } = {}): Promise<CuaStageActionProof> {
+    cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions & { expectedRole?: string; expectedLabel?: string; captureOnSuccess?: boolean } = {}): Promise<Omit<CuaStageActionProof, "capture"> & { capture?: CuaStageCapture }> {
     return withRegisteredWindow(name, async ({ session, pid, windowId, capture: captureWindow, elementByToken }) => {
       assertNotAbortedBeforeInput(options.signal);
       const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
@@ -3923,7 +3923,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const after = await manager.invokeWindowElement(pid, windowId.toString(), { ...element, action: "readValue", maxChars: 4096 });
       const verified = after.read === true && after.redacted !== true && after.truncated !== true && after.value === nextValue;
       return {
-        capture: stageCapture(await captureWindow(), now),
+        ...(!verified || options.captureOnSuccess ? { capture: stageCapture(await captureWindow(), now) } : {}),
         outcome: verified
           ? { status: "confirmed", summary: "Appended the requested text to the exact observed field and verified the complete resulting value." }
           : { status: "unverifiable", summary: "The text-field update may have been applied, but a fresh complete read did not confirm the expected appended value. Inspect before retrying." },

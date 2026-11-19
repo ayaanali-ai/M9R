@@ -24,7 +24,7 @@ type TaskStageActionBody =
   | { kind: "scroll_element"; ref: string; direction: "up" | "down" | "left" | "right"; granularity?: "small" | "large"; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
   | { kind: "read_value"; ref: string; maxChars?: number; expectedRole?: string; expectedLabel?: string }
   | { kind: "replace_element"; ref: string; text: string; expectedRole?: string; expectedLabel?: string }
-  | { kind: "append_element"; ref: string; text: string; separator?: "none" | "newline"; expectedRole?: string; expectedLabel?: string }
+  | { kind: "append_element"; ref: string; text: string; separator?: "none" | "newline"; captureOnSuccess?: boolean; expectedRole?: string; expectedLabel?: string }
   | { kind: "scroll_delta"; x?: number; y?: number; deltaX: number; deltaY: number; unit: "pixel" | "line" | "page"; confirmFocusForeground?: boolean }
   | { kind: "window_frame"; x: number; y: number; width: number; height: number }
   | { kind: "snap"; position: "left" | "right" | "top" | "bottom" | "maximize"; confirmFocusForeground?: boolean }
@@ -116,7 +116,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
     click_element: ["ref", "expectedRole", "expectedLabel"], scroll_element: ["ref", "direction", "granularity", "expectedRole", "expectedLabel"],
     read_value: ["ref", "maxChars", "expectedRole", "expectedLabel"],
     replace_element: ["ref", "text", "expectedRole", "expectedLabel"],
-    append_element: ["ref", "text", "separator", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
+    append_element: ["ref", "text", "separator", "captureOnSuccess", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
     window_frame: ["x", "y", "width", "height"], snap: ["position"], window_state: ["state"], focus: [], invoke_menu: ["path"], clipboard_read: ["includeText", "confirmSharedClipboard"], clipboard_write: ["text", "imagePath", "filePath", "confirmSharedClipboard"],
     system_control: ["control", "action", "value", "step"], save_as: ["path", "createParentDirectories", "replaceExisting"] };
   if (typeof action.kind !== "string" || !Object.hasOwn(fields, action.kind)) throw new Error("Unsupported stage action.");
@@ -212,7 +212,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (action.kind === "replace_element" && (typeof action.text !== "string" || action.text.length > 5_000)) throw new Error("Invalid stage input text.");
   if (action.kind === "append_element" && (typeof action.text !== "string" || action.text.length < 1 || action.text.length > 5_000
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text)
-    || (action.separator !== undefined && action.separator !== "none" && action.separator !== "newline"))) throw new Error("Invalid append text or separator.");
+    || (action.captureOnSuccess !== undefined && typeof action.captureOnSuccess !== "boolean")
+    || (action.separator !== undefined && action.separator !== "none" && action.separator !== "newline"))) throw new Error("Invalid append options.");
   if (action.kind === "clipboard_write" && action.text !== undefined && (typeof action.text !== "string" || !action.text.length || action.text.length > 5_000)) throw new Error("Invalid stage input text.");
   if (action.kind === "clipboard_write") {
     if (["text", "imagePath", "filePath"].filter((key) => action[key] !== undefined).length !== 1) throw new Error("Clipboard write requires exactly one payload.");
@@ -364,7 +365,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
       stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground,
         ...(dispatchPolicy.semanticOnly ? { semanticOnly: true } : {}) }));
     case "append_element": return driver.appendElement(name, action.ref, action.text, action.separator ?? "none", identity,
-      stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }));
+      stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, captureOnSuccess: action.captureOnSuccess }));
     case "window_frame": return driver.windowFrame(name, action.x, action.y, action.width, action.height, identity,
       stageOptions({ confirmFocusForeground }));
     case "snap": return driver.snapWindow(name, action.position, identity, stageOptions({ confirmFocusForeground }));

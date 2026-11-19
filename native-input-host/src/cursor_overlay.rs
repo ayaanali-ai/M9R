@@ -315,6 +315,16 @@ pub fn bubble_opacity(elapsed_ms: f32) -> Option<f32> {
     Some((1.0 - into_fade / BUBBLE_FADE_OUT_MS).clamp(0.0, 1.0))
 }
 
+/// A bubble needs continuous frames only while its opacity changes. During
+/// the hold interval, the existing frame remains correct unless the marker
+/// itself is moving (which is tracked separately by the caller).
+fn bubble_animating(bubble: &Bubble, now: Instant, last_presented: Instant) -> bool {
+    let elapsed_ms = now.saturating_duration_since(bubble.started_at).as_secs_f32() * 1000.0;
+    // Paint the fully opaque endpoint even if the timer skipped the boundary.
+    last_presented.saturating_duration_since(bubble.started_at).as_secs_f32() * 1000.0 < BUBBLE_FADE_IN_MS
+        || (elapsed_ms >= BUBBLE_FADE_IN_MS + BUBBLE_HOLD_MS && elapsed_ms < BUBBLE_TOTAL_MS)
+}
+
 /// Raw marker outline in the preview's 100x100 viewBox space. The body is
 /// this polygon filled AND stroked 22 units wide with round joins, which is
 /// what turns four sharp corners into the thick rounded paper-plane blob.
@@ -1109,6 +1119,7 @@ pub mod win {
             let mut message = MSG::default();
             let mut ready_sent = false;
             let mut pending_frame = PendingFrame(true);
+            let mut last_presented = Instant::now();
             let mut last_foreground = HWND::default();
             loop {
                 let got = GetMessageW(&mut message, None, 0, 0);
@@ -1174,11 +1185,9 @@ pub mod win {
                         }
                     }
                     // Continuous conditions that need every tick redrawn while
-                    // true: a position tween still in flight, and any visible
-                    // chatter bubble (its opacity/slide changes every frame
-                    // during fade; treating the whole visible window as
-                    // animating is a deliberately conservative simplification,
-                    // not a frame-accurate fade/hold split). Anything else
+                    // true: a position tween still in flight, or a chatter
+                    // bubble whose opacity is changing. The static bubble
+                    // hold needs no repeated full-screen redraw. Anything else
                     // (idle, blink not yet due, no bubble) only needs a repaint
                     // on the tick something actually changed (blink_changed
                     // above, or an external command via PRESENTATION_DIRTY).
@@ -1186,7 +1195,9 @@ pub mod win {
                         agent.anim_duration_ms > 0.0
                             && now.saturating_duration_since(agent.anim_start).as_secs_f32() * 1000.0
                                 < agent.anim_duration_ms
-                    }) || snapshot.values().any(|agent| agent.bubble.is_some());
+                    }) || snapshot.values().any(|agent| {
+                        agent.bubble.as_ref().is_some_and(|bubble| bubble_animating(bubble, now, last_presented))
+                    });
                     if !pending_frame.needed(blink_changed || still_animating) {
                         continue;
                     }
@@ -1251,6 +1262,7 @@ pub mod win {
                         ULW_ALPHA,
                     ).is_ok();
                     if presented {
+                        last_presented = now;
                         pending_frame.presented();
                         for request_id in requests.drain(..) {
                             protocol_line(&output, serde_json::json!({ "event": "ack", "requestId": request_id, "ok": true }));
