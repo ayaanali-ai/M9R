@@ -176,12 +176,7 @@ function buildEmpty(actions: ViewActions): ViewHost {
   const body = h(
     "div",
     { class: "stack", style: "padding:0 18px 0 118px;flex-direction:row;align-items:center;gap:16px" },
-    h(
-      "div",
-      { style: "display:flex;flex-direction:column;gap:5px" },
-      h("div", { class: "title", text: "No active agent work yet." }),
-      h("div", { class: "sub", text: "M9R manages your provider processes on this device. Their work appears here when they start acting." }),
-    ),
+    h("div", { class: "title", text: "No active agent work yet." }),
     h("div", { class: "grow" }),
     btn("Send a message", "primary", () => actions.setView("prompt")),
   );
@@ -280,28 +275,30 @@ function buildError(actions: ViewActions): ViewHost {
 
 // ── Finished ─────────────────────────────────────────────────────
 
-/** The task card: the drum's band turns green and says what finished, then the island grows downward with how it got there. */
+/** The handback leads with the task and keeps recent activity available on demand. */
 function buildFinished(actions: ViewActions): ViewHost {
   const name = h("span", { class: "ask-name" });
   const headline = h("div", { class: "ask-sentence" });
   const band = h("div", { class: "done-band" },
     h("div", { class: "ask-text" },
-      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag done-tag", text: "Done" }), h("span", { class: "ask-count", text: "Just now" })),
+      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag done-tag", text: "Done" })),
       headline,
     ),
   );
   const steps = h("ol", { class: "done-steps" });
+  const activity = h("details", { class: "done-activity" }, h("summary", { text: "Recent activity" }), steps);
   const foot = h("div", { class: "done-foot" },
     btn("Reply", "secondary", () => actions.setView("prompt")),
-    btn("Done", "primary", () => actions.collapse()),
+    btn("Close", "primary", () => actions.collapse()),
   );
-  const el = h("div", { class: "view finished-view" }, band, steps, foot);
+  const el = h("div", { class: "view finished-view" }, band, activity, foot);
   let key = "";
   return {
     el,
     activate() {
       State.stateOverride = "finished";
       key = "";
+      activity.open = false;
     },
     deactivate() {
       State.stateOverride = null;
@@ -317,12 +314,8 @@ function buildFinished(actions: ViewActions): ViewHost {
       key = next;
       name.textContent = displayName(task);
       headline.textContent = title;
-      steps.replaceChildren(...trail.map((text, i) => {
-        const li = h("li", { class: "done-step" }, h("span", { class: "done-check" }, svg(ICONS.check, 9, { stroke: 2.4 })), h("span", { text }));
-        li.style.animationDelay = `${180 + i * 70}ms`;
-        return li;
-      }));
-      steps.hidden = trail.length === 0;
+      steps.replaceChildren(...trail.map((text) => h("li", { class: "done-step", text })));
+      activity.hidden = trail.length === 0;
     },
   };
 }

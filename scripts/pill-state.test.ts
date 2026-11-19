@@ -35,6 +35,15 @@ test("a broker disconnect clears stale agent activity but preserves the conversa
   assert.deepEqual(State.chatHistory.map((message) => message.content), before);
 });
 
+test("the broker echo acknowledges the existing outgoing message without duplicating it", () => {
+  const outgoing = { id: 50, role: "user" as const, content: "@codex Check the note", delivery: "sending" as const };
+  State.chatHistory.push(outgoing);
+  const update = State.apply(snap({ thread: [{ id: "owner-echo", from: "you", text: outgoing.content }] }));
+  assert.deepEqual(update.newReplies, []);
+  assert.equal(State.chatHistory.filter(message => message.content === outgoing.content).length, 1);
+  assert.equal(State.chatHistory.find(message => message.id === outgoing.id)?.delivery, "accepted");
+});
+
 test("approvals are reported once, queue in order, and mark the asking agent", () => {
   const now = Date.now();
   const a1 = { id: "a1", agent: "codex", title: "Post", detail: "Click Post" };

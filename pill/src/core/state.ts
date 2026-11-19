@@ -111,6 +111,7 @@ export interface ChatMessage {
   /** Stable host message identity. A streaming update edits this bubble in place. */
   sourceId?: string;
   role: "user" | "assistant";
+  delivery?: "sending" | "accepted" | "unconfirmed";
   content: string;
   from?: string;
   to?: string;
@@ -346,7 +347,11 @@ class AppState {
         const typed = own(message)
           ? this.chatHistory.find((entry) => entry.role === "user" && entry.sourceId === undefined && entry.content === message.text.trim())
           : undefined;
-        if (typed) { typed.sourceId = message.id; continue; }
+        if (typed) {
+          typed.sourceId = message.id;
+          typed.delivery = "accepted";
+          continue;
+        }
         this.chatHistory.push({
           id: Date.now() + this.chatHistory.length,
           sourceId: message.id,

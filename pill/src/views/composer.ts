@@ -85,7 +85,10 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
       bubbleEl.append(h("span", { class: "bubble-files" }, ...files.map((f) => h("span", { class: "file-chip sent", title: f },
         svg(ICONS.doc, 11), h("span", { text: f.split(/[\\/]/).pop() ?? f })))));
     }
-    return h("div", { class: "chat-row user" }, who, bubbleEl);
+    const delivery = message.delivery === "sending" ? "Sending…" : message.delivery === "accepted" ? "Accepted"
+      : message.delivery === "unconfirmed" ? "Send unconfirmed" : "";
+    const status = delivery ? h("span", { class: "message-delivery", role: "status", text: delivery }) : null;
+    return h("div", { class: "chat-row user" }, who, h("div", { class: "sent-message" }, bubbleEl, status));
   }
   // Replies arrive as "codex: text"; the handle becomes the provider's logo, never raw text in the bubble.
   const from = /^([A-Za-z0-9-]+):\s/.exec(message.content);
@@ -315,15 +318,18 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     sending = true;
     resizeDraft();
     Sound.play("send");
-    State.chatHistory.push({ id: nextId++, role: "user", content: text });
+    const outgoing: ChatMessage = { id: nextId++, role: "user", content: text, delivery: "sending" };
+    State.chatHistory.push(outgoing);
     State.notify();
     onHeightChange();
     try {
-      // A successful send needs no receipt bubble; the agent's reply is the confirmation. Failures still show below.
       await actions.send(text);
+      outgoing.delivery = "accepted";
     } catch (err) {
+      if (outgoing.delivery === "accepted") return;
+      outgoing.delivery = "unconfirmed";
       // Stay in the message view and say why: a wrong or missing @name should be fixable without losing the text.
-      State.chatHistory.push({ id: nextId++, role: "assistant", content: `Not sent: ${String(err instanceof Error ? err.message : err).slice(0, 160)}` });
+      State.chatHistory.push({ id: nextId++, role: "assistant", content: `Couldn't confirm send. ${String(err instanceof Error ? err.message : err).slice(0, 160)}` });
       input.value = typed;
       State.pendingFiles = files;
       syncFiles();
@@ -399,7 +405,8 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   return {
     el,
     sync() {
-      const fingerprint = JSON.stringify(State.chatHistory.map((message) => [message.id, message.content, message.link, message.dismissTaskId]));
+      const fingerprint = JSON.stringify(State.chatHistory.map((message) =>
+        [message.id, message.content, message.from, message.to, message.delivery, message.link, message.dismissTaskId]));
       if (fingerprint !== renderedFingerprint) {
         const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
         renderedFingerprint = fingerprint;

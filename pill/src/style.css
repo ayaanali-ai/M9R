@@ -26,6 +26,7 @@
   --cyan: #22d3ee;
   --indigo: #6366f1;
   --pink: #f472b6;
+  --warm-accent: #f3dd9d;
 }
 
 * {
@@ -845,44 +846,44 @@ body {
   padding: 0 16px 0 106px;
   border-radius: 20px;
   background:
-    radial-gradient(220px 140px at 56px 50%, rgba(52, 211, 153, 0.10), transparent 70%),
+    radial-gradient(220px 140px at 56px 50%, rgba(243, 221, 157, 0.10), transparent 70%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.022));
   box-shadow: inset 0 0 0 0.5px rgba(52, 211, 153, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .done-tag { --tone: var(--green-2); }
 
-.done-steps {
+.done-activity {
   position: absolute;
   left: 108px;
   right: 16px;
   top: 86px;
+  max-height: calc(100% - 136px);
+  overflow: auto;
+  font: 400 12px/1.45 var(--font);
+  scrollbar-width: thin;
+}
+.done-activity summary {
+  width: fit-content;
+  padding: 2px 4px;
+  color: var(--warm-accent);
+  cursor: pointer;
+}
+.done-activity summary:focus-visible {
+  outline: 1px solid var(--warm-accent);
+  outline-offset: -1px;
+}
+.done-steps {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  margin: 6px 4px 0;
+  padding-left: 9px;
+  border-left: 1px solid rgb(243 221 157 / 22%);
   list-style: none;
 }
 .done-step {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  height: 18px;
-  font: 400 12px var(--font);
   color: var(--dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  animation: done-unfold 0.42s cubic-bezier(0.2, 0.9, 0.3, 1) both;
-}
-.done-step > span:last-child { overflow: hidden; text-overflow: ellipsis; }
-.done-check {
-  flex: 0 0 14px;
-  width: 14px;
-  height: 14px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: rgba(52, 211, 153, 0.14);
-  color: var(--green-2);
+  overflow-wrap: anywhere;
 }
 @keyframes done-unfold {
   from { opacity: 0; transform: translateY(-6px); }
@@ -899,7 +900,7 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .done-step, .done-foot { animation: none; }
+  .done-foot { animation: none; }
 }
 
 .card-body {
@@ -1259,8 +1260,21 @@ input[type="range"]::-webkit-slider-thumb {
 
 .chat-row.user .bubble {
   background: var(--blue);
-  color: #ffffff;
+  color: #12182a;
 }
+
+.sent-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.message-delivery {
+  display: block;
+  margin: 3px 3px 0;
+  color: var(--dim);
+  font: 500 10.5px/1.35 var(--font);
+  text-align: right;
+}
+.chat-row.user .sent-to { align-self: flex-start; margin-top: 8px; }
 
 .reply {
   font: 400 12.5px var(--font);
