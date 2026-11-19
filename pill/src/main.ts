@@ -1,6 +1,6 @@
 // Entry point: create the island, connect it to the host's transport, start the intro.
 
-import "./style.css";
+import notchTemplate from "../notch-preview.html?raw";
 import { listen } from "@tauri-apps/api/event";
 import { getTransport } from "./core/transport";
 import { createDesktopTransport, tauriInvoke } from "./shells/desktop";
@@ -8,6 +8,16 @@ import { Island } from "./island/island";
 import { State } from "./core/state";
 
 async function main() {
+  const controls = new URLSearchParams(location.search).get("controls");
+  if (!controls) {
+    await import("./notch-preview.css");
+    const notch = new DOMParser().parseFromString(notchTemplate, "text/html").querySelector("main");
+    if (!notch) throw new Error("The bundled notch template is missing.");
+    document.body.replaceChildren(notch);
+    await import("./notch-preview.js");
+    return;
+  }
+  await import("./style.css");
   const root = document.getElementById("root");
   if (!root) return;
   const invoke = tauriInvoke();
@@ -17,6 +27,12 @@ async function main() {
   const transport = window.__M9R_PILL_TRANSPORT__
     ?? (invoke ? createDesktopTransport(invoke) : getTransport());
   const island = new Island(root, transport);
+  const chat = document.createElement("button");
+  chat.className = "tab";
+  chat.textContent = "Chat";
+  chat.title = "Return to the main conversation";
+  chat.onclick = () => location.assign(location.pathname);
+  root.querySelector(".tabs")?.append(chat);
   if (invoke) {
     try {
       await listen<string>("hold-to-talk", ({ payload }) => {
@@ -41,7 +57,7 @@ async function main() {
   } catch { /* defaults still apply */ }
   island.applySettings();
   transport.subscribe((snapshot) => island.applySnapshot(snapshot));
-  island.launch();
+  island.setView(controls === "settings" ? "settings" : State.defaultView());
 }
 
 void main();

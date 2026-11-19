@@ -103,8 +103,8 @@ const TOP_MARGIN: f64 = 0.0;
 // wake handle), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
 
 /// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
-const NEXT_W: f64 = 720.0;
-const NEXT_H: f64 = 320.0;
+const NEXT_W: f64 = 1100.0;
+const NEXT_H: f64 = 700.0;
 /// Margin around the island that still counts as over it, matching the UI.
 const HIT_MARGIN: f64 = 14.0;
 
@@ -160,8 +160,9 @@ struct IslandRect {
 
 impl IslandRect {
     /// A rectangle the UI reports must be finite, non-negative, and inside the window; anything else is ignored.
-    fn checked(x: f64, y: f64, w: f64, h: f64) -> Option<IslandRect> {
-        let sane = [x, y, w, h].iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 && x >= -1.0 && y >= -1.0 && x + w <= NEXT_W + 1.0 && y + h <= NEXT_H + 1.0;
+    fn checked(x: f64, y: f64, w: f64, h: f64, window_width: f64, window_height: f64) -> Option<IslandRect> {
+        let sane = [x, y, w, h].iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 && x >= -1.0 && y >= -1.0
+            && x + w <= window_width + 1.0 && y + h <= window_height + 1.0;
         sane.then_some(IslandRect { x, y, w, h })
     }
 
@@ -232,8 +233,11 @@ fn spawn_heartbeat(app: AppHandle) {
 
 /// The island reports where it is drawn, in logical pixels from the window's top-left.
 #[tauri::command]
-fn pill_set_rect(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
-    let rect = IslandRect::checked(x, y, width, height).ok_or("island rectangle is outside the window")?;
+fn pill_set_rect(window: WebviewWindow, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let rect = IslandRect::checked(x, y, width, height, size.width as f64 / scale, size.height as f64 / scale)
+        .ok_or("island rectangle is outside the window")?;
     NEXT.lock().unwrap().rect = rect;
     Ok(())
 }
@@ -372,6 +376,32 @@ fn save_position(app: &AppHandle, cx: i32, y: i32) {
 /// Puts the pill at the top centre of the primary monitor, or where the user last left it if that spot is still on a screen.
 fn place(window: &WebviewWindow, saved: &Saved) {
     place_with(window, saved, COLLAPSED_W);
+}
+
+fn place_next_pill(window: &WebviewWindow, saved: &Saved) {
+    let saved_point = saved.cx.zip(saved.y);
+    let monitor = window.available_monitors().unwrap_or_default().into_iter().find(|monitor| {
+        let pos = monitor.position();
+        let size = monitor.size();
+        saved_point.is_some_and(|(x, y)| x >= pos.x && x < pos.x + size.width as i32
+            && y >= pos.y && y < pos.y + size.height as i32)
+    }).or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
+        return;
+    };
+    let area = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let width = ((NEXT_W * scale).round() as u32).min(area.size.width);
+    let height = ((NEXT_H * scale).round() as u32).min(area.size.height);
+    let left = area.position.x;
+    let top = area.position.y;
+    let center = saved_point.map_or(left + area.size.width as i32 / 2, |(x, _)| x);
+    let desired_top = saved_point.map_or(top + (TOP_MARGIN * scale).round() as i32, |(_, y)| y);
+    let x = (center - width as i32 / 2).clamp(left, left + (area.size.width - width) as i32);
+    let y = desired_top.clamp(top, top + (area.size.height - height) as i32);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    let _ = window.set_size(tauri::PhysicalSize::new(width, height));
 }
 
 fn place_with(window: &WebviewWindow, saved: &Saved, width: f64) {
@@ -1291,13 +1321,12 @@ fn main() {
             ctrl_alt_hold::spawn(app.handle().clone());
             if next_mode() {
                 // The one-pill UI is the root of the single canonical frontend bundle.
-                let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
                 let _ = window.set_ignore_cursor_events(true);
                 match "http://tauri.localhost/index.html".parse() {
                     Ok(url) => { let _ = window.navigate(url); }
                     Err(e) => eprintln!("M9R: could not open the one-pill UI ({e})"),
                 }
-                place_with(&window, &load_saved(app.handle()), NEXT_W);
+                place_next_pill(&window, &load_saved(app.handle()));
                 spawn_click_through_watcher(app.handle().clone());
             } else {
                 place(&window, &load_saved(app.handle()));
@@ -1452,17 +1481,18 @@ mod one_pill_window_tests {
 
     #[test]
     fn only_a_sane_rectangle_inside_the_window_is_accepted() {
-        assert!(IslandRect::checked(216.0, 0.0, 288.0, 32.0).is_some());
-        assert!(IslandRect::checked(0.0, 0.0, NEXT_W, NEXT_H).is_some());
-        assert!(IslandRect::checked(f64::NAN, 0.0, 10.0, 10.0).is_none());
-        assert!(IslandRect::checked(0.0, 0.0, -1.0, 10.0).is_none());
-        assert!(IslandRect::checked(100.0, 0.0, NEXT_W, 10.0).is_none(), "wider than the window allows");
-        assert!(IslandRect::checked(0.0, 0.0, 10.0, NEXT_H + 50.0).is_none());
+        assert!(IslandRect::checked(216.0, 0.0, 288.0, 32.0, NEXT_W, NEXT_H).is_some());
+        assert!(IslandRect::checked(198.0, 0.0, 704.0, 432.0, NEXT_W, NEXT_H).is_some());
+        assert!(IslandRect::checked(0.0, 0.0, NEXT_W, NEXT_H, NEXT_W, NEXT_H).is_some());
+        assert!(IslandRect::checked(f64::NAN, 0.0, 10.0, 10.0, NEXT_W, NEXT_H).is_none());
+        assert!(IslandRect::checked(0.0, 0.0, -1.0, 10.0, NEXT_W, NEXT_H).is_none());
+        assert!(IslandRect::checked(100.0, 0.0, NEXT_W, 10.0, NEXT_W, NEXT_H).is_none(), "wider than the window allows");
+        assert!(IslandRect::checked(0.0, 0.0, 10.0, 432.0, 720.0, 400.0).is_none());
     }
 
     #[test]
     fn the_island_and_its_margin_are_solid_and_everything_else_is_click_through() {
-        let r = IslandRect::checked(216.0, 0.0, 288.0, 32.0).unwrap();
+        let r = IslandRect::checked(216.0, 0.0, 288.0, 32.0, NEXT_W, NEXT_H).unwrap();
         assert!(r.hit(HIT_MARGIN, 300.0, 10.0));
         assert!(r.hit(HIT_MARGIN, 216.0 - HIT_MARGIN, 0.0), "the margin counts");
         assert!(!r.hit(HIT_MARGIN, 216.0 - HIT_MARGIN - 1.0, 10.0));
@@ -1471,7 +1501,7 @@ mod one_pill_window_tests {
 
     #[test]
     fn a_retracted_island_is_never_hit_even_at_its_old_position() {
-        let r = IslandRect::checked(268.0, 0.0, 184.0, 0.0).unwrap();
+        let r = IslandRect::checked(268.0, 0.0, 184.0, 0.0, NEXT_W, NEXT_H).unwrap();
         assert!(!r.hit(HIT_MARGIN, 300.0, 0.0));
         assert!(!IslandRect::default().hit(HIT_MARGIN, 0.0, 0.0));
     }

@@ -1,0 +1,87 @@
+*{box-sizing:border-box}body{margin:0;height:100dvh;background:radial-gradient(ellipse at 13% 78%,#ddc9b8,transparent 58%),radial-gradient(ellipse at 76% 34%,#92a8b9,transparent 62%),#c4c4c6;font:15px/1.4 "Segoe UI",sans-serif;color:white}button,input{font:inherit}button{cursor:pointer;color:inherit}main{position:absolute;left:50%;transform:translateX(-50%);width:min(288px,95vw);height:32px;background:#09090a;border-radius:0 0 15px 15px;transition:width .32s cubic-bezier(.2,.8,.2,1),height .32s cubic-bezier(.2,.8,.2,1),border-radius .32s;display:flex;flex-direction:column;box-shadow:0 8px 24px #0002}main:before,main:after{content:"";position:absolute;top:0;width:16px;height:16px;pointer-events:none}main:before{right:100%;background:radial-gradient(circle at bottom left,transparent 15px,#09090a 16px)}main:after{left:100%;background:radial-gradient(circle at bottom right,transparent 15px,#09090a 16px)}main.open{width:min(var(--w,460px),96vw);height:min(var(--h,415px),92dvh);border-radius:0 0 28px 28px}main.drag{transition:none}#toggle{background:none;border:0;display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:32px;flex:none}#faces{display:flex;align-items:center}#faces img{width:20px;height:20px;padding:3px;background:#dedbd7;border-radius:50%;border:1px solid #101012}#faces img+img{margin-left:-4px}#title{font-size:12px;font-weight:600}.open #toggle{height:74px;flex-direction:column;gap:2px}.open #faces img{width:30px;height:30px}.open #faces img+img{margin-top:5px}section{min-height:0;flex:1;display:flex;flex-direction:column;overflow:hidden;opacity:0;visibility:hidden}.open section{visibility:visible;opacity:1;transition:opacity .22s .1s}#thread{overflow:auto;padding:6px 20px;flex:1;min-height:0;scrollbar-width:thin}.msg{margin:0 0 12px}.msg small{display:block;color:#b8b7bc;font-size:11px;margin:0 9px 3px}.msg p{margin:0;padding:7px 12px;border-radius:16px;background:#29292d;width:fit-content;max-width:85%;overflow-wrap:anywhere}.mine p{margin-left:auto;background:#205ebc}.mine small{text-align:right}form{display:flex;margin:8px 16px 16px;border:1px solid #46464d;border-radius:20px;padding:4px 5px 4px 13px}input{background:none;color:white;border:0;min-width:0;flex:1}form button{border:0;background:#386fc4;border-radius:50%;width:29px;height:29px}.edge{display:none;position:absolute;touch-action:none}.open .edge{display:block}.left,.right{top:12px;bottom:18px;width:8px;cursor:ew-resize}.left{left:0}.right{right:0}.bottom{bottom:0;height:8px;left:20px;right:20px;cursor:ns-resize}.corner{right:3px;bottom:3px;width:18px;height:18px;cursor:nwse-resize}.corner:after{content:"";position:absolute;right:5px;bottom:4px;width:7px;height:7px;border-right:1px solid #888;border-bottom:1px solid #888;border-bottom-right-radius:5px}aside{position:fixed;bottom:18px;width:100%;text-align:center;color:#353942;font-size:12px}@media(prefers-reduced-motion:reduce){main,.open section{transition:none}}
+
+/* The resting lip stays at the screen edge; the sheet opens beneath it. */
+main.open {
+  width: min(var(--w, 704px), 96vw);
+  height: min(var(--h, 432px), 92dvh);
+}
+main,main.open{top:0;background:transparent;border-radius:0;box-shadow:none;align-items:center}
+#toggle,.open #toggle{position:relative;z-index:2;width:min(288px,95vw);height:32px;border-radius:0 0 15px 15px;background:#09090a;flex-direction:row}
+main:before,main:after{display:none}
+.glint{width:27px;height:2px;border-radius:4px;background:linear-gradient(90deg,#34343a,#93939d,#34343a)}
+#sheet{width:100%;background:#09090a;border-radius:24px;box-shadow:0 12px 24px #0002}
+.open #sheet{margin-top:-5px}
+#sheet header{display:grid;justify-items:center;gap:4px;padding:14px 0 8px;font-size:13px}
+#targets{display:flex;align-items:center;gap:3px;margin-right:8px}
+#targets button{display:grid;place-items:center;padding:3px;background:#515159;opacity:.55;width:24px;height:24px}
+#targets button[aria-pressed=true]{opacity:1;background:#e1ddd8;outline:1px solid #aaa}
+#targets .logo,#targets img{display:block}
+
+/* One filled contour owns the entire surface throughout the transition. */
+#outline { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+#toggle,.open #toggle,#sheet { background:transparent; box-shadow:none; }
+#sheet { position:relative; transition:opacity .18s ease, visibility 0s linear .32s; }
+.open #sheet { transition:opacity .18s ease .07s, visibility 0s; }
+@media(prefers-reduced-motion:reduce){#sheet,.open #sheet{transition:none}}
+body.desktop{background:transparent;overflow:hidden}.desktop #workspace{position:absolute;right:20px;top:12px;color:#aaa;background:transparent;border:0;font-size:16px}.desktop header{position:relative}.desktop header strong{max-width:75%;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
+
+/* Keep a quiet, inset thumb that belongs to the dark conversation surface. */
+#thread {
+  scrollbar-width: auto;
+  scrollbar-gutter: stable;
+}
+#thread::-webkit-scrollbar {
+  width: 8px;
+}
+#thread::-webkit-scrollbar-track {
+  background: #111114;
+  border-radius: 8px;
+  margin-block: 8px;
+}
+#thread::-webkit-scrollbar-thumb {
+  background: #59545d;
+  border: 2px solid #111114;
+  border-radius: 8px;
+}
+#thread::-webkit-scrollbar-thumb:hover,
+#thread::-webkit-scrollbar-thumb:active {
+  background: #89818d;
+}
+@supports not selector(::-webkit-scrollbar) {
+  #thread {
+    scrollbar-width: thin;
+    scrollbar-color: #59545d #111114;
+  }
+}
+@media (forced-colors: active) {
+  #thread {
+    scrollbar-color: auto;
+  }
+}
+.desktop #sheet nav {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+  display: flex;
+  gap: 4px;
+}
+.desktop #sheet nav button {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 7px;
+  color: #c9c5ca;
+  background: transparent;
+  font-size: 12px;
+}
+.desktop #sheet nav button:hover,
+.desktop #sheet nav button:focus-visible {
+  color: white;
+  background: #29292d;
+}
+.send-status {
+  max-width: 90%;
+  overflow-wrap: anywhere;
+  color: #b8b7bc;
+  font-size: 11px;
+}
+.send-status:empty { display: none; }
