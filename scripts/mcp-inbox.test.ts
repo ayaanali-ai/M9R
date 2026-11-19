@@ -241,6 +241,43 @@ test("native stage actions leave surface-scoped revision tracking to the owner b
   } finally { t.done(); }
 });
 
+test("public app observation and append keep the broker-selected background target after a refusal", async () => {
+  const calls: Array<[string, string | undefined]> = [];
+  const t = setup({ web: {
+    taskStageApp: async (_token, _task, app, mode) => {
+      calls.push([app, mode]);
+      return { ok: true };
+    },
+    prepareTaskStage: async (_token, _task, mode) => {
+      calls.push(["prepare", mode]);
+      return { ok: true, stage: { mode: "background" } };
+    },
+    taskStageAction: async (_token, _task, action, mode) => {
+      const { kind } = action as { kind: string };
+      calls.push([kind, mode]);
+      if (kind === "read_structure") return { ok: true, result: { status: "complete", capturedAt: new Date().toISOString(),
+        elements: [{ ref: "uia:notepad-editor", role: "edit", label: "Editor", enabled: true,
+          actions: ["readValue", "setValue"], rect: { x: 1, y: 2, width: 100, height: 100 } }] } };
+      if (kind === "press_key") return { ok: false, error: "No safe background route" };
+      assert.equal((action as { ref?: string }).ref, "uia:notepad-editor");
+      return { ok: true, result: { outcome: { status: "confirmed" } } };
+    },
+  } });
+  try {
+    const task = t.store.addTask({ from: "you", to: "codex", goal: "Append to Notepad", origin: "human_typed", idempotencyKey: "notepad-routing" }).task;
+    t.store.markDelivered([task.id], "x1");
+    const scope = { token: t.codex, taskId: task.id };
+    await t.call("m9r_stage_app", { ...scope, operation: "launch", appId: "notepad", mode: "background", operationId: "attach" });
+    assert.match(await t.call("m9r_stage_action", { ...scope, mode: "background", operationId: "refused",
+      action: { kind: "press_key", view: "app", key: "Enter" } }), /No safe background route/);
+    const observed = JSON.parse(await t.call("m9r_computer_observe", { ...scope, target: "app-window" }));
+    const ref = observed.observation.structure.elements[0].ref;
+    await t.call("m9r_stage_action", { ...scope, operationId: "append", action: { kind: "append_element", view: "app", ref, text: "New line", separator: "newline" } });
+    assert.deepEqual(calls, [["notepad", "background"], ["press_key", "background"], ["prepare", undefined],
+      ["read_structure", "background"], ["append_element", "background"]]);
+  } finally { t.done(); }
+});
+
 test("structured observation refs work in stage actions without losing native identity or the observed mutation fence", async () => {
   const sent: Array<{ action: unknown; revision: number | undefined }> = [];
   const t = setup({ web: {
