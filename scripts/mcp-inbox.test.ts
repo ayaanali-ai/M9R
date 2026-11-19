@@ -245,7 +245,7 @@ test("public app observation and append keep the broker-selected background targ
   const calls: Array<[string, string | undefined]> = [];
   const t = setup({ web: {
     taskStageApp: async (_token, _task, app, mode) => {
-      calls.push([app, mode]);
+      calls.push([app ?? "", mode]);
       return { ok: true };
     },
     prepareTaskStage: async (_token, _task, mode) => {
