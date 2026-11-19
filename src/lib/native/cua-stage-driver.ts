@@ -1194,7 +1194,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     try { deps.onTiming?.(event); } catch { /* diagnostics must never affect desktop control */ }
   }
 
-  async function updateM9rCursorOverlay(session: AgentCursorSession | string, x: number, y: number, cue?: "edit"): Promise<boolean> {
+  async function updateM9rCursorOverlay(session: AgentCursorSession | string, x: number, y: number, cue?: "edit" | "click"): Promise<boolean> {
     const presentation = cursorOverlayPresentations.get(typeof session === "string" ? session : session.session);
     if (!cursorOverlayHost || !presentation) return false;
     const startedAt = performance.now();
@@ -3659,6 +3659,11 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return validPoint(x, y, frame) ? { x, y } : undefined;
   }
 
+  async function cueElementCursor(session: string, point: { x: number; y: number }, cue: "edit" | "click"): Promise<void> {
+    const cursor = [...agentSessions.values()].find((candidate) => candidate.session === session);
+    if (cursor) await bestEffortCursorPresentation(cursor.key, () => updateM9rCursorOverlay(session, point.x, point.y, cue));
+  }
+
   async function moveElementCursorToScreen(session: string, point: { x: number; y: number }): Promise<void> {
     const cursor = [...agentSessions.values()].find((candidate) => candidate.session === session);
     if (!cursor) return;
@@ -3706,6 +3711,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           throw error;
         }
         if (semantic.dispatched) {
+          if (cursorIdentity && screenPoint) await cueElementCursor(session, screenPoint, "click");
           return {
             capture: await captureWithStructure(readStructure, now),
             outcome: { status: "unverified", summary: `Native UI Automation dispatched ${semantic.mechanism ?? "the control action"}; the refreshed window capture is the separate effect check.` },
@@ -3885,9 +3891,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const after = await manager.invokeWindowElement(pid, windowId.toString(), { ...element, action: "readValue", maxChars: 4096 });
       const verified = after.read === true && after.redacted !== true && after.truncated !== true && after.value === nextValue;
       if (verified && cursorIdentity && screenPoint) {
-        const cursor = agentSessions.get(agentCursorDetails(cursorIdentity).key);
-        if (cursor) await bestEffortCursorPresentation(cursor.key, () =>
-          updateM9rCursorOverlay(session, screenPoint.x, screenPoint.y, "edit"));
+        await cueElementCursor(session, screenPoint, "edit");
       }
       return {
         ...(!verified || options.captureOnSuccess ? { capture: stageCapture(await captureWindow(), now) } : {}),

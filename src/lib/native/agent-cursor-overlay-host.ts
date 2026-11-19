@@ -14,7 +14,7 @@ export interface AgentCursorOverlayPoint {
   color: Rgb;
   x: number;
   y: number;
-  cue?: "edit";
+  cue?: "edit" | "click";
 }
 
 export interface AgentCursorOverlayHost {
