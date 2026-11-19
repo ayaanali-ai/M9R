@@ -846,7 +846,7 @@ export function createTaskDesktopStageService(input: {
       const existing = manager.list().find((stage) => stage.name === name);
       let assignedStage: ReturnType<typeof manager.assignAgent> | undefined;
       if (options.bindForeground) {
-          if (mode === "background" || hasBackgroundTarget()) {
+          if (hasBackgroundTarget()) {
             throw new DesktopInputNotDispatchedError("This task has a background target. Observe the selected app without bindForeground; no window was changed.");
           }
           if (typeof manager.currentForegroundWindow !== "function") throw new Error("The native stage helper cannot bind the current foreground window.");
