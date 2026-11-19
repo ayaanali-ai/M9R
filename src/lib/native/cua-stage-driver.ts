@@ -1842,7 +1842,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     windowId: bigint;
     captureFrame: () => Promise<CuaStageWindowFrame>;
     capture: () => Promise<CuaStageWindowFrame>;
-    readStructure: () => Promise<CuaStageStructure>;
+    readStructure: (preferStructureOnly?: boolean) => Promise<CuaStageStructure>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
     elementAtPoint: (x: number, y: number, action?: "click" | "set_value") => Promise<CuaWindowElement | undefined>;
     observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
@@ -2007,8 +2007,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { ...frame, ...popups };
     };
 
-    const readStructure = async (): Promise<CuaStageStructure> => {
-      const { frame, observed } = await captureNativeWindowWithStructure();
+    const readStructure = async (preferStructureOnly = false): Promise<CuaStageStructure> => {
+      const semantic = preferStructureOnly ? await readNativeElements().catch(() => undefined) : undefined;
+      const bounds = semantic?.structure.status === "complete" && !semantic.structure.truncated
+        && semantic.elements.length > 0 ? await manager.windowRect(pid, windowId.toString()).catch(() => undefined) : undefined;
+      const structureOnly = Boolean(bounds && bounds.width > 0 && bounds.height > 0);
+      const { frame, observed } = bounds && structureOnly
+        ? { frame: { width: bounds.width, height: bounds.height, windowBounds: bounds, capturedAt: now().toISOString() }, observed: semantic }
+        : preferStructureOnly ? { frame: await captureNativeFrame(), observed: semantic } : await captureNativeWindowWithStructure();
       const capturedAt = frame.capturedAt ?? now().toISOString();
       if (observed) {
         const { structure, elements } = observed;
@@ -2028,12 +2034,12 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
               width: native.rect.width * frame.width / frame.windowBounds!.width,
               height: native.rect.height * frame.height / frame.windowBounds!.height },
           })),
-          fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now),
+          ...("dataUrl" in frame ? { fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now) } : {}),
         };
       }
       return { status: "unavailable", coverage: contentCoverage("window"), capturedAt,
         ...(frame.windowBounds ? { screenRect: frame.windowBounds } : {}),
-        elements: [], fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now) };
+        elements: [], ...("dataUrl" in frame ? { fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now) } : {}) };
     };
 
     const hitTarget = async (x: number, y: number, action?: "click" | "set_value") => timed("target-resolution", async () => {
@@ -2137,8 +2143,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     return withRegisteredWindow(name, async ({ capture: captureWindow }) => stageCapture(await captureWindow(), now), cursorIdentity);
   }
 
-  async function readStructure(name: string, cursorIdentity?: CuaAgentCursorIdentity): Promise<CuaStageStructure> {
-    return withRegisteredWindow(name, async ({ readStructure: read }) => read(), cursorIdentity);
+  async function readStructure(name: string, cursorIdentity?: CuaAgentCursorIdentity, preferStructureOnly = false): Promise<CuaStageStructure> {
+    return withRegisteredWindow(name, async ({ readStructure: read }) => read(preferStructureOnly), cursorIdentity);
   }
 
   async function readElementValue(name: string, ref: string, cursorIdentity?: CuaAgentCursorIdentity,

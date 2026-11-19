@@ -2395,6 +2395,24 @@ test("an independently fenced field refuses recreated UIA identity and never use
   await driver.shutdown();
 }));
 
+test("background app structure skips pixels for a complete tree and captures for a partial tree", async () => withRoot(async root => {
+  await registerStage(root);
+  const state = { elementsComplete: true, elements: [{ role: "Edit", label: "Editor", enabled: true }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [], state }) as never });
+  try {
+    const complete = await driver.readStructure("stage", undefined, true);
+    assert.equal(complete.status, "complete");
+    assert.equal(complete.fallbackCapture, undefined);
+    assert.equal(nativeFixture(root).calls.filter(call => call.op === "captureWindow").length, 0);
+    state.elementsComplete = false;
+    setNativeFixture(root, { state });
+    const partial = await driver.readStructure("stage", undefined, true);
+    assert.equal(partial.status, "partial");
+    assert.ok(partial.fallbackCapture?.dataUrl);
+    assert.equal(nativeFixture(root).calls.filter(call => call.op === "captureWindow").length, 1);
+  } finally { await driver.shutdown(); }
+}));
+
 test("background append refuses a changed document ancestor even when the editor identity matches", async () => withRoot(async root => {
   await registerStage(root);
   const document = { role: "document", label: "Owner document", runtimeId: [42, 1], path: [0] };

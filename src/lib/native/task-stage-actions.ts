@@ -294,7 +294,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "capture": return { capture: await capture() };
     case "read_structure":
       return action.view === "app"
-        ? driver.readStructure(name, identity)
+        ? mode === "background" ? driver.readStructure(name, identity, true) : driver.readStructure(name, identity)
         : driver.readDesktopStructure(name, identity);
     case "window_status": throw new Error("Window status is handled by the stage service before recovery.");
     case "stop": throw new Error("Stop is handled outside the stage action queue.");
