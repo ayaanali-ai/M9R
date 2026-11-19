@@ -15,7 +15,7 @@ import { createWindowsDesktopStageManager, type WindowsStageDependencies, type N
 import type { VerifiedIdentity } from "./identity-core";
 import { createForegroundInputLease, ForegroundInputLeaseError, type ForegroundInputLease } from "./foreground-input-lease";
 import { classifySaveAsConflict, findDialogButton, findSaveAsButton, findSaveAsNameField, resolveSaveAsTarget } from "./stage-save-as";
-import { nativeValueControlRegion, sameNativeControlEpoch } from "./native-control-region";
+import { nativeDocumentAncestor, nativeValueControlRegion, sameNativeControlEpoch } from "./native-control-region";
 import { createAgentCursorOverlayHost, type AgentCursorOverlayHost } from "./agent-cursor-overlay-host";
 
 const CUA_PACKAGE = "@trycua/cua-driver";
@@ -1848,7 +1848,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
     observedNativeElementByToken: (token: string, expected?: { role?: string; label?: string }) => NativeWindowStructureElement | undefined;
     observedNativeElements: () => readonly NativeWindowStructureElement[];
-    elementByToken: (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => Promise<{
+    elementByToken: (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean; verifyDocument?: boolean }) => Promise<{
       element: CuaWindowElement;
       /** Fresh UIA bounds are already in virtual-screen coordinates. */
       screenRect: NativeWindowStructureElement["rect"];
@@ -2049,8 +2049,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
           : element.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name)) === true);
     }, { detail: `source=accessibility-tree;action=${action ?? "point"}` });
 
-    const elementByToken = async (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean }) => {
-      const observed = findInObservationHistory(nativeObservedElements, observationKey, token);
+    const elementByToken = async (token: string, expected?: { role?: string; label?: string; allowDisabled?: boolean; verifyDocument?: boolean }) => {
+      const generation = nativeObservedElements.get(observationKey)?.find((snapshot) => snapshot.has(token));
+      const observed = generation?.get(token);
       if (!observed) return undefined;
       const normalizedLabel = normalizeAccessibleLabel(observed.label) ?? "";
       if ((expected?.role !== undefined && observed.role !== expected.role)
@@ -2059,6 +2060,13 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       const candidates = structure.elements.filter((candidate) => sameNativeControlEpoch(observed, candidate));
       const current = candidates.length === 1 ? candidates[0] : undefined;
       if (!current || (current.enabled === false && expected?.allowDisabled !== true)) return undefined;
+      if (expected?.verifyDocument && generation) {
+        const before = nativeDocumentAncestor(observed, generation.values());
+        const after = nativeDocumentAncestor(current, structure.elements);
+        if (before || after) {
+          if (!before?.runtimeId?.length || !after || !sameNativeControlEpoch(before, after)) return undefined;
+        }
+      }
       const fresh = elements.find(({ native }) => native === current);
       if (!fresh) return undefined;
       // UIA BoundingRectangle is already expressed in screen coordinates.
@@ -3832,7 +3840,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions & { expectedRole?: string; expectedLabel?: string; captureOnSuccess?: boolean } = {}): Promise<Omit<CuaStageActionProof, "capture"> & { capture?: CuaStageCapture }> {
     return withRegisteredWindow(name, async ({ session, pid, windowId, capture: captureWindow, elementByToken }) => {
       assertNotAbortedBeforeInput(options.signal);
-      const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
+      const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel, verifyDocument: true });
       if (!selected?.element.elementToken || selected.element.enabled === false || !selected.nativeElement?.actions?.readValue
         || !selected.nativeElement.actions?.setValue || typeof manager.invokeWindowElement !== "function") {
         throw new DesktopInputNotDispatchedError(

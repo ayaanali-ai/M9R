@@ -39,3 +39,15 @@ export function sameNativeControlEpoch(observed: NativeWindowStructureElement, c
   if (observed.automationId.trim()) return true;
   return current.label === observed.label;
 }
+
+/** The nearest exposed document owns the field even when one window hosts several documents. */
+export function nativeDocumentAncestor(element: NativeWindowStructureElement,
+  elements: Iterable<NativeWindowStructureElement>): NativeWindowStructureElement | undefined {
+  let nearest: NativeWindowStructureElement | undefined;
+  for (const candidate of elements) {
+    if (candidate.role.toLowerCase() !== "document" || candidate.path.length >= element.path.length
+      || (nearest && candidate.path.length <= nearest.path.length)) continue;
+    if (candidate.path.every((segment, index) => element.path[index] === segment)) nearest = candidate;
+  }
+  return nearest;
+}

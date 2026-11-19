@@ -600,7 +600,7 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
           return {
             // Native refs are snapshot-qualified, so a later tree read can
             // never make an old provider ref silently point at a new element.
-            ref: `window-ui-element-${structureRevision}-${index + 1}`, path: [index], depth: Number(element.depth ?? 1),
+            ref: `window-ui-element-${structureRevision}-${index + 1}`, path: Array.isArray(element.path) ? element.path : [index], depth: Number(element.depth ?? 1),
             role: String(element.role ?? ""), label: String(element.label ?? ""),
             className: String(element.className ?? ""), automationId: String(element.automationId ?? ""),
             ...(Array.isArray(element.runtimeId) ? { runtimeId: element.runtimeId as number[] } : {}),
@@ -2393,6 +2393,22 @@ test("an independently fenced field refuses recreated UIA identity and never use
     error => error instanceof DesktopInputNotDispatchedError);
   assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText", "findEditChildWindow", "sendTextToWindow"].includes(String(call.op))), false);
   await driver.shutdown();
+}));
+
+test("background append refuses a changed document ancestor even when the editor identity matches", async () => withRoot(async root => {
+  await registerStage(root);
+  const document = { role: "document", label: "Owner document", runtimeId: [42, 1], path: [0] };
+  const field = { role: "Edit", label: "Editor", automationId: "editor", runtimeId: [42, 2], path: [0, 0],
+    enabled: true, actions: ["set_value"], frame: { x: 120, y: 58, w: 120, h: 30 } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [],
+    state: { elementsComplete: true, elements: [document, field] } }) as never });
+  try {
+    const observed = await driver.readStructure("stage");
+    document.runtimeId = [42, 3];
+    await assert.rejects(driver.appendElement("stage", observed.elements[1]!.ref, "New line", "newline", undefined,
+      { deliveryMode: "background" }), (error: unknown) => error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+    assert.equal(nativeFixture(root).calls.some(call => call.op === "invokeWindowElement"), false);
+  } finally { await driver.shutdown(); }
 }));
 
 test("background append refuses a replaced document editor even when its window and label match", async () => withRoot(async root => {
