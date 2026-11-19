@@ -42,13 +42,15 @@ export function subscribeA2ACursorChatter(input: {
     // model-chosen A2A room label, never M9R's internal "T<number>" task id,
     // so it is never passed on for cursor lookup; sayAgentCursor resolves by
     // handle alone and fails closed on genuine ambiguity.
-    if (!fromHandle || !message.taskId || !message.summary.trim()) return;
+    if (!fromHandle || !message.taskId || !message.summary.trim() || message.kind === "update") return;
     const recipients = message.recipient.kind === "agent" ? [message.recipient.agentId] : message.recipient.agentIds;
     for (const recipientId of recipients) {
       const toHandle = handleByAgentId.get(recipientId);
       if (!toHandle) continue;
       try { void Promise.resolve(input.sayAgentCursor(fromHandle, toHandle, message.summary)).catch(() => undefined); }
       catch { /* presentation failures never affect A2A message handling */ }
+      // The bubble belongs to the speaker, even when transport fans out.
+      break;
     }
   });
 }

@@ -120,8 +120,10 @@ test("A2A bubbles require an acknowledged visible sender and sanitize bounded te
   assert.equal(await host.say({ id: "agent-codex", text: "hello" }), false,
     "an invisible sender cannot produce a free-floating bubble");
   assert.equal(launched.length, 0, "a rejected bubble does not start the renderer");
-  assert.equal(await host.upsert({ id: "agent-codex", label: "Codex", color: [40, 140, 230], x: 20, y: 30 }), true);
-  assert.equal(await host.say({ id: "agent-codex", text: "  review\nthis\tfirst  " }), true);
+  const firstFrame = host.upsert({ id: "agent-codex", label: "Codex", color: [40, 140, 230], x: 20, y: 30 });
+  const firstBubble = host.say({ id: "agent-codex", text: "  review\nthis\tfirst  " });
+  assert.equal(await firstFrame, true);
+  assert.equal(await firstBubble, true, "chatter during first presentation waits for the sender acknowledgement");
   assert.deepEqual(launched[0]?.commands.at(-1), {
     cmd: "say", id: "agent-codex", text: "review this first", requestId: 2,
   });

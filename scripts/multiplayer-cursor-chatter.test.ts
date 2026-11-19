@@ -46,6 +46,7 @@ test("accepted roster A2A summaries map to sender and recipient cursor handles",
   listener!(message({ recipient: { kind: "agent", agentId: "unknown-recipient" } }));
   listener!(message({ summary: "   " }));
   listener!(message({ taskId: undefined }));
+  listener!(message({ kind: "update", summary: "Routine progress" }));
 
   // message.taskId ("task-1" here) is only presence-checked to gate task-scoped chatter; it is never
   // forwarded to sayAgentCursor, since it is the sender's own free-form A2A room label, not a real M9R
@@ -55,7 +56,7 @@ test("accepted roster A2A summaries map to sender and recipient cursor handles",
   assert.equal(unsubscribed, true, "the broker can release the listener at shutdown");
 });
 
-test("one accepted broadcast can address each configured teammate without leaking unknown ids", () => {
+test("one accepted broadcast generates one speaker bubble", () => {
   let listener: ((accepted: A2AMessage) => void) | undefined;
   const rendered: Array<[string, string]> = [];
   subscribeA2ACursorChatter({
@@ -63,8 +64,8 @@ test("one accepted broadcast can address each configured teammate without leakin
     roster: { ...roster, agents: [...roster.agents, { agentId: "agent-gemini", branchId: "branch-gemini", provider: "Gemini", handle: "gemini" }] },
     sayAgentCursor: (from, to) => { rendered.push([from, to]); return true; },
   });
-  listener!(message({ recipient: { kind: "group", agentIds: ["agent-claude", "agent-gemini", "agent-unknown"] } }));
-  assert.deepEqual(rendered, [["codex", "claude"], ["codex", "gemini"]]);
+  listener!(message({ recipient: { kind: "group", agentIds: ["agent-unknown", "agent-claude", "agent-gemini"] } }));
+  assert.deepEqual(rendered, [["codex", "claude"]]);
 });
 
 test("cursor chatter resolves only one currently active session for a handle", () => {

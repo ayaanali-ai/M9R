@@ -281,8 +281,9 @@ export function createAgentCursorOverlayHost(input: {
       // transport itself. Require a currently acknowledged sender marker and
       // bound every string before it reaches the native renderer.
       const text = message.text.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 160);
-      if (!visible.has(message.id) || !text) return false;
-      return send({ cmd: "say", id: message.id, text });
+      if (!possiblyVisible.has(message.id) || !text) return false;
+      return forMarker(message.id, async () =>
+        visible.has(message.id) && await send({ cmd: "say", id: message.id, text }));
     },
     async hide(id) {
       return hide(id);
