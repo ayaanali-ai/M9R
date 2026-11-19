@@ -298,15 +298,6 @@ fn feed_path() -> PathBuf {
     home.join("feed.json")
 }
 
-/// The web broker writes this separately from the native feed. If M9R_FEED is overridden for a local preview/test,
-/// keep the companion activity file beside that override; the production default is ~/.m9r/web-activity.json.
-fn web_activity_path() -> PathBuf {
-    feed_path()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("web-activity.json")
-}
-
 /// The owner broker's redacted desktop-pill snapshot. The pill reads this
 /// before falling back to the legacy merged feed, so it never discovers or
 /// selects provider sessions itself.
@@ -419,12 +410,6 @@ fn resize_pill(window: WebviewWindow, width: f64, height: f64) -> Result<(), Str
     window.set_position(PhysicalPosition::new(cx - new_w / 2, pos.y)).map_err(|e| e.to_string())
 }
 
-/// A view-only merge of the native feed and separately persisted web activity.
-#[tauri::command]
-fn read_feed() -> Option<String> {
-    read_view_feed(&feed_path(), &web_activity_path())
-}
-
 /// Read only a broker-published, versioned pill state envelope. Returning the
 /// inner state JSON keeps the Tauri command transport simple while the broker
 /// remains the sole writer and owner of provider/UI state.
@@ -443,6 +428,7 @@ fn read_pill_state() -> Option<String> {
     value.get("state").map(serde_json::Value::to_string)
 }
 
+#[cfg(test)]
 fn read_view_feed(native_path: &Path, web_path: &Path) -> Option<String> {
     let native = fs::read_to_string(native_path).ok();
     let web = fs::read_to_string(web_path).ok();
@@ -450,6 +436,7 @@ fn read_view_feed(native_path: &Path, web_path: &Path) -> Option<String> {
 }
 
 /// Compose sources only in memory for the renderer. This never writes back to feed.json, which remains native-only.
+#[cfg(test)]
 fn merge_view_feed(native_text: Option<&str>, web_text: Option<&str>) -> Option<String> {
     if native_text.is_none() && web_text.is_none() {
         return None;
@@ -1229,50 +1216,6 @@ fn shutdown_pill(app: &AppHandle) {
     app.exit(0);
 }
 
-/// Watches both source files (a quarter-second poll: no extra dependency) and emits a merged view when either changes.
-fn spawn_feed_watcher(app: AppHandle) {
-    std::thread::spawn(move || {
-        let native_path = feed_path();
-        let web_path = web_activity_path();
-        let mut last_native: Option<(SystemTime, u64)> = None;
-        let mut last_web: Option<(SystemTime, u64)> = None;
-        let mut last_change_at = Instant::now();
-        let mut stale_reported = false;
-        loop {
-            let native = file_stamp(&native_path);
-            let web = file_stamp(&web_path);
-            let native_changed = native != last_native;
-            let any_changed = native_changed || web != last_web;
-            last_native = native;
-            last_web = web;
-
-            if native_changed && native.is_some() {
-                last_change_at = Instant::now();
-                if stale_reported {
-                    stale_reported = false;
-                    let _ = app.emit("engine-ok", ());
-                }
-            }
-            if any_changed {
-                if let Some(view) = read_view_feed(&native_path, &web_path) {
-                    let _ = app.emit("feed", view);
-                } else {
-                    let _ = app.emit("feed-missing", ());
-                }
-            } else if native.is_some() && !stale_reported && last_change_at.elapsed() > Duration::from_secs(20) {
-                // Web activity does not keep the native engine healthy: only native feed writes reset this timer.
-                stale_reported = true;
-                let _ = app.emit("engine-stale", ());
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    });
-}
-
-fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
-    fs::metadata(path).ok().map(|meta| (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()))
-}
-
 /// Shared by the hold-to-talk hotkey, however it was detected (currently only the raw Ctrl+Alt
 /// keyboard hook in ctrl_alt_hold.rs, but this stays decoupled from that detection mechanism).
 pub(crate) fn report_hold_to_talk(app: &AppHandle, state: &Mutex<HoldToTalkState>, pressed: bool) {
@@ -1395,7 +1338,6 @@ fn main() {
             .build(app)?;
 
             spawn_heartbeat(app.handle().clone());
-            spawn_feed_watcher(app.handle().clone());
             spawn_broker_watchdog();
             spawn_fullscreen_watcher(app.handle().clone());
             // Best effort: if something else already holds this chord, the tray menu's "Show / hide" still works.
