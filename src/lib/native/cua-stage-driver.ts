@@ -1076,13 +1076,11 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   }
   const cursorSessionNames = new Map<string, string>();
   const cursorOverlayPresentations = new Map<string, { id: string; label: string; color: readonly [number, number, number] }>();
-  const cursorStartSlots = new Map<string, number>();
   const cursorPresentationQueues = new Map<string, Promise<void>>();
   const cursorPresentationWork = new Map<string, CursorPresentationWork>();
   // Cursor presentation can be requested concurrently by several provider
   // deliveries. Keep slot reservation and the initial overlay move atomic so
   // two providers cannot observe the same free slot and overlap at startup.
-  let cursorSlotQueue: Promise<void> = Promise.resolve();
 
   async function withCursorPresentation<T>(key: string, run: () => Promise<T>): Promise<T> {
     const previous = cursorPresentationQueues.get(key) ?? Promise.resolve();
@@ -1196,13 +1194,13 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     try { deps.onTiming?.(event); } catch { /* diagnostics must never affect desktop control */ }
   }
 
-  async function updateM9rCursorOverlay(session: AgentCursorSession | string, x: number, y: number): Promise<boolean> {
+  async function updateM9rCursorOverlay(session: AgentCursorSession | string, x: number, y: number, cue?: "edit"): Promise<boolean> {
     const presentation = cursorOverlayPresentations.get(typeof session === "string" ? session : session.session);
     if (!cursorOverlayHost || !presentation) return false;
     const startedAt = performance.now();
     let visible = false;
     try {
-      visible = await cursorOverlayHost.upsert({ ...presentation, x, y });
+      visible = await cursorOverlayHost.upsert({ ...presentation, x, y, ...(cue ? { cue } : {}) });
     } catch { /* presentation must never change the input action result */ }
     emitTiming({ phase: "cursor-overlay", startedAt: now().toISOString(), endedAt: now().toISOString(),
       durationMs: Math.round((performance.now() - startedAt) * 100) / 100, status: visible ? "ok" : "error",
@@ -1305,60 +1303,10 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     return { session: details };
   }
 
-  async function withCursorSlotLock<T>(run: () => Promise<T>): Promise<T> {
-    const previous = cursorSlotQueue;
-    let release!: () => void;
-    cursorSlotQueue = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try { return await run(); }
-    finally { release(); }
-  }
-
-  /**
-   * Make the provider cursor visible as soon as an approved stage is prepared,
-   * before launch, capture, or the first input action.  This is intentionally
-   * a cursor-overlay operation only: it does not focus a window or move the
-   * owner's physical pointer.
-   */
+  /** Register the marker identity now. The first verified action supplies its position. */
   async function showAgentCursor(name: string, identity: CuaAgentCursorIdentity): Promise<{ label: string; visible: boolean }> {
     const { session } = await ensureAgentSession(identity, name);
-    let overlayScreenPoint: { x: number; y: number } | undefined;
-    await withCursorSlotLock(async () => {
-      let foreground: Awaited<ReturnType<typeof manager.currentForegroundWindow>> | undefined;
-      let bounds: CuaStageWindowBounds | undefined;
-      try {
-        foreground = await manager.currentForegroundWindow();
-        if (foreground.visible && !foreground.minimized
-          && !/m9r(?:[- ]overlay)?|agent cursor overlay|cua cursor overlay/i.test(`${foreground.title} ${foreground.className}`)) {
-          bounds = await manager.windowRect(foreground.pid, foreground.windowId);
-        }
-      } catch {
-        // Startup presentation is best-effort. The first target action will
-        // position the marker from its own fresh capture.
-      }
-      if (!foreground || !bounds || bounds.width < 1 || bounds.height < 1) return;
-      let slot = cursorStartSlots.get(session.key);
-      if (slot === undefined) {
-        const occupied = new Set(cursorStartSlots.values());
-        slot = 0;
-        while (occupied.has(slot)) slot++;
-        if (slot >= 16) return;
-        cursorStartSlots.set(session.key, slot);
-      }
-      overlayScreenPoint = {
-        x: Math.floor(bounds.x + bounds.width * ((slot % 4) + 1) / 5),
-        y: Math.floor(bounds.y + bounds.height * (Math.floor(slot / 4) + 1) / 5),
-      };
-    });
-
-    if (!overlayScreenPoint) return { label: session.session, visible: false };
-    let visible = false;
-    const presentation = await bestEffortCursorPresentation(session.key, async () => {
-      visible = await updateM9rCursorOverlay(session, overlayScreenPoint!.x, overlayScreenPoint!.y);
-      if (!visible) throw new Error("M9R's native cursor overlay did not acknowledge the initial marker.");
-    });
-    recordCursorPresentation(presentation, "renderer=m9r;scope=initial-overlay;best-effort=true", name);
-    return { label: session.session, visible: presentation.outcome.status === "completed" && visible };
+    return { label: session.session, visible: false };
   }
 
   async function inspectOwnerDesktop(name: string, identity: CuaAgentCursorIdentity) {
@@ -3922,6 +3870,11 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       }
       const after = await manager.invokeWindowElement(pid, windowId.toString(), { ...element, action: "readValue", maxChars: 4096 });
       const verified = after.read === true && after.redacted !== true && after.truncated !== true && after.value === nextValue;
+      if (verified && cursorIdentity && screenPoint) {
+        const cursor = agentSessions.get(agentCursorDetails(cursorIdentity).key);
+        if (cursor) await bestEffortCursorPresentation(cursor.key, () =>
+          updateM9rCursorOverlay(session, screenPoint.x, screenPoint.y, "edit"));
+      }
       return {
         ...(!verified || options.captureOnSuccess ? { capture: stageCapture(await captureWindow(), now) } : {}),
         outcome: verified
@@ -4159,7 +4112,6 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     // cursor overlay was absent; revoking/closing that agent must clear it too.
     agentSessions.delete(details.key);
     cursorSessionNames.delete(details.key);
-    cursorStartSlots.delete(details.key);
     cursorPresentationWork.delete(details.key);
     forgetAgentDesktopInputTargets(cursorIdentity);
   }
@@ -4168,7 +4120,6 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     agentSessions.clear();
     cursorSessionNames.clear();
     cursorOverlayPresentations.clear();
-    cursorStartSlots.clear();
     desktopInputTargets.clear();
     await cursorOverlayHost?.close().catch(() => undefined);
   }

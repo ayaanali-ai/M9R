@@ -14,6 +14,7 @@ export interface AgentCursorOverlayPoint {
   color: Rgb;
   x: number;
   y: number;
+  cue?: "edit";
 }
 
 export interface AgentCursorOverlayHost {
@@ -269,7 +270,7 @@ export function createAgentCursorOverlayHost(input: {
       // an in-flight initial marker for one that was never requested.
       possiblyVisible.add(point.id);
       return forMarker(point.id, async () => {
-        const ok = await send({ cmd: "upsert", id: point.id, label: point.label, color: point.color, x: point.x, y: point.y });
+        const ok = await send({ cmd: "upsert", ...point });
         if (ok) visible.add(point.id);
         return ok;
       });

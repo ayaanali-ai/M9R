@@ -285,7 +285,7 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
         body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }), ...(operationId ? { operationId } : {}) },
         timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
-    async taskStageAction(token, taskId, action, mode = "owner-preview", operationId, expectedMutationRevision) {
+    async taskStageAction(token, taskId, action, mode, operationId, expectedMutationRevision) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/action`,
         body: { token, taskId, action, mode, ...(operationId ? { operationId } : {}),
           ...(expectedMutationRevision === undefined ? {} : { expectedMutationRevision }) },

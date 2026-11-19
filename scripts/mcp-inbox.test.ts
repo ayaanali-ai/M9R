@@ -134,7 +134,7 @@ test("desktop stage MCP tools default to the current owner desktop", () => {
     const tools = (t.server as unknown as ToolServer)._registeredTools;
     for (const name of ["m9r_stage_prepare", "m9r_stage_action", "m9r_stage_app"]) {
       const shape = (tools[name]?.inputSchema as { shape?: Record<string, { parse(value: unknown): unknown }> } | undefined)?.shape;
-      assert.equal(shape?.mode?.parse(undefined), "owner-preview", `${name} must not silently select a background desktop`);
+      assert.equal(shape?.mode?.parse(undefined), name === "m9r_stage_action" ? undefined : "owner-preview");
       assert.match(tools[name]?.description ?? "", /owner-preview/);
     }
   } finally { t.done(); }

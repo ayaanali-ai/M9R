@@ -893,14 +893,20 @@ export function createTaskDesktopStageService(input: {
   }
 
   async function act(token: string, taskId: string, value: unknown, requestedMode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number) {
-    const mode = stageMode(requestedMode);
+    const defaultMode = stageMode(requestedMode);
     let action: ReturnType<typeof parseTaskStageAction>;
     try { action = parseTaskStageAction(value); }
     catch (error) { throw new StageValidationError(error instanceof Error ? error.message : "Invalid stage action.", { cause: error }); }
     if (operationId !== undefined && !/^[a-zA-Z0-9._:-]{1,128}$/.test(operationId)) throw new Error("Invalid desktop-stage operation ID.");
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
-    const { name: stageName, identity: streamIdentity } = authorize(token, taskId, mode);
+    const authorized = authorize(token, taskId, defaultMode);
+    const backgroundName = cursorStageName(authorized.identity, "background");
+    const backgroundTarget = ownedApps.get(backgroundName);
+    const mode = requestedMode === undefined && backgroundTarget?.taskId === taskId
+      ? "background" : defaultMode;
+    const stageName = cursorStageName(authorized.identity, mode);
+    const streamIdentity = authorized.identity;
     // A coordination key groups app discovery, never input streams. Two agents
     // collaborating on one goal retain independent action lanes; the target fence
     // below arbitrates only their actual conflicting mutations.

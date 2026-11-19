@@ -1069,7 +1069,7 @@ test("cursor moves for one agent identity are serialized to preserve action orde
   await firstStarted;
   const second = driver.moveCursor("stage", 80, 30, identity);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(points.slice(-2), [{ x: 140, y: 70 }, { x: 110, y: 70 }],
+  assert.deepEqual(points.slice(-2), [{ x: 110, y: 70 }],
     "the next overlay move waits behind the currently moving cursor");
   releaseFirst();
   await Promise.all([first, second]);
@@ -1518,9 +1518,9 @@ test("shows a stable M9R label and color for each independent agent cursor", asy
     await driver.moveCursor("stage", 42, 24, identity);
   }
 
-  assert.deepEqual(points.map(({ label }) => label), ["Codex", "Codex", "Claude", "Claude"]);
-  assert.notEqual(points[0]!.id, points[2]!.id, "each logical agent owns a separate overlay marker");
-  assert.notDeepEqual(points[0]!.color, points[2]!.color, "per-agent marker colors remain distinct");
+  assert.deepEqual(points.map(({ label }) => label), ["Codex", "Claude"]);
+  assert.notEqual(points[0]!.id, points[1]!.id, "each logical agent owns a separate overlay marker");
+  assert.notDeepEqual(points[0]!.color, points[1]!.color, "per-agent marker colors remain distinct");
   assert.deepEqual(calls, [], "cursor rendering is independent from the CUA package and session runtime");
   for (const identity of identities) await driver.closeAgentCursor(identity);
 }));
@@ -1541,7 +1541,7 @@ test("concurrently active agent cursors never receive visually similar colors", 
     { handle: "claude-code", sessionId: "session-b" },
     { handle: "opencode", sessionId: "session-c" },
   ] as const;
-  for (const identity of identities) await driver.showAgentCursor("stage", identity);
+  for (const identity of identities) { await driver.showAgentCursor("stage", identity); await driver.moveCursor("stage", 42, 24, identity); }
 
   const colors = points.map(({ color }) => color.join(","));
   assert.equal(new Set(colors).size, colors.length, "every concurrently active identity gets its own color slot");
@@ -1557,14 +1557,15 @@ test("keeps an M9R cursor visible across repeated task preparation without an id
   });
   const identity = { handle: "codex", sessionId: "cursor-never-hide-refresh" };
   await driver.showAgentCursor("stage", identity);
+  await driver.moveCursor("stage", 42, 24, identity);
   at = new Date(at.getTime() + 60_001);
-  await driver.showAgentCursor("stage", identity);
+  await driver.moveCursor("stage", 42, 24, identity);
   assert.equal(points.length, 2);
   assert.equal(points[0]!.id, points[1]!.id, "the same agent keeps the same marker identity across idle time");
   await driver.shutdown();
 }));
 
-test("primes an idle M9R cursor inside the current foreground window without moving the owner pointer", async () => withRoot(async (root) => {
+test("registers an idle cursor without placing it on the foreground window", async () => withRoot(async (root) => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const points: Array<{ x: number; y: number }> = [];
@@ -1575,7 +1576,7 @@ test("primes an idle M9R cursor inside the current foreground window without mov
   });
   await driver.showAgentCursor("stage", { handle: "codex", sessionId: "cursor-starts-on-window" });
 
-  assert.deepEqual(points, [{ x: 140, y: 70 }], "the marker starts inside the verified foreground window in screen coordinates");
+  assert.deepEqual(points, [], "cursor placement waits for a verified target");
   assert.equal(calls.length, 0, "the idle marker does not create a CUA cursor session");
   assert.equal(nativeFixture(root).calls.some((call) => ["sendClick", "sendDrag", "restoreCursorPosition"].includes(String(call.op))), false,
     "priming an overlay never moves or restores the owner's physical pointer");
@@ -1595,16 +1596,15 @@ test("uses the M9R marker at verified screen points for the full agent session a
   });
   const identity = { handle: "codex", sessionId: "m9r-overlay-live-stream" };
   const shown = await driver.showAgentCursor("stage", identity);
-  assert.equal(shown.visible, true);
-  assert.equal(updates.length, 1);
-  assert.deepEqual({ x: updates[0]!.x, y: updates[0]!.y }, { x: 140, y: 70 },
-    "the first marker position is mapped from the verified owner window into screen coordinates");
+  assert.equal(shown.visible, false);
+  assert.equal(updates.length, 0);
   assert.equal(calls.length, 0, "M9R's marker renders without initializing CUA or hiding a duplicate cursor");
 
   const moved = await driver.moveCursor("stage", 42, 24, identity);
   assert.equal(moved.cursor.visible, true);
   assert.deepEqual({ x: updates.at(-1)!.x, y: updates.at(-1)!.y }, { x: 142, y: 74 },
     "each target update uses the verified screen point, not a guessed cursor location");
+  await driver.moveCursor("stage", 43, 25, identity);
   assert.equal(updates[0]!.id, updates[1]!.id, "one stable marker identity follows the same agent session");
   assert.equal(updates[0]!.label, updates[1]!.label);
   assert.deepEqual(updates[0]!.color, updates[1]!.color, "the per-agent color remains stable across moves");
@@ -1631,8 +1631,9 @@ test("A2A cursor chatter uses only the registered speaker marker and message tex
 
   assert.equal(await driver.sayAgentCursor(identity, recipientIdentity, "hello teammate"), false,
     "the sender cannot speak before its own cursor identity is registered");
-  assert.equal((await driver.showAgentCursor("stage", identity)).visible, true);
-  assert.equal((await driver.showAgentCursor("stage", recipientIdentity)).visible, true);
+  await driver.showAgentCursor("stage", identity); await driver.showAgentCursor("stage", recipientIdentity);
+  assert.equal((await driver.moveCursor("stage", 42, 24, identity)).cursor.visible, true);
+  assert.equal((await driver.moveCursor("stage", 42, 24, recipientIdentity)).cursor.visible, true);
   assert.equal(await driver.sayAgentCursor(identity, recipientIdentity, "Review the title"), true);
   assert.equal(messages.length, 1);
   assert.deepEqual(messages[0], {
@@ -1735,7 +1736,7 @@ test("parallel identities from the same provider get distinct M9R cursor labels 
     loadSdk: async () => { calls.push({ method: "loadSdk" }); throw new Error("CUA must not be loaded for cursor presentation"); },
   });
   const identities = [{ handle: "codex", sessionId: "one" }, { handle: "codex", sessionId: "two" }];
-  await Promise.all(identities.map((identity) => driver.showAgentCursor("stage", identity)));
+  await Promise.all(identities.map(async (identity) => { await driver.showAgentCursor("stage", identity); return driver.moveCursor("stage", 42, 24, identity); }));
   assert.deepEqual(points.map(({ label }) => label), ["Codex", "Codex 2"]);
   assert.notEqual(points[0]!.id, points[1]!.id, "the marker identity is private and independent per agent session");
   await driver.closeAgentCursor(identities[1]!);
@@ -1774,8 +1775,9 @@ test("cursor visibility follows the M9R renderer acknowledgement", async () => w
     cursorOverlayHost: testCursorOverlayHost(async () => { acknowledgements += 1; return acknowledgements === 2; }),
   });
   const identity = { handle: "codex", sessionId: "overlay-delayed" };
-  assert.equal((await driver.showAgentCursor("stage", identity)).visible, false, "the first negative host ack is reported honestly");
-  assert.equal((await driver.showAgentCursor("stage", identity)).visible, true, "a later positive host ack makes the marker visible");
+  await driver.showAgentCursor("stage", identity);
+  await assert.rejects(driver.moveCursor("stage", 42, 24, identity), /did not acknowledge/);
+  assert.equal((await driver.moveCursor("stage", 42, 24, identity)).cursor.visible, true);
   assert.equal(acknowledgements, 2);
   await driver.shutdown();
 }));
@@ -1807,8 +1809,8 @@ test("records overlay render failure as privacy-safe cursor timing without misre
     onTiming: (event) => timings.push(event),
     cursorOverlayHost: testCursorOverlayHost(async () => false),
   });
-  const result = await driver.showAgentCursor!("stage", { handle: "codex", sessionId: "overlay-diagnostic" });
-  assert.equal(result.visible, false);
+  await driver.showAgentCursor("stage", { handle: "codex", sessionId: "overlay-diagnostic" });
+  await driver.click("stage", 42, 24, { handle: "codex", sessionId: "overlay-diagnostic" });
   const position = timings.find((event) => event.phase === "cursor-position");
   assert.deepEqual(position && { phase: position.phase, status: position.status, stageName: position.stageName }, {
     phase: "cursor-position", status: "error", stageName: "stage",

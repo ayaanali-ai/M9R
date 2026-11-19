@@ -2021,20 +2021,21 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     observationModalityStats: () => observationModalityLedger.snapshot(),
     // Legacy stage actions share the structured observation's private mapping.
     // Never guess by label/position or accept a ref from another task/session.
-    resolveStageReference(identity: VerifiedIdentity, taskId: string, mode: string, view: string | undefined, ref: string, kind?: string,
+    resolveStageReference(identity: VerifiedIdentity, taskId: string, mode: string | undefined, view: string | undefined, ref: string, kind?: string,
       expected: { role?: string; label?: string } = {}) {
       if (!ref.startsWith("control_")) return undefined;
       for (const record of records.values()) {
         if (record.identityKey !== identityKey(identity) || record.context.kind !== "desktop"
-          || record.context.taskId !== taskId || record.context.mode !== mode || view !== "app" || record.context.view !== "app") continue;
+          || record.context.taskId !== taskId || (mode !== undefined && record.context.mode !== mode)
+          || view !== "app" || record.context.view !== "app") continue;
         const control = record.context.controls.get(ref);
         if (!control) continue;
         const work = deps.resolveWorkIdentity?.(taskId);
         if (work && (record.work?.workId !== work.workId || record.work.planRevision !== work.planRevision)) break;
-        if (control.stageRef) return { ref: control.stageRef, mutationRevision: record.mutationRevision };
+        if (control.stageRef) return { ref: control.stageRef, mutationRevision: record.mutationRevision, mode: record.context.mode };
         if (kind === "click_element" && control.enabled !== false && control.rect) {
           if ((expected.role !== undefined && expected.role !== control.role) || (expected.label !== undefined && expected.label !== control.label)) break;
-          return { point: { x: control.rect.x + control.rect.width / 2, y: control.rect.y + control.rect.height / 2 }, mutationRevision: record.mutationRevision };
+          return { point: { x: control.rect.x + control.rect.width / 2, y: control.rect.y + control.rect.height / 2 }, mutationRevision: record.mutationRevision, mode: record.context.mode };
         }
       }
       throw new DesktopInputNotDispatchedError("This structured control reference is no longer available for this task, session, and app view. Observe the app again before acting; no input was sent.");

@@ -57,6 +57,7 @@ const BUBBLE_HOLD_MS: f32 = 2900.0;
 const BUBBLE_FADE_OUT_MS: f32 = 700.0;
 const BUBBLE_TOTAL_MS: f32 = BUBBLE_FADE_IN_MS + BUBBLE_HOLD_MS + BUBBLE_FADE_OUT_MS;
 const BUBBLE_MAX_CHARS: usize = 48;
+const EDIT_CUE_MS: u64 = 280;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -127,6 +128,7 @@ pub struct AgentState {
     pub next_blink_at: Instant,
     pub blink_until: Option<Instant>,
     pub bubble: Option<Bubble>,
+    pub edit_cue_at: Option<Instant>,
 }
 
 /// Eased position along the current cursor glide. Uses monotonic time so
@@ -238,9 +240,14 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                 .unwrap_or(&id)
                 .to_string();
             let dark = darken(color, 0.62);
+            let edit_cue_at = (value.get("cue").and_then(Value::as_str) == Some("edit")).then_some(now);
             guard
                 .entry(id)
                 .and_modify(|a| {
+                    a.edit_cue_at = edit_cue_at;
+                    if a.target_x == x && a.target_y == y && a.color == color && a.label == label {
+                        return;
+                    }
                     let (current_x, current_y) = animated_position(a, now);
                     let (control_x, control_y, duration_ms) =
                         movement_profile(current_x, current_y, x, y);
@@ -275,6 +282,7 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                     next_blink_at: now + Duration::from_millis(EYE_BLINK_MIN_MS),
                     blink_until: None,
                     bubble: None,
+                    edit_cue_at,
                 });
         }
         "say" => {
@@ -859,6 +867,16 @@ pub mod win {
             unsafe {
                 let rt: &ID2D1RenderTarget = &self.rt;
                 let (ox, oy) = (agent.x, agent.y);
+                if let Some(start) = agent.edit_cue_at {
+                    let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / EDIT_CUE_MS as f32).min(1.0);
+                    if t < 1.0 {
+                        rt.SetTransform(&Matrix3x2::identity());
+                        let ink = rt.CreateSolidColorBrush(&col(agent.color, 0.65 * (1.0 - t)), None)?;
+                        let radius = 5.0 + 13.0 * t;
+                        rt.DrawEllipse(&D2D1_ELLIPSE { point: v2(ox, oy), radiusX: radius, radiusY: radius },
+                            &ink, 2.0, None::<&ID2D1StrokeStyle>);
+                    }
+                }
                 let s = MARKER_SIZE / 100.0;
                 let base = Matrix3x2::scale(s, s) * Matrix3x2::translation(ox, oy);
                 let under = Matrix3x2::translation(3.0, 6.0) * base;
@@ -1193,10 +1211,12 @@ pub mod win {
                     // above, or an external command via PRESENTATION_DIRTY).
                     let still_animating = snapshot.values().any(|agent| {
                         agent.anim_duration_ms > 0.0
-                            && now.saturating_duration_since(agent.anim_start).as_secs_f32() * 1000.0
+                            && last_presented.saturating_duration_since(agent.anim_start).as_secs_f32() * 1000.0
                                 < agent.anim_duration_ms
                     }) || snapshot.values().any(|agent| {
                         agent.bubble.as_ref().is_some_and(|bubble| bubble_animating(bubble, now, last_presented))
+                            || agent.edit_cue_at.is_some_and(|start|
+                                last_presented.saturating_duration_since(start) < Duration::from_millis(EDIT_CUE_MS))
                     });
                     if !pending_frame.needed(blink_changed || still_animating) {
                         continue;
@@ -1333,6 +1353,7 @@ pub mod win {
                 color: claude, dark: darken(claude, 0.62),
                 label: "Claude Code".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: None,
+                edit_cue_at: None,
                 bubble: None,
             },
         );
@@ -1346,6 +1367,7 @@ pub mod win {
                 color: codex, dark: darken(codex, 0.62),
                 label: "Codex".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: None,
+                edit_cue_at: None,
                 bubble: Some(Bubble {
                     text: "Mind if I grab the sidebar? You've got the API.".to_string(),
                     started_at: now - Duration::from_millis(500),
@@ -1362,6 +1384,7 @@ pub mod win {
                 color: open, dark: darken(open, 0.62),
                 label: "OpenCode".to_string(),
                 next_blink_at: now + Duration::from_secs(5), blink_until: Some(now + Duration::from_secs(5)),
+                edit_cue_at: None,
                 bubble: Some(Bubble {
                     text: "Heads up, I'm touching the config too.".to_string(),
                     started_at: now - Duration::from_millis(500),
