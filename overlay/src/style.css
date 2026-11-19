@@ -38,7 +38,7 @@ body.preview { background: #3a3d44; padding: 24px; overflow: auto; }
   box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset;
 }
 .mark { font: 700 10.5px/1 var(--display); letter-spacing: 0.18em; color: var(--text); flex: none; }
-.mark.stale { color: var(--faint); animation: pulse 1.6s ease-in-out infinite; }
+.mark.stale { color: var(--faint); }
 .dots { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 0; }
 .more { font: 600 10.5px/1 var(--display); color: var(--muted); padding-left: 2px; font-variant-numeric: tabular-nums; }
 

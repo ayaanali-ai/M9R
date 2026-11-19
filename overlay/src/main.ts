@@ -132,7 +132,7 @@ function drawDots() {
 
 function drawMark() {
   mark.classList.toggle("stale", engineStale);
-  mark.title = engineStale ? "M9R engine seems stopped; it will restart itself, or reopen the overlay." : "";
+  mark.title = engineStale ? "The native activity feed has not updated recently." : "";
 }
 
 function drawBadge() {

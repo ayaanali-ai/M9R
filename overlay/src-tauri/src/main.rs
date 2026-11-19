@@ -271,7 +271,10 @@ fn spawn_click_through_watcher(app: AppHandle) {
     std::thread::spawn(move || {
         let mut ignoring: Option<bool> = None;
         loop {
-            std::thread::sleep(Duration::from_millis(16));
+            // A 16 ms poll did the same window/cursor queries ~62 times a second even
+            // when the pointer was nowhere near the pill. 50 ms keeps hit testing
+            // responsive while cutting those idle wakeups by about 68%.
+            std::thread::sleep(Duration::from_millis(50));
             let Some(window) = app.get_webview_window(PILL) else { continue };
             let rect = NEXT.lock().unwrap().rect;
             let (Ok(cursor), Ok(pos), Ok(scale)) = (window.cursor_position(), window.outer_position(), window.scale_factor()) else { continue };
