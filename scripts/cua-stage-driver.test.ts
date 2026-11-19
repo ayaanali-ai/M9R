@@ -639,9 +639,11 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
           && String(element.className ?? "") === input.expectedClassName
           && String(element.automationId ?? "") === input.expectedAutomationId;
         if (!sameIdentity) return { ok: false, dispatchState: "not-dispatched", error: "The native semantic target changed; no semantic input was sent." };
+        const caret = element.caret as { x?: unknown; y?: unknown } | undefined;
         if (canRun && input.action === "readValue") return { ok: true, semanticAction: {
           dispatched: false, read: true, value: String(element?.accessibleValue ?? ""), truncated: false,
-          ...(input.includeCaret === true && element?.caret ? { caret: element.caret } : {}),
+          ...(input.includeCaret === true && typeof caret?.x === "number" && typeof caret.y === "number"
+            ? { caret: { x: caret.x, y: caret.y } } : {}),
         } };
         if (canRun && input.action === "setValue" && element?.caret) element.accessibleValue = input.text;
         return canRun
