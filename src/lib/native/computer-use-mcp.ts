@@ -1373,6 +1373,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
           && control?.stageRef && control.enabled !== false && control.actions?.some((name) => /^(?:click|invoke|press|expand|toggle|select)$/i.test(name));
         if (semanticClick) {
           stageAction = { kind: "click_element", ref: control.stageRef, view: "app",
+            ...(action.includeScreenshot === true ? { captureOnSuccess: true } : {}),
             ...(control.role !== undefined ? { expectedRole: control.role } : {}),
             ...(control.label !== undefined ? { expectedLabel: control.label } : {}),
             ...(confirmFocusForeground ? { confirmFocusForeground } : {}) };

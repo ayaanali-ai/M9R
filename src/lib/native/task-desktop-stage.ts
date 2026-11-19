@@ -1142,7 +1142,7 @@ export function createTaskDesktopStageService(input: {
         taskId,
         operationId,
         fingerprint: createHash("sha256").update(JSON.stringify({
-          mode, action: effectiveAction.kind === "append_element"
+          mode, action: effectiveAction.kind === "append_element" || effectiveAction.kind === "click_element"
             ? { ...effectiveAction, captureOnSuccess: undefined }
             : effectiveAction,
         })).digest("hex"),

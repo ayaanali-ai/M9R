@@ -1842,7 +1842,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     windowId: bigint;
     captureFrame: () => Promise<CuaStageWindowFrame>;
     capture: () => Promise<CuaStageWindowFrame>;
-    readStructure: (preferStructureOnly?: boolean) => Promise<CuaStageStructure>;
+    readStructure: (preferStructureOnly?: boolean, preservePopupEvidence?: boolean) => Promise<CuaStageStructure>;
     elementAt: (x: number, y: number) => Promise<string | undefined>;
     elementAtPoint: (x: number, y: number, action?: "click" | "set_value") => Promise<CuaWindowElement | undefined>;
     observedElementByToken: (token: string, expected?: { role?: string; label?: string }) => CuaWindowElement | undefined;
@@ -2007,11 +2007,14 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { ...frame, ...popups };
     };
 
-    const readStructure = async (preferStructureOnly = false): Promise<CuaStageStructure> => {
+    const readStructure = async (preferStructureOnly = false, preservePopupEvidence = false): Promise<CuaStageStructure> => {
       const semantic = preferStructureOnly ? await readNativeElements().catch(() => undefined) : undefined;
       const bounds = semantic?.structure.status === "complete" && !semantic.structure.truncated
         && semantic.elements.length > 0 ? await manager.windowRect(pid, windowId.toString()).catch(() => undefined) : undefined;
-      const structureOnly = Boolean(bounds && bounds.width > 0 && bounds.height > 0);
+      const usableBounds = bounds && bounds.width > 0 && bounds.height > 0;
+      // A complete parent window tree may omit an owned dialog opened by the click.
+      const popups = usableBounds && preservePopupEvidence ? await captureOwnedPopups() : undefined;
+      const structureOnly = usableBounds && (!popups || (popups.popupCaptureStatus === "complete" && popups.ownedPopups.length === 0));
       const { frame, observed } = bounds && structureOnly
         ? { frame: { width: bounds.width, height: bounds.height, windowBounds: bounds, capturedAt: now().toISOString() }, observed: semantic }
         : preferStructureOnly ? { frame: await captureNativeFrame(), observed: semantic } : await captureNativeWindowWithStructure();
@@ -2034,7 +2037,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
               width: native.rect.width * frame.width / frame.windowBounds!.width,
               height: native.rect.height * frame.height / frame.windowBounds!.height },
           })),
-          ...("dataUrl" in frame ? { fallbackCapture: stageCapture({ ...frame, ...await captureOwnedPopups() }, now) } : {}),
+          ...("dataUrl" in frame ? { fallbackCapture: stageCapture({ ...frame, ...(popups ?? await captureOwnedPopups()) }, now) } : {}),
         };
       }
       return { status: "unavailable", coverage: contentCoverage("window"), capturedAt,
@@ -3672,7 +3675,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
     await presentM9rCursor(cursor, cursor.key, point, false, "target=ui-automation-bounds", timingContext.getStore()?.stageName);
   }
 
-  async function clickElement(name: string, ref: string, cursorIdentity?: CuaAgentCursorIdentity, options: CuaStageInputOptions = {}): Promise<CuaStageActionProof> {
+  async function clickElement(name: string, ref: string, cursorIdentity?: CuaAgentCursorIdentity,
+    options: CuaStageInputOptions & { captureOnSuccess?: boolean } = {}): Promise<CuaStageActionProof> {
     return withRegisteredWindow(name, async ({ driver, sdk, session, pid, windowId, captureFrame, readStructure, elementByToken }) => {
       const selected = await elementByToken(ref, { role: options.expectedRole, label: options.expectedLabel });
       if (!selected?.element.elementToken || selected.element.enabled === false) {
@@ -3712,9 +3716,10 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         }
         if (semantic.dispatched) {
           if (cursorIdentity && screenPoint) await cueElementCursor(session, screenPoint, "click");
+          const structureFirst = options.deliveryMode === "background" && options.captureOnSuccess !== true;
           return {
-            capture: await captureWithStructure(readStructure, now),
-            outcome: { status: "unverified", summary: `Native UI Automation dispatched ${semantic.mechanism ?? "the control action"}; the refreshed window capture is the separate effect check.` },
+            capture: await captureWithStructure(() => readStructure(structureFirst, structureFirst), now),
+            outcome: { status: "unverified", summary: `Native UI Automation dispatched ${semantic.mechanism ?? "the control action"}; inspect the refreshed observation to verify the effect.` },
           };
         }
       }

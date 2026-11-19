@@ -2218,6 +2218,48 @@ test("a click on a raw canvas control (supportsInvoke false) skips UIA invocatio
   await driver.shutdown();
 }));
 
+test("background semantic clicks skip pixels for complete structure without an owned dialog", async () => withRoot(async root => {
+  await registerStage(root);
+  const state = { elementsComplete: true, elements: [{ role: "Button", label: "Seven",
+    className: "Button", automationId: "seven", enabled: true, actions: ["invoke"],
+    frame: { x: 120, y: 70, w: 60, h: 24 } }] };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    loadSdk: async () => makeSdk({ testRoot: root, calls: [], state }) as never });
+  setNativeFixture(root, { responses: { listOwnedPopups: { ok: true, windows: [] } } });
+  try {
+    const observed = await driver.readStructure("stage", undefined, true);
+    const ref = observed.elements[0]!.ref;
+    const result = await driver.clickElement("stage", ref, undefined, { deliveryMode: "background" });
+    assert.equal(result.outcome.status, "unverified");
+    assert.equal(result.capture.structure?.status, "complete");
+    assert.equal(result.capture.dataUrl, "");
+    assert.equal(nativeFixture(root).calls.filter(call => call.op === "captureWindow").length, 0);
+
+    const requested = await driver.clickElement("stage", result.capture.structure!.elements[0]!.ref, undefined, {
+      deliveryMode: "background", captureOnSuccess: true,
+    });
+    assert.ok(requested.capture.dataUrl);
+
+    state.elementsComplete = false;
+    setNativeFixture(root, { state });
+    const partial = await driver.clickElement("stage", requested.capture.structure!.elements[0]!.ref, undefined, { deliveryMode: "background" });
+    assert.equal(partial.capture.structure?.status, "partial");
+    assert.ok(partial.capture.dataUrl);
+    const calls = nativeFixture(root).calls;
+    assert.equal(calls.filter(call => call.op === "captureWindow").length, 2);
+    assert.equal(calls.filter(call => call.op === "invokeWindowElement").length, 3);
+    assert.equal(calls.some(call => call.op === "bringToForeground"), false);
+
+    state.elementsComplete = true;
+    setNativeFixture(root, { state, responses: { listOwnedPopups: { ok: true, windows: [{ pid: 4321, windowId: "1234" }] } } });
+    const dialog = await driver.clickElement("stage", partial.capture.structure!.elements[0]!.ref, undefined, { deliveryMode: "background" });
+    assert.ok(dialog.capture.dataUrl);
+    assert.equal(dialog.capture.ownedPopups?.length, 1);
+  } finally {
+    await driver.shutdown();
+  }
+}));
+
 test("an exact UIA ref with no advertised activation pattern still uses native point-click fallback", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];

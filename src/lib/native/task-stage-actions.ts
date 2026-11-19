@@ -20,7 +20,7 @@ type TaskStageActionBody =
   | { kind: "drag"; fromX: number; fromY: number; toX: number; toY: number; durationMs?: number; confirmFocusForeground?: boolean }
   | { kind: "press_key"; key: string; confirmFocusForeground?: boolean }
   | { kind: "hotkey"; keys: string[]; confirmFocusForeground?: boolean }
-  | { kind: "click_element"; ref: string; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
+  | { kind: "click_element"; ref: string; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean; captureOnSuccess?: boolean }
   | { kind: "scroll_element"; ref: string; direction: "up" | "down" | "left" | "right"; granularity?: "small" | "large"; expectedRole?: string; expectedLabel?: string; confirmFocusForeground?: boolean }
   | { kind: "read_value"; ref: string; maxChars?: number; expectedRole?: string; expectedLabel?: string }
   | { kind: "replace_element"; ref: string; text: string; expectedRole?: string; expectedLabel?: string }
@@ -113,7 +113,7 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   const action = value as Record<string, unknown>;
   const fields: Record<string, string[]> = { capture: [], stop: [], read_structure: [], window_status: [], click: ["x", "y"], double_click: ["x", "y"], middle_click: ["x", "y"], right_click: ["x", "y"], cursor: ["x", "y"],
     type: ["text", "mode", "x", "y", "expectedRole", "expectedLabel"], type_then_enter: ["text"], scroll: ["x", "y", "direction", "amount"], drag: ["fromX", "fromY", "toX", "toY", "durationMs"], press_key: ["key"], hotkey: ["keys"],
-    click_element: ["ref", "expectedRole", "expectedLabel"], scroll_element: ["ref", "direction", "granularity", "expectedRole", "expectedLabel"],
+    click_element: ["ref", "expectedRole", "expectedLabel", "captureOnSuccess"], scroll_element: ["ref", "direction", "granularity", "expectedRole", "expectedLabel"],
     read_value: ["ref", "maxChars", "expectedRole", "expectedLabel"],
     replace_element: ["ref", "text", "expectedRole", "expectedLabel"],
     append_element: ["ref", "text", "separator", "captureOnSuccess", "expectedRole", "expectedLabel"], scroll_delta: ["x", "y", "deltaX", "deltaY", "unit"],
@@ -213,8 +213,8 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (action.kind === "append_element" && (typeof action.text !== "string" || action.text.length < 1 || action.text.length > 5_000
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text)
     || (action.separator !== undefined && action.separator !== "none" && action.separator !== "newline"))) throw new Error("Invalid append text or separator.");
-  if (action.kind === "append_element" && action.captureOnSuccess !== undefined && typeof action.captureOnSuccess !== "boolean") {
-    throw new Error("Invalid append screenshot preference.");
+  if ((action.kind === "append_element" || action.kind === "click_element") && action.captureOnSuccess !== undefined && typeof action.captureOnSuccess !== "boolean") {
+    throw new Error("Invalid stage screenshot preference.");
   }
   if (action.kind === "clipboard_write" && action.text !== undefined && (typeof action.text !== "string" || !action.text.length || action.text.length > 5_000)) throw new Error("Invalid stage input text.");
   if (action.kind === "clipboard_write") {
@@ -358,7 +358,8 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
       : desktopWide ? driver.pressKeyDesktop(name, action.key, identity, stageOptions({ confirmFocusForeground })) : driver.pressKey(name, action.key, identity, stageOptions({ confirmFocusForeground }));
     case "hotkey": return popupTargeted ? driver.hotkeyPopup(name, action.keys, stageOptions({ confirmFocusForeground })!)
       : desktopWide ? driver.hotkeyDesktop(name, action.keys, identity, stageOptions({ confirmFocusForeground })) : driver.hotkey(name, action.keys, identity, stageOptions({ confirmFocusForeground }));
-    case "click_element": return driver.clickElement(name, action.ref, identity, stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel }));
+    case "click_element": return driver.clickElement(name, action.ref, identity, stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel,
+      ...(action.captureOnSuccess === true ? { captureOnSuccess: true } : {}) }));
     case "scroll_element": return driver.scrollElement(name, action.ref, action.direction, identity,
       stageOptions({ confirmFocusForeground, expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, granularity: action.granularity }));
     case "read_value": return { readValue: await driver.readElementValue(name, action.ref, identity,

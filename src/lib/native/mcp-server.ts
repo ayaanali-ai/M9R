@@ -913,7 +913,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       ? { kind: "hotkey" as const, keys: [...translatedAction.modifiers.map(key => key === "Control" ? "Ctrl" : key === "Meta" ? "Win" : key), translatedAction.key],
           ...(translatedAction.view ? { view: translatedAction.view } : {}), ...(translatedAction.confirmFocusForeground ? { confirmFocusForeground: true } : {}) }
       : translatedAction.kind === "press_key" ? (({ modifiers, ...keyAction }) => keyAction)(translatedAction)
-      : translatedAction.kind === "append_element" && includeScreenshot === true ? { ...translatedAction, captureOnSuccess: true }
+      : (translatedAction.kind === "append_element" || translatedAction.kind === "click_element") && includeScreenshot === true ? { ...translatedAction, captureOnSuccess: true }
       : translatedAction;
     const response = deps.web?.taskStageAction
       ? await deps.web.taskStageAction(authToken, taskId, dispatchAction, mode ?? reference?.mode, operationId,
