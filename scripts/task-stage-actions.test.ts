@@ -152,7 +152,7 @@ test("owner-preview actions route through desktop-wide driver methods", async ()
   assert.deepEqual(calls[3]?.args, ["preview", 30, 45, identity]);
 });
 
-test("broker client sends owner-preview when stage mode is omitted", async () => {
+test("broker client leaves omitted action mode to the broker", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-stage-broker-client-"));
   const keyPath = join(root, "broker.key");
   writeFileSync(keyPath, "test-key\n");
@@ -168,7 +168,7 @@ test("broker client sends owner-preview when stage mode is omitted", async () =>
     await client.prepareTaskStage!("test-token", "T2");
     await client.taskStageAction!("test-token", "T2", { kind: "capture" });
     await client.taskStageApp!("test-token", "T2", "chrome");
-    assert.deepEqual(requests.map((request) => request.body.mode), ["owner-preview", "owner-preview", "owner-preview"]);
+    assert.deepEqual(requests.map((request) => request.body.mode), ["owner-preview", undefined, "owner-preview"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
