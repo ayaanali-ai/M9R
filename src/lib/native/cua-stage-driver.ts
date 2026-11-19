@@ -3888,10 +3888,16 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         throw new DesktopInputNotDispatchedError(
           "Windows did not accept the exact text-field update; no text was appended.", "background-unavailable");
       }
-      const after = await manager.invokeWindowElement(pid, windowId.toString(), { ...element, action: "readValue", maxChars: 4096 });
+      const after = await manager.invokeWindowElement(pid, windowId.toString(), { ...element, action: "readValue", maxChars: 4096,
+        ...(cursorIdentity ? { includeCaret: true } : {}) });
       const verified = after.read === true && after.redacted !== true && after.truncated !== true && after.value === nextValue;
       if (verified && cursorIdentity && screenPoint) {
-        await cueElementCursor(session, screenPoint, "edit");
+        const caret = after.caret;
+        const bounds = selected.screenRect;
+        const point = caret && bounds && Number.isFinite(caret.x) && Number.isFinite(caret.y)
+          && caret.x >= bounds.x && caret.x <= bounds.x + bounds.width
+          && caret.y >= bounds.y && caret.y <= bounds.y + bounds.height ? caret : screenPoint;
+        await cueElementCursor(session, point, "edit");
       }
       return {
         ...(!verified || options.captureOnSuccess ? { capture: stageCapture(await captureWindow(), now) } : {}),

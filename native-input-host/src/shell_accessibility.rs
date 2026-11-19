@@ -139,6 +139,38 @@ fn element_runtime_id(element: &IUIAutomationElement) -> Option<Vec<i32>> {
     result
 }
 
+fn editor_caret_point(element: &IUIAutomationElement) -> Option<Value> {
+    use windows::Win32::UI::Accessibility::{IUIAutomationTextPattern2, UIA_TextPattern2Id};
+    use windows::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
+        SafeArrayGetElemsize, SafeArrayGetLBound, SafeArrayGetUBound};
+
+    let pattern = unsafe { element.GetCurrentPattern(UIA_TextPattern2Id) }.ok()?.cast::<IUIAutomationTextPattern2>().ok()?;
+    let mut active = windows::core::BOOL::default();
+    let range = unsafe { pattern.GetCaretRange(&mut active) }.ok()?;
+    let array = unsafe { range.GetBoundingRectangles() }.ok()?;
+    if array.is_null() { return None; }
+    let read = || -> Option<[f64; 4]> {
+        if unsafe { SafeArrayGetDim(array) } != 1 || unsafe { SafeArrayGetElemsize(array) } != 8 { return None; }
+        let lower = unsafe { SafeArrayGetLBound(array, 1) }.ok()?;
+        let upper = unsafe { SafeArrayGetUBound(array, 1) }.ok()?;
+        if upper.checked_sub(lower)? != 3 { return None; }
+        let mut values = [0.0f64; 4];
+        for (offset, value) in values.iter_mut().enumerate() {
+            let index = lower.checked_add(offset as i32)?;
+            unsafe { SafeArrayGetElement(array, &index, (value as *mut f64).cast()) }.ok()?;
+        }
+        Some(values)
+    };
+    let rect = read();
+    unsafe { let _ = SafeArrayDestroy(array); }
+    let [x, y, width, height] = rect?;
+    let bounds = unsafe { element.CurrentBoundingRectangle() }.ok()?;
+    if ![x, y, width, height].iter().all(|n| n.is_finite()) || width < 0.0 || height <= 0.0
+        || x < bounds.left as f64 || x > bounds.right as f64
+        || y < bounds.top as f64 || y + height > bounds.bottom as f64 { return None; }
+    Some(json!({ "x": x, "y": y + height / 2.0 }))
+}
+
 fn unix_nanos() -> String {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default().as_nanos().to_string()
@@ -910,10 +942,14 @@ pub fn invoke_window_element(value: &Value) -> Result<Value, crate::InputDispatc
         let current = unsafe { pattern.CurrentValue() }
             .map_err(|error| crate::InputDispatchError::not_dispatched(error.to_string()))?
             .to_string();
+        let caret = (value.get("includeCaret").and_then(Value::as_bool) == Some(true))
+            .then(|| editor_caret_point(&element)).flatten();
         let mut characters = current.chars();
         let value: String = characters.by_ref().take(max_chars).collect();
         let truncated = characters.next().is_some();
-        return Ok(json!({"dispatched":false,"read":true,"value":value,"truncated":truncated}));
+        let mut result = json!({"dispatched":false,"read":true,"value":value,"truncated":truncated});
+        if let Some(caret) = caret { result["caret"] = caret; }
+        return Ok(result);
     }
     if action != "activate" {
         return Err(crate::InputDispatchError::not_dispatched(

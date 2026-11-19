@@ -78,6 +78,7 @@ interface NativeStageResponse {
   windowStructure?: NativeWindowStructure;
   semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
     read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
+    caret?: { x: number; y: number };
     scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null;
     nativeDispatch?: NativeDispatchEvidence };
   capture?: { dataUrl: string; width: number; height: number; originX?: number; originY?: number };
@@ -905,9 +906,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   async function invokeWindowElement(pid: number, windowId: string, input: {
     path: number[]; action: "activate" | "setValue" | "readValue" | "scroll"; expectedRole: string; expectedLabel: string;
     expectedClassName: string; expectedAutomationId: string; expectedRuntimeId?: number[]; text?: string; direction?: "up" | "down" | "left" | "right";
-    granularity?: "small" | "large"; maxChars?: number;
+    granularity?: "small" | "large"; maxChars?: number; includeCaret?: boolean;
   }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
     read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
+    caret?: { x: number; y: number };
     scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null }> {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);

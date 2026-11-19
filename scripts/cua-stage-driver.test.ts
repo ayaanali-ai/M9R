@@ -641,7 +641,9 @@ function stageDependencies(root: string): NonNullable<CuaStageDriverDependencies
         if (!sameIdentity) return { ok: false, dispatchState: "not-dispatched", error: "The native semantic target changed; no semantic input was sent." };
         if (canRun && input.action === "readValue") return { ok: true, semanticAction: {
           dispatched: false, read: true, value: String(element?.accessibleValue ?? ""), truncated: false,
+          ...(input.includeCaret === true && element?.caret ? { caret: element.caret } : {}),
         } };
+        if (canRun && input.action === "setValue" && element?.caret) element.accessibleValue = input.text;
         return canRun
           ? { ok: true, semanticAction: { dispatched: true, mechanism: "test-uia",
             ...(input.action === "setValue" ? { valueConfirmed: fixture.state?.valueConfirmed !== false } : {}),
@@ -2393,6 +2395,27 @@ test("an independently fenced field refuses recreated UIA identity and never use
     error => error instanceof DesktopInputNotDispatchedError);
   assert.equal(nativeFixture(root).calls.some(call => ["bringToForeground", "sendClick", "sendKeyCombo", "sendText", "findEditChildWindow", "sendTextToWindow"].includes(String(call.op))), false);
   await driver.shutdown();
+}));
+
+test("verified background append cues the returned editor caret without sampling or capturing again", async () => withRoot(async root => {
+  await registerStage(root);
+  const updates: Array<{ x: number; y: number; cue?: string }> = [];
+  const field = { role: "Edit", label: "Editor", enabled: true, actions: ["read_value", "set_value"],
+    accessibleValue: "Prior", frame: { x: 120, y: 58, w: 120, h: 30 }, caret: { x: 135, y: 65 } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root),
+    cursorOverlayHost: testCursorOverlayHost(async (point) => { updates.push(point); return true; }),
+    loadSdk: async () => makeSdk({ testRoot: root, calls: [], state: { elementsComplete: true, elements: [field] } }) as never });
+  try {
+    const identity = { handle: "codex", sessionId: "caret-append" };
+    await driver.showAgentCursor("stage", identity);
+    const observed = await driver.readStructure("stage", identity, true);
+    const result = await driver.appendElement("stage", observed.elements[0]!.ref, "Next", "newline", identity, { deliveryMode: "background" });
+    assert.equal(result.outcome.status, "confirmed");
+    assert.equal(result.capture, undefined);
+    assert.deepEqual(updates.filter(point => point.cue).map(({ x, y, cue }) => ({ x, y, cue })),
+      [{ x: 135, y: 65, cue: "edit" }]);
+    assert.equal(nativeFixture(root).calls.filter(call => call.includeCaret === true).length, 1);
+  } finally { await driver.shutdown(); }
 }));
 
 test("background app structure skips pixels for a complete tree and captures for a partial tree", async () => withRoot(async root => {
