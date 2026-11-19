@@ -212,8 +212,10 @@ export function parseTaskStageAction(value: unknown): TaskStageAction {
   if (action.kind === "replace_element" && (typeof action.text !== "string" || action.text.length > 5_000)) throw new Error("Invalid stage input text.");
   if (action.kind === "append_element" && (typeof action.text !== "string" || action.text.length < 1 || action.text.length > 5_000
     || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(action.text)
-    || (action.captureOnSuccess !== undefined && typeof action.captureOnSuccess !== "boolean")
-    || (action.separator !== undefined && action.separator !== "none" && action.separator !== "newline"))) throw new Error("Invalid append options.");
+    || (action.separator !== undefined && action.separator !== "none" && action.separator !== "newline"))) throw new Error("Invalid append text or separator.");
+  if (action.kind === "append_element" && action.captureOnSuccess !== undefined && typeof action.captureOnSuccess !== "boolean") {
+    throw new Error("Invalid append screenshot preference.");
+  }
   if (action.kind === "clipboard_write" && action.text !== undefined && (typeof action.text !== "string" || !action.text.length || action.text.length > 5_000)) throw new Error("Invalid stage input text.");
   if (action.kind === "clipboard_write") {
     if (["text", "imagePath", "filePath"].filter((key) => action[key] !== undefined).length !== 1) throw new Error("Clipboard write requires exactly one payload.");
