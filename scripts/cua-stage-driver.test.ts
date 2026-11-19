@@ -2395,6 +2395,21 @@ test("an independently fenced field refuses recreated UIA identity and never use
   await driver.shutdown();
 }));
 
+test("background append refuses a replaced document editor even when its window and label match", async () => withRoot(async root => {
+  await registerStage(root);
+  const field = { role: "Edit", label: "Document", className: "Edit", automationId: "editor", runtimeId: [42, 1], enabled: true,
+    actions: ["set_value"], frame: { x: 120, y: 58, w: 120, h: 30 } };
+  const driver = createCuaStageDriver({ stage: stageDependencies(root), loadSdk: async () => makeSdk({ testRoot: root, calls: [],
+    state: { elementsComplete: true, elements: [field] } }) as never });
+  try {
+    const observation = await driver.readStructure("stage");
+    field.runtimeId = [42, 2];
+    await assert.rejects(driver.appendElement("stage", observation.elements[0]!.ref, "New line", "newline", undefined,
+      { deliveryMode: "background" }), (error: unknown) => error instanceof DesktopInputNotDispatchedError && error.code === "background-unavailable");
+    assert.equal(nativeFixture(root).calls.some(call => ["invokeWindowElement", "sendText", "sendTextToWindow", "bringToForeground"].includes(String(call.op))), false);
+  } finally { await driver.shutdown(); }
+}));
+
 test("popup replace mode resolves the exact enabled UIA edit and sets its value on the popup HWND", async () => withRoot(async root => {
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
