@@ -2064,7 +2064,11 @@ test("scroll and drag use native screen coordinates and validate bounds before d
   await registerStage(root);
   const calls: Array<{ method: string; value?: unknown }> = [];
   const cursorPoints: Array<{ x: number; y: number }> = [];
-  const driver = createCuaStageDriver({ stage: stageDependencies(root), skipNativeFixturePreload: true,
+  const stage = stageDependencies(root);
+  const driver = createCuaStageDriver({ stage: { ...stage, async invokeNative(request, dragProgress) {
+    if (request.op === "sendDrag") dragProgress?.(155, 100);
+    return stage.invokeNative!(request);
+  } }, skipNativeFixturePreload: true,
     cursorOverlayHost: testCursorOverlayHost(async (point) => { cursorPoints.push({ x: point.x, y: point.y }); return true; }),
     loadSdk: async () => { calls.push({ method: "loadSdk" }); throw new Error("CUA cursor is not used by native drag"); },
   });
@@ -2084,8 +2088,9 @@ test("scroll and drag use native screen coordinates and validate bounds before d
     { fromX: 110, fromY: 70, toX: 200, toY: 130 });
   assert.equal(drag?.pid, 4321);
   assert.equal(drag?.windowId, windowId);
-  assert.deepEqual(cursorPoints.slice(-2), [{ x: 110, y: 70 }, { x: 200, y: 130 }],
-    "the M9R presentation cursor follows the registered-window drag from its grab point to its drop point");
+  assert.equal(drag?.dragProgress, true);
+  assert.deepEqual(cursorPoints.slice(-3), [{ x: 110, y: 70 }, { x: 155, y: 100 }, { x: 200, y: 130 }],
+    "the M9R presentation cursor follows native drag progress between the grab and drop points");
   assert.equal(calls.length, 0, "native scrolling and dragging do not initialize the CUA cursor runtime");
   assert.equal(native.filter((call) => call.op === "captureWindow").length, 2,
     "exactly one real screenshot each for scroll and drag: their post-dispatch observations, never an unused pre-dispatch one");

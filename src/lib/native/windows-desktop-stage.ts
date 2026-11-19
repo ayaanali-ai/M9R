@@ -190,11 +190,11 @@ export interface WindowsStageDependencies {
   terminal?: boolean;
   env?: Record<string, string | undefined>;
   now?: () => Date;
-  invokeNative?: (request: Record<string, unknown>) => Promise<NativeStageResponse>;
+  invokeNative?: (request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void) => Promise<NativeStageResponse>;
   /** The owner broker supplies the real shared mutation fence before allowing shared HWND mappings. */
   sharedWindowFence?: Pick<MultiplayerDispatchFence, "begin">;
   /** Test-only transport seam; production creates one persistent native process per stream. */
-  nativeHostFactory?: (streamId?: string) => { invoke(request: Record<string, unknown>): Promise<NativeStageResponse>; close(): void };
+  nativeHostFactory?: (streamId?: string) => { invoke(request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void): Promise<NativeStageResponse>; close(): void };
   /** Internal API-call evidence. This callback never changes an action's outcome. */
   onNativeDispatch?: (evidence: NativeDispatchEvidence) => void;
   /** Safe foreground restoration outcome; diagnostics only, never changes action success. */
@@ -504,7 +504,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   const activeForegroundMonitorHosts = new Set<string>();
   const monitorHostKey = (streamId: string | undefined) => streamId ?? "default";
   let managerClosed = false;
-  const invokeNative = async (request: Record<string, unknown>): Promise<NativeStageResponse> => {
+  const invokeNative = async (request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void): Promise<NativeStageResponse> => {
     if (managerClosed) return Promise.reject(new Error("The native desktop-stage manager is closed."));
     const operation = String(request.op);
     const globalMediaInput = operation === "systemControl" && request.control === "media";
@@ -557,11 +557,11 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       }
     }
     const streamId = streamContext.getStore();
-    const result = deps.invokeNative ? await deps.invokeNative(request) : !streamId
-      ? await persistentHost!.invoke(request)
+    const result = deps.invokeNative ? await deps.invokeNative(request, dragProgress) : !streamId
+      ? await persistentHost!.invoke(request, dragProgress)
       : await (streamHosts.get(streamId) ?? (() => {
         const host = hostFactory(streamId); streamHosts.set(streamId, host); return host;
-      })()).invoke(request);
+      })()).invoke(request, dragProgress);
     const monitorKey = monitorHostKey(streamId);
     if (operation === "captureForegroundContext" && result.ok) activeForegroundMonitorHosts.add(monitorKey);
     if (operation === "releaseForegroundContextMonitor" && result.ok) {
@@ -1515,10 +1515,12 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { route: result.route, target: result.target, dispatched: true as const };
   }
 
-  async function sendDrag(pid: number, windowId: string, fromX: number, fromY: number, toX: number, toY: number, durationMs?: number) {
+  async function sendDrag(pid: number, windowId: string, fromX: number, fromY: number, toX: number, toY: number, durationMs?: number,
+    dragProgress?: (x: number, y: number) => void) {
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
-    const result = await invokeNative({ op: "sendDrag", pid, windowId, fromX, fromY, toX, toY, ...(durationMs !== undefined ? { durationMs } : {}) });
+    const result = await invokeNative({ op: "sendDrag", pid, windowId, fromX, fromY, toX, toY, ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(dragProgress ? { dragProgress: true } : {}) }, dragProgress);
     invalidateWindowStructureCache(pid, windowId);
     if (!result.ok) throwNativeInputFailure(result, "Windows declined the drag.");
   }
@@ -1770,6 +1772,7 @@ interface PendingNativeStageRequest {
   readonly queuedAt: number;
   readonly timeoutMs: number;
   readonly frame: Buffer;
+  readonly dragProgress?: (x: number, y: number) => void;
   sentAt?: number;
   startedAt?: number;
   timeout?: ReturnType<typeof setTimeout>;
@@ -1966,6 +1969,13 @@ function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: n
         }
         continue;
       }
+      if (response.type === "drag-progress" && request.operation === "sendDrag" && request.startedAt && activeRequestId === requestId) {
+        const { x, y } = parsed as { x?: unknown; y?: unknown };
+        if (typeof x === "number" && typeof y === "number" && Number.isSafeInteger(x) && Number.isSafeInteger(y)) {
+          try { request.dragProgress?.(x, y); } catch { /* presentation is best effort */ }
+        }
+        continue;
+      }
       if (typeof response.ok !== "boolean") {
         const error = new Error("Native Windows stage helper returned an invalid response; the active operation outcome is uncertain.");
         failProtocol(error, "the helper response was invalid");
@@ -2043,7 +2053,7 @@ function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: n
     return spawned;
   };
 
-  const invoke = (request: Record<string, unknown>): Promise<NativeStageResponse> => {
+  const invoke = (request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void): Promise<NativeStageResponse> => {
     const operation = typeof request.op === "string" ? request.op : "unknown";
     const requestId = typeof request.requestId === "string" && request.requestId.length > 0 ? request.requestId : randomUUID();
     let payload: Buffer;
@@ -2065,7 +2075,7 @@ function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: n
         reject(notDispatchedError({ operation }, `Native Windows desktop-stage operation “${operation}” was not dispatched because the helper is unavailable: ${reason}.`));
         return;
       }
-      pending.set(requestId, { requestId, operation, resolve, reject, queuedAt: Date.now(), timeoutMs: operationTimeoutMs(operation), frame });
+      pending.set(requestId, { requestId, operation, resolve, reject, queuedAt: Date.now(), timeoutMs: operationTimeoutMs(operation), frame, dragProgress });
       dispatchNext();
     });
   };

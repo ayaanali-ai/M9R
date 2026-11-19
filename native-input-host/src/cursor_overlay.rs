@@ -241,13 +241,15 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                 .to_string();
             let dark = darken(color, 0.62);
             let has_action_cue = matches!(value.get("cue").and_then(Value::as_str), Some("edit" | "click"));
+            let drag_sample = value.get("dragSample").and_then(Value::as_bool) == Some(true);
             guard
                 .entry(id)
                 .and_modify(|a| {
-                    if a.target_x != x || a.target_y != y {
-                        let (current_x, current_y) = animated_position(a, now);
-                        let (control_x, control_y, duration_ms) =
-                            movement_profile(current_x, current_y, x, y);
+                    if drag_sample || a.target_x != x || a.target_y != y {
+                        // Native drag progress already supplies the stroke's intermediate points.
+                        let (current_x, current_y) = if drag_sample { (x, y) } else { animated_position(a, now) };
+                        let (control_x, control_y, duration_ms) = if drag_sample { (x, y, 0.0) }
+                            else { movement_profile(current_x, current_y, x, y) };
                         a.x = current_x;
                         a.y = current_y;
                         a.anim_from_x = current_x;
@@ -1524,6 +1526,21 @@ mod movement_tests {
 
         upsert(&state, "a", 500.0, 0.0, dispatched);
         assert_eq!(state.lock().unwrap()["a"].action_cue_at, None);
+    }
+
+    #[test]
+    fn drag_samples_follow_dispatched_points_without_restarting_a_glide() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let now = Instant::now();
+        upsert(&state, "a", 0.0, 0.0, now);
+        upsert(&state, "a", 100.0, 50.0, now);
+        for (x, y) in [(100, 50), (120, 60), (140, 70)] {
+            let sample = serde_json::json!({"cmd":"upsert","id":"a","x":x,"y":y,"dragSample":true});
+            assert!(apply_command_at(&state, &sample.to_string(), now));
+            let guard = state.lock().unwrap();
+            assert_eq!(animated_position(&guard["a"], now), (x as f32, y as f32));
+            assert_eq!(guard["a"].anim_duration_ms, 0.0);
+        }
     }
 
     #[test]

@@ -101,6 +101,10 @@ fn parse_window_identity(value: &Value) -> Result<(u32, usize), &'static str> {
 /// Dispatches the local desktop-stage API. Stages bind to the owner's visible
 /// Windows desktop; no request can create, inspect, activate, or move desktops.
 pub fn handle_desktop_stage_request(value: &Value) -> Value {
+    handle_desktop_stage_request_with_drag_progress(value, &mut |_, _| {})
+}
+
+pub fn handle_desktop_stage_request_with_drag_progress(value: &Value, _progress: &mut dyn FnMut(i32, i32)) -> Value {
     let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
     match value.get("op").and_then(Value::as_str) {
         Some("ping") => json!({"ok":true,"requestId":request_id}),
@@ -323,7 +327,7 @@ pub fn handle_desktop_stage_request(value: &Value) -> Value {
             Err(error) => input_dispatch_failure(request_id, error),
         },
         #[cfg(windows)]
-        Some("sendDrag") => match platform::send_drag(value) {
+        Some("sendDrag") => match platform::send_drag(value, _progress) {
             Ok(()) => input_dispatch_success(
                 request_id,
                 "send-input-drag",
@@ -1841,7 +1845,7 @@ mod platform {
 
     /// Presses and releases a left-button drag between two absolute screen
     /// points, after confirming the target is the real foreground window.
-    pub(super) fn send_drag(value: &serde_json::Value) -> Result<(), crate::InputDispatchError> {
+    pub(super) fn send_drag(value: &serde_json::Value, progress: &mut dyn FnMut(i32, i32)) -> Result<(), crate::InputDispatchError> {
         let (pid, handle) = super::parse_window_identity(value)?;
         require_real_foreground(pid, handle)?;
         let (from_x, from_y) = screen_point(value, "fromX", "fromY")?;
@@ -1851,7 +1855,7 @@ mod platform {
             .and_then(serde_json::Value::as_u64)
             .map(|ms| ms.clamp(1, 10_000) as u32)
             .unwrap_or(250);
-        crate::win32::send_drag(from_x, from_y, to_x, to_y, duration_ms)
+        crate::win32::send_drag(from_x, from_y, to_x, to_y, duration_ms, progress)
     }
 
     /// Scrolls the mouse wheel at an absolute screen point, after confirming

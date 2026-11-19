@@ -1010,6 +1010,7 @@ pub fn send_drag(
     to_x: i32,
     to_y: i32,
     duration_ms: u32,
+    progress: &mut dyn FnMut(i32, i32),
 ) -> Result<(), InputDispatchError> {
     if !send_mouse_retrying(from_x, from_y, MOUSEEVENTF_MOVE) {
         return Err(InputDispatchError::not_dispatched(
@@ -1029,6 +1030,7 @@ pub fn send_drag(
     // instead produced exactly the bug this fixes: a stray straight line
     // from wherever the drag actually stopped to a distant release point,
     // rather than the intended path ending early.
+    progress(from_x, from_y);
     let mut last_x = from_x;
     let mut last_y = from_y;
     let steps = ((duration_ms / 16).clamp(8, 40)) as i32;
@@ -1044,6 +1046,7 @@ pub fn send_drag(
         }
         last_x = x;
         last_y = y;
+        progress(x, y);
         unsafe { Sleep((duration_ms / steps as u32).max(1)) };
     }
     if !send_mouse_retrying(to_x, to_y, MOUSEEVENTF_LEFTUP) {

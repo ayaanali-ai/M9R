@@ -92,6 +92,7 @@ mod system_controls;
 mod windows_stage;
 
 pub use windows_stage::handle_desktop_stage_request;
+pub use windows_stage::handle_desktop_stage_request_with_drag_progress;
 
 /// Reads one length-prefixed request from the broker-owned persistent helper.
 /// Clean EOF between frames returns `None`; partial headers/bodies fail closed.

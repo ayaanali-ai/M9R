@@ -15,6 +15,7 @@ export interface AgentCursorOverlayPoint {
   x: number;
   y: number;
   cue?: "edit" | "click";
+  dragSample?: true;
 }
 
 export interface AgentCursorOverlayHost {

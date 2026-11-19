@@ -141,7 +141,16 @@ fn run_desktop_stage_server() -> Result<(), String> {
             json!({"ok":false,"error":"agent context cannot change owner desktop stages"})
         } else {
             match serde_json::from_slice::<Value>(&raw) {
-                Ok(parsed) => m9r_native_input_host::handle_desktop_stage_request(&parsed),
+                Ok(parsed) => m9r_native_input_host::handle_desktop_stage_request_with_drag_progress(&parsed, &mut |x, y| {
+                    if parsed.get("dragProgress").and_then(Value::as_bool) == Some(true) {
+                        if let Some(request_id) = request_id.as_deref() {
+                            let event = json!({ "type": "drag-progress", "requestId": request_id, "x": x, "y": y });
+                            if let Ok(bytes) = serde_json::to_vec(&event) {
+                                let _ = write_frame(&mut output, &bytes);
+                            }
+                        }
+                    }
+                }),
                 Err(_) => json!({"ok":false,"error":"invalid desktop stage request JSON"}),
             }
         };

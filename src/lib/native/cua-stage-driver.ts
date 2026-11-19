@@ -1194,18 +1194,30 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
     try { deps.onTiming?.(event); } catch { /* diagnostics must never affect desktop control */ }
   }
 
-  async function updateM9rCursorOverlay(session: AgentCursorSession | string, x: number, y: number, cue?: "edit" | "click"): Promise<boolean> {
+  async function updateM9rCursorOverlay(session: AgentCursorSession | string, x: number, y: number, cue?: "edit" | "click", dragSample?: true): Promise<boolean> {
     const presentation = cursorOverlayPresentations.get(typeof session === "string" ? session : session.session);
     if (!cursorOverlayHost || !presentation) return false;
     const startedAt = performance.now();
     let visible = false;
     try {
-      visible = await cursorOverlayHost.upsert({ ...presentation, x, y, ...(cue ? { cue } : {}) });
+      visible = await cursorOverlayHost.upsert({ ...presentation, x, y, ...(cue ? { cue } : {}), ...(dragSample ? { dragSample } : {}) });
     } catch { /* presentation must never change the input action result */ }
-    emitTiming({ phase: "cursor-overlay", startedAt: now().toISOString(), endedAt: now().toISOString(),
-      durationMs: Math.round((performance.now() - startedAt) * 100) / 100, status: visible ? "ok" : "error",
-      detail: `renderer=m9r;screenPoint=verified;visible=${visible}` });
+    if (!dragSample) {
+      emitTiming({ phase: "cursor-overlay", startedAt: now().toISOString(), endedAt: now().toISOString(),
+        durationMs: Math.round((performance.now() - startedAt) * 100) / 100, status: visible ? "ok" : "error",
+        detail: `renderer=m9r;screenPoint=verified;visible=${visible}` });
+    }
     return visible;
+  }
+
+  function dragCursorProgress(session: string, signal?: AbortSignal) {
+    let updating = false;
+    return (x: number, y: number) => {
+      // Skip intermediate frames under renderer backpressure; never queue up a stale stroke.
+      if (updating || signal?.aborted) return;
+      updating = true;
+      void updateM9rCursorOverlay(session, x, y, undefined, true).finally(() => { updating = false; });
+    };
   }
 
   async function sayAgentCursor(
@@ -2626,7 +2638,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         nativeForeground: nativeStageInput(start.target.pid, start.target.windowId, async () => {
             const fromScreen = await desktopPointToCurrentScreen(start);
             const toScreen = await desktopPointToCurrentScreen(end);
-            await manager.sendDrag(start.target.pid, start.target.windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
+            await manager.sendDrag(start.target.pid, start.target.windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y,
+              options.durationMs ?? 500, dragCursorProgress(session.session, options.signal));
           }),
       });
       await inspectOwnerDesktop(name, identity);
@@ -3635,7 +3648,8 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
         nativeForeground: nativeStageInput(pid, windowId, async () => {
             const fromScreen = await localToScreenPoint(pid, windowId, fromX, fromY, before.width, before.height, before.windowBounds);
             const toScreen = await localToScreenPoint(pid, windowId, toX, toY, before.width, before.height, before.windowBounds);
-            await manager.sendDrag(pid, windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, options.durationMs ?? 500);
+            await manager.sendDrag(pid, windowId.toString(), fromScreen.x, fromScreen.y, toScreen.x, toScreen.y,
+              options.durationMs ?? 500, cursorIdentity ? dragCursorProgress(session, options.signal) : undefined);
           }),
       });
       // The native pointer ends at the drop point. Keep the presentation cursor
