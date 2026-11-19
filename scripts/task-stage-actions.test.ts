@@ -168,7 +168,7 @@ test("broker client leaves omitted action mode to the broker", async () => {
     await client.prepareTaskStage!("test-token", "T2");
     await client.taskStageAction!("test-token", "T2", { kind: "capture" });
     await client.taskStageApp!("test-token", "T2", "chrome");
-    assert.deepEqual(requests.map((request) => request.body.mode), ["owner-preview", undefined, "owner-preview"]);
+    assert.deepEqual(requests.map((request) => request.body.mode), [undefined, undefined, "owner-preview"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

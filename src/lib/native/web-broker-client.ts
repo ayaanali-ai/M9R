@@ -291,7 +291,7 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
           ...(expectedMutationRevision === undefined ? {} : { expectedMutationRevision }) },
         timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
-    async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000, prepareOptions) {
+    async prepareTaskStage(token, taskId, mode, timeoutMs = 15_000, prepareOptions) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,
         body: { token, taskId, mode, ...(prepareOptions?.bindForeground ? { bindForeground: true } : {}) }, timeoutMs });
     },

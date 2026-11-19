@@ -133,7 +133,7 @@ function buildInputSchemas(authField: ComputerUseMcpDeps["authField"]) {
       ...tokenField,
       target: z.enum(COMPUTER_USE_OBSERVE_TARGETS),
       taskId: z.string().regex(/^T[0-9]{1,12}$/).optional(),
-      mode: z.enum(["owner-preview", "background"]).default("owner-preview"),
+      mode: z.enum(["owner-preview", "background"]).optional().describe("Omit to observe the current task's selected background app when available."),
       representation: z.enum(["structured", "visual"]).optional().describe("App windows default to structured accessibility; desktop targets default to a bounded composite of visible windows and controls. Request visual when pixels are the intended route; incomplete structure carries the same-capture visual fallback."),
       bindForeground: z.boolean().optional().describe("For app-window observations, bind the actual visible foreground window before reading it; this never activates or moves a window."),
       tab: z.string().min(1).max(40).optional(),
@@ -834,6 +834,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     confirmInputSelectionFromFocus?: boolean;
     bindForeground?: boolean;
     mutationRevision?: number;
+    resolveSelectedMode?: boolean;
   }): Promise<{ record: TargetRecord; observation: Record<string, unknown>; image?: ImageBlock }> {
     if (!deps.web?.taskStageAction) throw new Error("The owner-launched desktop stage broker is unavailable.");
     let capture = input.captureOverride;
@@ -841,8 +842,10 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     let structure = recordOf(capture?.structure);
     if (!capture) {
       if (!deps.web.prepareTaskStage) throw new Error("The owner-launched desktop stage broker cannot prepare a target.");
-      const prepared = await deps.web.prepareTaskStage(input.token, input.taskId, input.mode, undefined, input.bindForeground ? { bindForeground: true } : undefined);
+      const prepared = await deps.web.prepareTaskStage(input.token, input.taskId, input.resolveSelectedMode ? undefined : input.mode, undefined, input.bindForeground ? { bindForeground: true } : undefined);
       if (!prepared.ok) throw new Error(prepared.error ?? "The desktop stage could not be prepared.");
+      const preparedMode = recordOf(prepared.stage)?.mode;
+      if (preparedMode === "background" || preparedMode === "owner-preview") input = { ...input, mode: preparedMode };
     }
     // A post-action screenshot is not a post-action accessibility observation.
     // Read the structured tree whenever the same response did not already carry
@@ -1604,7 +1607,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       const resolvedRepresentation = representation ?? "structured";
       const resolvedTaskId = deps.resolveTaskId(identity, taskId);
       const observed = await timing.measure("observationMs", () => observeDesktop({ token: authToken, identity, taskId: resolvedTaskId, mode: mode ?? "owner-preview", view: target === "app-window" ? "app" : "desktop",
-        representation: resolvedRepresentation, bindForeground: bindForeground === true }));
+        representation: resolvedRepresentation, bindForeground: bindForeground === true, resolveSelectedMode: mode === undefined && target === "app-window" }));
       return toolResponse({ target: observed.record.target, observation: observed.observation }, observed.image);
     } catch (error) {
       return toolResponse({ error: error instanceof Error ? error.message : "Target observation failed." }, undefined, true);

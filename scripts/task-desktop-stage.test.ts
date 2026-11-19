@@ -1099,6 +1099,10 @@ test("background launch attaches one exact existing app window without presentin
     assert.deepEqual(registry.stages[0]?.anchor, { pid: 321, windowId: "789" });
     const status = await f.service.act(f.identity.token, f.task.id, { kind: "window_status", view: "app" }) as { windowState: string };
     assert.equal(status.windowState, "visible", "an omitted mode reuses the current task's background attachment");
+    const prepared = await f.service.prepare(f.identity.token, f.task.id);
+    assert.equal(prepared.mode, "background");
+    await assert.rejects(f.service.prepare(f.identity.token, f.task.id, "owner-preview", { bindForeground: true }),
+      /Observe the selected app without bindForeground/);
     assert.deepEqual(f.presentedWindows, []);
     const state = JSON.parse(readFileSync(join(f.root, "state.json"), "utf8")) as { stageOperations: Array<{ taskId: string; state: string }> };
     assert.equal(state.stageOperations.find((operation) => operation.taskId === f.task.id)?.state, "applied");

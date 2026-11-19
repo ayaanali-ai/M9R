@@ -832,16 +832,23 @@ export function createTaskDesktopStageService(input: {
   }
 
   async function prepare(token: string, taskId: string, requestedMode?: TaskStageMode, options: { bindForeground?: boolean } = {}) {
-    const mode = stageMode(requestedMode);
+    const defaultMode = stageMode(requestedMode);
     // Only used to route this call to its own stage's queue; run() below re-authorizes
     // at dequeue time, exactly as before this call existed.
-    const { name: queueName, identity: streamIdentity } = authorize(token, taskId, mode);
+    const { identity: streamIdentity } = authorize(token, taskId, defaultMode);
+    const backgroundName = cursorStageName(streamIdentity, "background");
+    const hasBackgroundTarget = () => ownedApps.get(backgroundName)?.taskId === taskId;
+    const mode = requestedMode === undefined && hasBackgroundTarget() ? "background" : defaultMode;
+    const queueName = cursorStageName(streamIdentity, mode);
     const run = async () => {
       const { name, identity } = authorize(token, taskId, mode);
       const sessionTag = createHash("sha256").update(`${normalizeHandle(identity.handle)}\0${identity.sessionId}`).digest("hex").slice(0, 8);
       const existing = manager.list().find((stage) => stage.name === name);
       let assignedStage: ReturnType<typeof manager.assignAgent> | undefined;
       if (options.bindForeground) {
+          if (mode === "background" || hasBackgroundTarget()) {
+            throw new DesktopInputNotDispatchedError("This task has a background target. Observe the selected app without bindForeground; no window was changed.");
+          }
           if (typeof manager.currentForegroundWindow !== "function") throw new Error("The native stage helper cannot bind the current foreground window.");
           const foreground = await manager.currentForegroundWindow();
           // Never bind M9R's own overlay or a hidden/minimized window. This
