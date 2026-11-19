@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "M9R inactive document fixture",
+  "version": "0.1.0",
+  "permissions": ["scripting"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "action": { "default_popup": "check.html" }
+}
