@@ -240,27 +240,30 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                 .unwrap_or(&id)
                 .to_string();
             let dark = darken(color, 0.62);
-            let action_cue_at = matches!(value.get("cue").and_then(Value::as_str), Some("edit" | "click")).then_some(now);
+            let has_action_cue = matches!(value.get("cue").and_then(Value::as_str), Some("edit" | "click"));
             guard
                 .entry(id)
                 .and_modify(|a| {
-                    a.action_cue_at = action_cue_at;
-                    if a.target_x == x && a.target_y == y && a.color == color && a.label == label {
-                        return;
+                    if a.target_x != x || a.target_y != y {
+                        let (current_x, current_y) = animated_position(a, now);
+                        let (control_x, control_y, duration_ms) =
+                            movement_profile(current_x, current_y, x, y);
+                        a.x = current_x;
+                        a.y = current_y;
+                        a.anim_from_x = current_x;
+                        a.anim_from_y = current_y;
+                        a.anim_control_x = control_x;
+                        a.anim_control_y = control_y;
+                        a.anim_duration_ms = duration_ms;
+                        a.target_x = x;
+                        a.target_y = y;
+                        a.anim_start = now;
+                        a.action_cue_at = None;
                     }
-                    let (current_x, current_y) = animated_position(a, now);
-                    let (control_x, control_y, duration_ms) =
-                        movement_profile(current_x, current_y, x, y);
-                    a.x = current_x;
-                    a.y = current_y;
-                    a.anim_from_x = current_x;
-                    a.anim_from_y = current_y;
-                    a.anim_control_x = control_x;
-                    a.anim_control_y = control_y;
-                    a.anim_duration_ms = duration_ms;
-                    a.target_x = x;
-                    a.target_y = y;
-                    a.anim_start = now;
+                    if has_action_cue {
+                        let arrival = a.anim_start + Duration::from_secs_f32(a.anim_duration_ms / 1000.0);
+                        a.action_cue_at = Some(now.max(arrival));
+                    }
                     a.color = color;
                     a.dark = dark;
                     a.label = label.clone();
@@ -282,7 +285,7 @@ pub fn apply_command_at(state: &SharedState, line: &str, now: Instant) -> bool {
                     next_blink_at: now + Duration::from_millis(EYE_BLINK_MIN_MS),
                     blink_until: None,
                     bubble: None,
-                    action_cue_at,
+                    action_cue_at: has_action_cue.then_some(now),
                 });
         }
         "say" => {
@@ -867,7 +870,7 @@ pub mod win {
             unsafe {
                 let rt: &ID2D1RenderTarget = &self.rt;
                 let (ox, oy) = (agent.x, agent.y);
-                if let Some(start) = agent.action_cue_at {
+                if let Some(start) = agent.action_cue_at.filter(|start| *start <= now) {
                     let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / ACTION_CUE_MS as f32).min(1.0);
                     if t < 1.0 {
                         rt.SetTransform(&Matrix3x2::identity());
@@ -1499,6 +1502,28 @@ mod movement_tests {
         upsert(&state, "a", 100.0, 50.0, t0);
         let guard = state.lock().unwrap();
         assert_eq!(animated_position(&guard["a"], t0), (100.0, 50.0));
+    }
+
+    #[test]
+    fn action_cue_waits_for_arrival_and_survives_same_target_updates() {
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let start = Instant::now();
+        upsert(&state, "a", 0.0, 0.0, start);
+        upsert(&state, "a", 300.0, 0.0, start);
+        let cue = r#"{"cmd":"upsert","id":"a","x":300,"y":0,"cue":"click"}"#;
+        let dispatched = start + Duration::from_millis(20);
+        assert!(apply_command_at(&state, cue, dispatched));
+        let arrival = state.lock().unwrap()["a"].action_cue_at.unwrap();
+        assert!(arrival > dispatched);
+        assert_eq!(animated_position(&state.lock().unwrap()["a"], arrival), (300.0, 0.0));
+
+        assert!(apply_command_at(&state, r#"{"cmd":"upsert","id":"a","x":300,"y":0,"label":"New label"}"#, dispatched));
+        let agent = state.lock().unwrap()["a"].clone();
+        assert_eq!(agent.anim_start, start);
+        assert_eq!(agent.action_cue_at, Some(arrival));
+
+        upsert(&state, "a", 500.0, 0.0, dispatched);
+        assert_eq!(state.lock().unwrap()["a"].action_cue_at, None);
     }
 
     #[test]
