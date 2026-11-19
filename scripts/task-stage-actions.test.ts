@@ -71,6 +71,7 @@ test("delivery profiles distinguish semantic background routes from shared and f
 test("append value composition preserves existing content and newline style", () => {
   assert.equal(composeAppendedValue("first", "second", "newline"), "first\nsecond");
   assert.equal(composeAppendedValue("first\r\nsecond", "third", "newline"), "first\r\nsecond\r\nthird");
+  assert.equal(composeAppendedValue("first\rsecond", "third", "newline"), "first\rsecond\rthird");
   assert.equal(composeAppendedValue("first\n", "second", "newline"), "first\nsecond");
   assert.equal(composeAppendedValue("first", "second", "none"), "firstsecond");
   assert.equal(composeAppendedValue("", "first", "newline"), "first");
@@ -120,9 +121,13 @@ test("semantic append uses the dedicated background-safe append adapter", async 
   const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
     outcome: { status: "confirmed" as const } };
   const driver = { appendElement: async (...args: unknown[]) => { calls.push(args); return proof; } } as unknown as ReturnType<typeof createCuaStageDriver>;
-  await runTaskStageAction(driver, "agent", { kind: "append_element", view: "app", ref: "field-1", text: "new line", separator: "newline", expectedRole: "Edit" }, identity, "background");
-  assert.deepEqual(calls, [["agent", "field-1", "new line", "newline", identity,
-    { expectedRole: "Edit", deliveryMode: "background" }]]);
+  const action = { kind: "append_element", view: "app", ref: "field-1", text: "new line", expectedRole: "Edit" } as const;
+  await runTaskStageAction(driver, "agent", action, identity, "background");
+  await runTaskStageAction(driver, "agent", { ...action, separator: "none" }, identity, "background");
+  assert.deepEqual(calls, [
+    ["agent", "field-1", "new line", "newline", identity, { expectedRole: "Edit", deliveryMode: "background" }],
+    ["agent", "field-1", "new line", "none", identity, { expectedRole: "Edit", deliveryMode: "background" }],
+  ]);
 });
 
 test("owner-preview actions route through desktop-wide driver methods", async () => {

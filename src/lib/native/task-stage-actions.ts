@@ -366,7 +366,7 @@ export async function runTaskStageAction(driver: ReturnType<typeof createCuaStag
     case "replace_element": return driver.replaceElement(name, action.ref, action.text, identity,
       stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, confirmFocusForeground,
         ...(dispatchPolicy.semanticOnly ? { semanticOnly: true } : {}) }));
-    case "append_element": return driver.appendElement(name, action.ref, action.text, action.separator ?? "none", identity,
+    case "append_element": return driver.appendElement(name, action.ref, action.text, action.separator ?? "newline", identity,
       stageOptions({ expectedRole: action.expectedRole, expectedLabel: action.expectedLabel, captureOnSuccess: action.captureOnSuccess }));
     case "window_frame": return driver.windowFrame(name, action.x, action.y, action.width, action.height, identity,
       stageOptions({ confirmFocusForeground }));

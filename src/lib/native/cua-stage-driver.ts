@@ -187,7 +187,7 @@ export interface CuaStageActionProof {
 /** Construct an additive text-field value while preserving its existing line-ending style. */
 export function composeAppendedValue(existing: string, text: string, separator: "none" | "newline", maxChars = 4096): string {
   const lineBreak = separator === "newline" && existing.length > 0 && !/[\r\n]$/.test(existing)
-    ? (existing.includes("\r\n") ? "\r\n" : "\n") : "";
+    ? (existing.match(/\r\n|\r|\n/)?.[0] ?? "\n") : "";
   const value = `${existing}${lineBreak}${text}`;
   if (value.length > maxChars) throw new RangeError(`Appended value exceeds the ${maxChars}-character verification limit.`);
   return value;
@@ -3902,7 +3902,9 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return {
         ...(!verified || options.captureOnSuccess ? { capture: stageCapture(await captureWindow(), now) } : {}),
         outcome: verified
-          ? { status: "confirmed", summary: "Appended the requested text to the exact observed field and verified the complete resulting value." }
+          ? { status: "confirmed", summary: separator === "newline"
+            ? "Appended the requested text as a new line in the exact observed field and verified the complete resulting value."
+            : "Appended the requested text directly to the exact observed field and verified the complete resulting value." }
           : { status: "unverifiable", summary: "The text-field update may have been applied, but a fresh complete read did not confirm the expected appended value. Inspect before retrying." },
       };
     }, cursorIdentity);
