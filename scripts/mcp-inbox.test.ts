@@ -241,6 +241,25 @@ test("native stage actions leave surface-scoped revision tracking to the owner b
   } finally { t.done(); }
 });
 
+test("an app observation requests capture only once when the broker returns no pixels", async () => {
+  const actions: string[] = [];
+  const t = setup({ web: {
+    prepareTaskStage: async () => ({ ok: true, stage: { mode: "background" } }),
+    taskStageAction: async (_token, _task, action) => {
+      const { kind } = action as { kind: string };
+      actions.push(kind);
+      if (kind === "read_structure") return { ok: false, error: "Structure unavailable" };
+      return { ok: true, result: {} };
+    },
+  } });
+  try {
+    const task = t.store.addTask({ from: "you", to: "codex", goal: "Observe the app", origin: "human_typed", idempotencyKey: "single-capture" }).task;
+    t.store.markDelivered([task.id], "x1");
+    await t.call("m9r_computer_observe", { token: t.codex, taskId: task.id, target: "app-window" });
+    assert.deepEqual(actions, ["read_structure", "capture"]);
+  } finally { t.done(); }
+});
+
 test("public app observation and append keep the broker-selected background target after a refusal", async () => {
   const calls: Array<[string, string | undefined]> = [];
   const t = setup({ web: {

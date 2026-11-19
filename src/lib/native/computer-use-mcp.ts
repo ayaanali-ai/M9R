@@ -840,6 +840,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
     let capture = input.captureOverride;
     let mutationRevision = input.mutationRevision;
     let structure = recordOf(capture?.structure);
+    let captureRequested = false;
     if (!capture) {
       if (!deps.web.prepareTaskStage) throw new Error("The owner-launched desktop stage broker cannot prepare a target.");
       const prepared = await deps.web.prepareTaskStage(input.token, input.taskId, input.resolveSelectedMode ? undefined : input.mode, undefined, input.bindForeground ? { bindForeground: true } : undefined);
@@ -863,6 +864,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       }
     }
     if (input.representation === "visual" || (!structure && !capture)) {
+      captureRequested = true;
       const response = await deps.web.taskStageAction(input.token, input.taskId, { kind: "capture", view: input.view }, input.mode);
       if (!response.ok) {
         if (!structure && !capture) throw new Error(response.error ?? "The desktop capture failed.");
@@ -892,7 +894,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
       const sameCallFallback = recordOf(structure?.fallbackCapture);
       if (sameCallFallback && typeof sameCallFallback.dataUrl === "string") visibleCapture = sameCallFallback;
       else if (capture && typeof capture.dataUrl === "string") visibleCapture = capture;
-      else {
+      else if (!captureRequested) {
         // Older broker builds may return a partial tree without carrying its screenshot.
         // This is one bounded fallback capture, never a route-probing loop.
         const fallback = await deps.web.taskStageAction(input.token, input.taskId, { kind: "capture", view: input.view }, input.mode);
