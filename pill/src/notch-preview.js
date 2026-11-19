@@ -146,6 +146,8 @@ if (host) {
   document.body.classList.add("desktop");
   document.querySelector("aside")?.remove();
   sheet.querySelector("strong")?.remove();
+  thread.setAttribute("aria-label", "Conversation");
+  $("form button").setAttribute("aria-label", "Send message");
   const navigation = document.createElement("nav");
   navigation.setAttribute("aria-label", "Pill navigation");
   for (const [label, surface] of [["Home", "home"], ["Settings", "settings"]]) {
@@ -183,7 +185,6 @@ if (host) {
   providers = [];
   selected.clear();
   renderTargets();
-  sheet.querySelector("strong").textContent = "Conversation";
   host.subscribe(snapshot => {
     if (snapshot.approvals.length) { location.replace("?controls=home"); return; }
     const next = snapshot.agents.map(agent => agent.handle);
