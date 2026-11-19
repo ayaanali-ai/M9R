@@ -637,13 +637,14 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
   }
 
   /** Runs `fn` on the state under the lock and writes the result atomically. */
-  function update<T>(fn: (state: StoreState) => T): T {
+  function update<T>(fn: (state: StoreState) => T, shouldPersist?: (result: T) => boolean): T {
     const ownerName = acquire();
     try {
       // readState() returns the shared cache entry; clone before mutating
       // so concurrent read-only callers never see a partially-written state.
       const state = structuredClone(readState());
       const out = fn(state);
+      if (shouldPersist && !shouldPersist(out)) return out;
       const serialized = JSON.stringify(state);
       const serializedBytes = Buffer.byteLength(serialized, "utf8");
       if (serializedBytes > maxStateBytes) throw new LocalStateCapacityError(serializedBytes, maxStateBytes);
@@ -2623,7 +2624,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           changed += 1;
         }
         return changed;
-      });
+      }, (changed) => changed > 0);
     },
 
     /**
@@ -2662,7 +2663,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
           changed += 1;
         }
         return changed;
-      });
+      }, (changed) => changed > 0);
     },
 
     /** Atomically claims one OpenCode task so independent pollers cannot inject the same turn twice. */

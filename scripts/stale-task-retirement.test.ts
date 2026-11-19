@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { createLocalStore } from "@/lib/native/local-store";
@@ -21,7 +21,12 @@ test("stale queued, sending, and deferred work is permanently retired with histo
     });
     clock = new Date(clock.getTime() + 120_000);
     assert.equal(store.retireStaleTasks(60_000), 3);
+    const statePath = join(root, "state.json");
+    const marker = new Date("2026-01-01T00:00:00Z");
+    utimesSync(statePath, marker, marker);
+    const before = statSync(statePath).mtimeMs;
     assert.equal(store.retireStaleTasks(60_000), 0);
+    assert.equal(statSync(statePath).mtimeMs, before, "no-op retirement leaves the state file untouched");
     const restarted = createLocalStore(root, { now: () => clock });
     for (const previous of tasks) {
       const task = restarted.getTask(previous.id)!;
