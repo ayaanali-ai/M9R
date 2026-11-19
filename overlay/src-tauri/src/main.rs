@@ -105,6 +105,8 @@ const TOP_MARGIN: f64 = 0.0;
 /// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
 const NEXT_W: f64 = 1100.0;
 const NEXT_H: f64 = 700.0;
+const NOTCH_LIP_W: f64 = 288.0;
+const NOTCH_LIP_H: f64 = 32.0;
 /// Margin around the island that still counts as over it, matching the UI.
 const HIT_MARGIN: f64 = 14.0;
 
@@ -159,6 +161,11 @@ struct IslandRect {
 }
 
 impl IslandRect {
+    fn startup_lip(window_width: f64) -> Self {
+        let w = NOTCH_LIP_W.min(window_width * 0.95);
+        Self { x: (window_width - w) / 2.0, y: 0.0, w, h: NOTCH_LIP_H }
+    }
+
     /// A rectangle the UI reports must be finite, non-negative, and inside the window; anything else is ignored.
     fn checked(x: f64, y: f64, w: f64, h: f64, window_width: f64, window_height: f64) -> Option<IslandRect> {
         let sane = [x, y, w, h].iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 && x >= -1.0 && y >= -1.0
@@ -236,8 +243,10 @@ fn spawn_heartbeat(app: AppHandle) {
 fn pill_set_rect(window: WebviewWindow, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let size = window.inner_size().map_err(|e| e.to_string())?;
-    let rect = IslandRect::checked(x, y, width, height, size.width as f64 / scale, size.height as f64 / scale)
-        .ok_or("island rectangle is outside the window")?;
+    let window_width = size.width as f64 / scale;
+    let window_height = size.height as f64 / scale;
+    let rect = IslandRect::checked(x, y, width, height, window_width, window_height)
+        .ok_or_else(|| format!("pill hit area ({x}, {y}, {width}, {height}) is outside the {window_width} × {window_height} logical window at scale {scale}"))?;
     NEXT.lock().unwrap().rect = rect;
     Ok(())
 }
@@ -274,6 +283,7 @@ fn open_microphone_settings() -> Result<(), String> {
 fn spawn_click_through_watcher(app: AppHandle) {
     std::thread::spawn(move || {
         let mut ignoring: Option<bool> = None;
+        let mut toggle_failed = false;
         loop {
             // A 16 ms poll did the same window/cursor queries ~62 times a second even
             // when the pointer was nowhere near the pill. 50 ms keeps hit testing
@@ -281,11 +291,21 @@ fn spawn_click_through_watcher(app: AppHandle) {
             std::thread::sleep(Duration::from_millis(50));
             let Some(window) = app.get_webview_window(PILL) else { continue };
             let rect = NEXT.lock().unwrap().rect;
-            let (Ok(cursor), Ok(pos), Ok(scale)) = (window.cursor_position(), window.outer_position(), window.scale_factor()) else { continue };
+            let (Ok(cursor), Ok(pos), Ok(scale)) = (window.cursor_position(), window.inner_position(), window.scale_factor()) else { continue };
             let inside = rect.hit(HIT_MARGIN, (cursor.x - pos.x as f64) / scale, (cursor.y - pos.y as f64) / scale);
             if ignoring != Some(!inside) {
-                ignoring = Some(!inside);
-                let _ = window.set_ignore_cursor_events(!inside);
+                match window.set_ignore_cursor_events(!inside) {
+                    Ok(()) => {
+                        ignoring = Some(!inside);
+                        toggle_failed = false;
+                    }
+                    Err(error) => {
+                        if !toggle_failed {
+                            eprintln!("M9R pill: could not change click-through: {error}");
+                            toggle_failed = true;
+                        }
+                    }
+                }
             }
         }
     });
@@ -1322,11 +1342,15 @@ fn main() {
             if next_mode() {
                 // The one-pill UI is the root of the single canonical frontend bundle.
                 let _ = window.set_ignore_cursor_events(true);
+                place_next_pill(&window, &load_saved(app.handle()));
+                if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+                    // The visible lip can receive its first click before WebView reports geometry.
+                    NEXT.lock().unwrap().rect = IslandRect::startup_lip(size.width as f64 / scale);
+                }
                 match "http://tauri.localhost/index.html".parse() {
                     Ok(url) => { let _ = window.navigate(url); }
                     Err(e) => eprintln!("M9R: could not open the one-pill UI ({e})"),
                 }
-                place_next_pill(&window, &load_saved(app.handle()));
                 spawn_click_through_watcher(app.handle().clone());
             } else {
                 place(&window, &load_saved(app.handle()));
@@ -1446,6 +1470,17 @@ mod screen_glow_tests {
 #[cfg(test)]
 mod one_pill_window_tests {
     use super::{has_open_app_argument, has_update_shutdown_argument, heartbeat_json, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, OPEN_APP_ARGUMENT, UPDATE_SHUTDOWN_ARGUMENT};
+
+    #[test]
+    fn startup_lip_only_accepts_clicks_near_the_visible_notch() {
+        for width in [240.0, 720.0, NEXT_W] {
+            let lip = IslandRect::startup_lip(width);
+            assert!(lip.hit(0.0, width / 2.0, 16.0));
+            assert!(!lip.hit(0.0, width / 2.0, 80.0));
+            assert!(!lip.hit(0.0, 0.0, 16.0));
+            assert!(IslandRect::checked(lip.x, lip.y, lip.w, lip.h, width, NEXT_H).is_some());
+        }
+    }
 
     #[test]
     fn only_the_private_installer_argument_requests_shutdown() {

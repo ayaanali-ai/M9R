@@ -26,6 +26,7 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   type NativeSpeechHandlers = NonNullable<SpeechEnv["native"]> extends { start(handlers: infer T): Promise<void> } ? T : never;
   let nativeSpeechHandlers: NativeSpeechHandlers | null = null;
   let nativeSpeechListeners: Promise<void> | null = null;
+  let hitAreaError = "";
   const ensureNativeSpeechListeners = () => {
     nativeSpeechListeners ??= Promise.all([
       listen<string>("dictation-interim", ({ payload }) => nativeSpeechHandlers?.interim(payload)),
@@ -150,7 +151,13 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
       });
     },
     setIslandRect(x, y, width, height) {
-      void invoke("pill_set_rect", { x, y, width, height }).catch(() => { /* a rejected rectangle keeps the last good one */ });
+      void invoke("pill_set_rect", { x, y, width, height }).then(() => {
+        hitAreaError = "";
+      }, error => {
+        const detail = String(error);
+        if (!hitAreaError) void invoke("log_debug", { msg: `Pill hit area rejected: ${detail}` }).catch(() => {});
+        hitAreaError = detail;
+      });
     },
     setCollapsed(collapsed) {
       void invoke("pill_set_collapsed", { collapsed }).catch(() => { /* the window keeps its size */ });

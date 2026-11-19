@@ -180,6 +180,7 @@ test("the desktop transport forwards the island's window hooks to the overlay co
     ["pill_set_rect", { x: 216, y: 0, width: 288, height: 32 }],
     ["pill_set_collapsed", { collapsed: true }],
     ["pill_set_focus", { focused: true }],
+    ["log_debug", { msg: "Pill hit area rejected: Error: rejected" }],
   ], "a rejected rectangle does not throw into the UI");
 });
 
