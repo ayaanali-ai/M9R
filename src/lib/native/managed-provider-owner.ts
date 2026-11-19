@@ -800,23 +800,23 @@ export function createManagedProviderOwner(deps: ManagedProviderOwnerDeps): Mana
           // altering the recorded result -- when this turn's own stage
           // ledger shows an action-phase failure the agent never retried
           // successfully afterward.
-          const turnStageErrors = freshTask?.stageTiming?.filter((entry) =>
-            entry.status === "error" && Date.parse(entry.startedAt) >= turnStartedMs) ?? [];
-          const lastErrorIndex = freshTask?.stageTiming ? freshTask.stageTiming.length - 1 - [...freshTask.stageTiming].reverse().findIndex((entry) =>
-            entry.status === "error" && Date.parse(entry.startedAt) >= turnStartedMs) : -1;
-          const laterOkSameIndex = lastErrorIndex >= 0 && freshTask?.stageTiming
-            ? freshTask.stageTiming.slice(lastErrorIndex + 1).some((entry) => entry.status === "ok" && entry.phase === freshTask.stageTiming![lastErrorIndex].phase)
-            : false;
-          const uncheckedFailure = turnStageErrors.length > 0 && !laterOkSameIndex;
+          const stageErrorsByPhase = new Map<string, number>();
+          for (const entry of freshTask?.stageTiming ?? []) {
+            if (!(Date.parse(entry.startedAt) >= turnStartedMs)) continue;
+            if (entry.status === "error") {
+              stageErrorsByPhase.set(entry.phase, (stageErrorsByPhase.get(entry.phase) ?? 0) + 1);
+            } else if (entry.status === "ok") stageErrorsByPhase.delete(entry.phase);
+          }
+          const unresolvedStageErrorCount = [...stageErrorsByPhase.values()].reduce((sum, count) => sum + count, 0);
           // Only second-guess a claimed "completed" -- an honest "incomplete"
           // report already carries its own remainingWork, so the ledger's
           // errors are already acknowledged and need no second warning.
-          const completionSuspect = kind === "owner" && !event.isError && uncheckedFailure
+          const completionSuspect = kind === "owner" && !event.isError && unresolvedStageErrorCount > 0
             && freshTask?.completion?.status === "completed";
           const advisory = unverified
             ? "\n\n[M9R: no desktop action was observed during this task -- this looks like the model's own answer, not something verified by opening or reading the app.]"
             : completionSuspect
-              ? `\n\n[M9R: this task reported completion, but ${turnStageErrors.length} action${turnStageErrors.length === 1 ? "" : "s"} failed during this turn with no later success in that same phase -- verify the result before treating it as done.]`
+              ? `\n\n[M9R: this task reported completion, but ${unresolvedStageErrorCount} desktop stage failure${unresolvedStageErrorCount === 1 ? "" : "s"} had no later success in the same phase. Check the result before relying on it.]`
               : "";
           emit({ kind: "result", handle: profile.handle, provider: profile.provider,
             text: `${event.text}${advisory}`,

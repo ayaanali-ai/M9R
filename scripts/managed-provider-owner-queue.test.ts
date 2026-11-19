@@ -371,6 +371,10 @@ test("a task that hit an unresolved action error but still self-reports complete
           const now = new Date();
           store.recordStageTiming("T1", { phase: "action", startedAt: now.toISOString(), endedAt: now.toISOString(),
             durationMs: 5, status: "error", detail: "The stage click target could not be resolved from the last observation." });
+          store.recordStageTiming("T1", { phase: "launch", startedAt: now.toISOString(), endedAt: now.toISOString(),
+            durationMs: 5, status: "error", detail: "The app was not ready." });
+          store.recordStageTiming("T1", { phase: "launch", startedAt: now.toISOString(), endedAt: now.toISOString(),
+            durationMs: 5, status: "ok" });
           store.recordTaskResult(context.token, "T1", "Drew the snowman and saved the file.", { status: "completed", remainingWork: [] });
           yield { kind: "result", text: "Drew the snowman and saved the file.", isError: false };
         },
@@ -394,7 +398,7 @@ test("a task that hit an unresolved action error but still self-reports complete
     const resultEvent = events.find((event): event is { kind: string; text?: string } =>
       typeof event === "object" && event !== null && (event as { kind?: string }).kind === "result") as { text?: string } | undefined;
     assert.ok(resultEvent, JSON.stringify(events));
-    assert.match(resultEvent!.text ?? "", /reported completion, but 1 action failed during this turn/,
+    assert.match(resultEvent!.text ?? "", /reported completion, but 1 desktop stage failure had no later success/,
       "a completed report with an unresolved action-phase error from this turn must carry an advisory, not be presented as a clean success");
   } finally { await owner.shutdown(); rmSync(root, { recursive: true, force: true }); }
 });
