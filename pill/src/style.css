@@ -1412,15 +1412,15 @@ input[type="range"]::-webkit-slider-thumb {
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
-  padding: 7px 7px 7px 8px;
-  border-radius: 22px;
+  padding: 9px 9px 9px 10px;
+  border-radius: 24px;
   background: rgba(255, 255, 255, 0.06);
-  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.09), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  transition: background 180ms ease, box-shadow 180ms ease;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  transition: background 180ms ease, border-color 180ms ease;
 }
 .prompt-view .chat-bar:focus-within {
   background: rgba(255, 255, 255, 0.075);
-  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.18);
 }
 
 .composer-line { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
@@ -1464,7 +1464,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .composer-rule { flex: 0 0 1px; align-self: center; width: 1px; height: 16px; background: rgba(255, 255, 255, 0.1); }
 
-.composer-draft { position: relative; flex: 1 1 auto; min-width: 0; height: 20px; margin-bottom: 0; transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.composer-draft { position: relative; flex: 1 1 auto; min-width: 0; height: 21px; margin-bottom: 0; transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
 .prompt-view .chat-input {
   display: block;
   width: 100%;
@@ -1472,8 +1472,8 @@ input[type="range"]::-webkit-slider-thumb {
   min-height: 0;
   padding: 0;
   resize: none;
-  line-height: 20px;
-  font: 400 13.5px var(--font);
+  line-height: 21px;
+  font: 400 14.5px var(--font);
   letter-spacing: -0.005em;
   overflow-y: auto;
   scrollbar-width: thin;
@@ -1497,12 +1497,14 @@ input[type="range"]::-webkit-slider-thumb {
 .prompt-view .mic-btn:hover { background: rgba(255, 255, 255, 0.07); color: var(--ink); }
 .prompt-view .mic-btn.on { background: rgba(122, 162, 247, 0.18); color: var(--blue); }
 
-/* Grey until there's something to send, then white: you can tell from across the room whether Enter will do anything. */
+/* Grey until there's something to send, then the app's own accent blue: one deliberate color pop, same
+   job the monochrome ink fill used to do, but now you can tell from across the room at a glance. */
 .prompt-view .send-btn {
   flex: 0 0 30px;
   width: 30px;
   height: 30px;
-  background: var(--ink);
+  background: var(--blue);
+  color: #0b0c0e;
   transition: background 120ms ease, color 120ms ease, transform 0.08s ease-out;
 }
 .prompt-view .send-btn:disabled { background: rgba(255, 255, 255, 0.1); color: var(--dim-3); }

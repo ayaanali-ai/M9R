@@ -132,7 +132,7 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
 
 /** One line by default; grows with the draft, but a pasted document never consumes the island. */
 export function cappedDraftHeight(scrollHeight: number): number {
-  return Math.max(20, Math.min(120, Number.isFinite(scrollHeight) ? scrollHeight : 20));
+  return Math.max(21, Math.min(120, Number.isFinite(scrollHeight) ? scrollHeight : 21));
 }
 
 /** The @handle being typed at the caret, if any. Kept as a pure helper for the composer and its state tests. */
