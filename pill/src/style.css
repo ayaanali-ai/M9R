@@ -2259,7 +2259,7 @@ body.pill-preview { background: radial-gradient(ellipse at 13% 78%, #ddc9b8, tra
 .prompt-view .bubble { max-width: 88%; padding: 8px 12px; border-radius: 17px; background: #29292d; color: #fff; font-size: 15px; line-height: 1.4; }
 .prompt-view .chat-row.user .bubble { background: #205ebc; color: #fff; }
 .prompt-view .conversation-speaker { margin: 0 0 4px; color: #c3c0c6; font-size: 11px; font-weight: 500; }
-.prompt-view .chat-bar { margin: 0 0 2px; padding: 6px 8px 6px 12px; border: 1px solid #46464d; border-radius: 22px; background: #09090a; }
+.prompt-view .chat-bar { margin: auto 0 2px; padding: 6px 8px 6px 12px; border: 1px solid #46464d; border-radius: 22px; background: #09090a; }
 .prompt-view .composer-line { align-items: center; }
 .prompt-view .chat-log::-webkit-scrollbar { width: 8px; }
 .prompt-view .chat-log::-webkit-scrollbar-track { margin-block: 8px; border-radius: 8px; background: #111114; }
