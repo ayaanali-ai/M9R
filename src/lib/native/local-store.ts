@@ -2728,6 +2728,25 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
             changed += 1;
           }
         }
+        // A completed task (the common case -- a normal finished turn) was never retired by the
+        // loop below, since it already has resultSummary/receipt.state==="completed" and so hits
+        // the `continue` on the very next line -- meaning its raw stageTiming array (up to
+        // MAX_STAGE_TIMING_EVENTS_PER_TASK entries) sat on disk forever, uncapped by any periodic
+        // cleanup. Confirmed live tonight (2026-11-20): a multiplayer run tripped "state.lock busy"
+        // with a 6 MB state.json and 475 tasks, almost all completed, none ever trimmed. Same fix
+        // as the retiredAt catch-up above: drop the raw per-event detail once a completed task is
+        // old enough that nothing still needs it, keep its resultSummary/receipt/stageTimingSummary
+        // (so history and aggregates are untouched), and leave retiredAt/dismissedAt alone since a
+        // completed task was never "retired from live delivery" in the first place.
+        for (const task of s.tasks) {
+          if (task.retiredAt) continue;
+          if (!(task.resultSummary || task.receipt?.state === "completed")) continue;
+          if (isFreshInboxTask(task.createdAt, at.getTime(), maxAgeMs)) continue;
+          if (task.stageTiming && task.stageTiming.length > 0) {
+            task.stageTiming = [];
+            changed += 1;
+          }
+        }
         for (const task of s.tasks) {
           if (task.retiredAt || task.resultSummary || task.receipt?.state === "completed"
             || isFreshInboxTask(task.createdAt, at.getTime(), maxAgeMs)) continue;

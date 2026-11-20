@@ -101,6 +101,39 @@ test("retiring a task drops its raw stageTiming detail but keeps the aggregate s
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a completed task's raw stageTiming is trimmed once it ages out, without being retired", () => {
+  // retireStaleTasks' main loop skips anything with resultSummary or a completed receipt (the
+  // common, successful-turn case) before it ever reaches the stageTiming-drop logic -- so a
+  // completed task's raw per-event array sat on disk uncapped forever. Confirmed live on
+  // 2026-11-20: a multiplayer run tripped "state.lock busy" against a 6 MB state.json built almost
+  // entirely from completed tasks that had never been trimmed.
+  const fixture = join(process.cwd(), ".workcache", "native-test-fixtures");
+  mkdirSync(fixture, { recursive: true });
+  const root = mkdtempSync(join(fixture, "m9r-retire-completed-"));
+  let clock = new Date("2026-10-01T12:00:00Z");
+  try {
+    const store = createLocalStore(root, { now: () => clock });
+    const { task } = store.addTask({ from: "you", to: "codex", goal: "finish a thing", origin: "human_typed", idempotencyKey: "retire-completed" });
+    const at = clock.toISOString();
+    store.recordStageTiming(task.id, { phase: "action", startedAt: at, endedAt: at, durationMs: 5, status: "ok" });
+    store.flushStageTiming();
+    store.setResult(task.id, "done", { status: "completed", remainingWork: [] });
+    const completed = store.getTask(task.id)!;
+    assert.ok(completed.resultSummary, "the fixture must actually complete to prove a completed task is handled");
+    assert.ok(completed.stageTiming && completed.stageTiming.length > 0, "the fixture must carry raw stageTiming to prove it gets dropped");
+    const summaryBefore = completed.stageTimingSummary;
+
+    clock = new Date(clock.getTime() + 120_000);
+    assert.equal(store.retireStaleTasks(60_000), 1);
+
+    const trimmed = store.getTask(task.id)!;
+    assert.deepEqual(trimmed.stageTiming, [], "raw per-event detail is dropped once a completed task ages out");
+    assert.deepEqual(trimmed.stageTimingSummary, summaryBefore, "the aggregate summary survives unchanged");
+    assert.equal(trimmed.retiredAt, undefined, "a completed task was never retired from live delivery, so retiredAt stays unset");
+    assert.equal(trimmed.resultSummary, "done", "the completed result itself is untouched");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a task retired before this cleanup existed gets its stale stageTiming caught up too", () => {
   // The main retirement loop skips anything with retiredAt already set, so a
   // task retired in a prior broker lifetime -- before the stageTiming-drop
