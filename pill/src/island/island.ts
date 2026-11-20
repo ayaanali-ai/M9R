@@ -2,7 +2,7 @@
 
 import { Tracked, Spring, clamp } from "../core/anim";
 import {
-  EXPANDED_CORNER, NOTCH_W, PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
+  PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
   MEDIA_TONE, botGlowColor, botGlowOpacity, botPosition, islandSize,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
@@ -14,8 +14,7 @@ import { State, type PillSnapshot } from "../core/state";
 import type { Decision, FileDropHandlers, PillTransport } from "../core/transport";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
 import { providerLogo } from "../views/provider";
-import { h, svg } from "../views/dom";
-import { squirclePath } from "../core/squircle";
+import { h } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
 
 /** Margin around the island that still counts as "over it" (the host uses the same value for click-through). */
@@ -24,6 +23,38 @@ const HIT_MARGIN = 14;
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
 /** Room around the island for the edge glow's halo. */
 const GLOW_PAD = 40;
+const LIP_W = 288;
+const LIP_H = 32;
+const MIN_OPEN_W = 310;
+const MIN_OPEN_H = 230;
+const DEFAULT_OPEN_W = 704;
+const DEFAULT_OPEN_H = 432;
+
+function notchShapePath(width: number, height: number): string {
+  const lip = Math.min(LIP_W, width);
+  const reach = Math.max(0, (width - lip) / 2);
+  const open = height > LIP_H + 1;
+  const bottom = open ? 28 : 15;
+  if (!open) {
+    return `M 0 0 H ${width} V ${height - bottom} Q ${width} ${height} ${width - bottom} ${height} H ${bottom} Q 0 ${height} 0 ${height - bottom} Z`;
+  }
+  const expansion = Math.min(1, Math.max(0, (height - LIP_H) / 100));
+  const shoulderY = 15 + 12 * expansion;
+  const flare = Math.min(14, reach * 0.4);
+  const corner = Math.min(24, reach * 0.45);
+  const topInset = Math.max(0, reach - 15);
+  const topRight = Math.min(width, width - reach + 15);
+  return [
+    `M ${topInset} 0 Q ${reach} 0 ${reach} 15`,
+    `Q ${reach} ${shoulderY} ${reach - flare} ${shoulderY}`,
+    `H ${corner} Q 0 ${shoulderY} 0 ${shoulderY + corner}`,
+    `V ${height - bottom} Q 0 ${height} ${bottom} ${height}`,
+    `H ${width - bottom} Q ${width} ${height} ${width} ${height - bottom}`,
+    `V ${shoulderY + corner} Q ${width} ${shoulderY} ${width - corner} ${shoulderY}`,
+    `H ${width - reach + flare} Q ${width - reach} ${shoulderY} ${width - reach} 15`,
+    `Q ${width - reach} 0 ${topRight} 0 Z`,
+  ].join(" ");
+}
 
 /** Your voice first, then your music, then an agent that needs you, then one that's working; otherwise no glow. */
 function edgeTone(): { color: string; live: boolean; ambient: boolean } | null {
@@ -48,21 +79,18 @@ export class Island {
   private edgeGlow!: SVGSVGElement;
   private glowShape!: SVGGElement;
   private glowIsland!: SVGPathElement;
-  private glowEarLeft!: SVGPathElement;
-  private glowEarRight!: SVGPathElement;
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
-  /** Hitodama-style flared ears: separate siblings so the island's clip never cuts them off. */
-  private archLeft!: SVGSVGElement;
-  private archRight!: SVGSVGElement;
 
   private header!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
 
-  private width = new Tracked(NOTCH_W);
+  private width = new Tracked(LIP_W);
   private height = new Tracked(0);
   private radius = new Tracked(ROUNDED_CORNER);
+  private openWidth = DEFAULT_OPEN_W;
+  private openHeight = DEFAULT_OPEN_H;
   private markCx = new Spring(46);
   private markCy = new Spring(16);
   private markSize = new Spring(10);
@@ -84,6 +112,7 @@ export class Island {
   constructor(root: HTMLElement, transport: PillTransport) {
     this.root = root;
     this.transport = transport;
+    this.loadOpenSize();
     this.build();
     this.wireFsm();
     this.wireInput();
@@ -94,12 +123,93 @@ export class Island {
     });
   }
 
+  private loadOpenSize() {
+    const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() * 0.96);
+    const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight * 0.92);
+    try {
+      const savedWidth = Number(localStorage.getItem("notch-preview-w"));
+      const savedHeight = Number(localStorage.getItem("notch-preview-h"));
+      this.openWidth = clamp(savedWidth > 0 ? savedWidth : DEFAULT_OPEN_W, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+      this.openHeight = clamp(savedHeight > 0 ? savedHeight : DEFAULT_OPEN_H, MIN_OPEN_H, maxHeight);
+    } catch {
+      this.openWidth = Math.min(DEFAULT_OPEN_W, maxWidth);
+      this.openHeight = Math.min(DEFAULT_OPEN_H, maxHeight);
+    }
+  }
+
+  private wireResize(container: HTMLElement) {
+    for (const handle of container.querySelectorAll<HTMLElement>(".resize-handle")) {
+      const edge = handle.dataset.edge;
+      let start: { x: number; y: number; w: number; h: number } | null = null;
+      const persist = () => {
+        if (!start) return;
+        start = null;
+        try {
+          localStorage.setItem("notch-preview-w", String(Math.round(this.openWidth)));
+          localStorage.setItem("notch-preview-h", String(Math.round(this.openHeight)));
+        } catch { /* resizing still works when storage is unavailable */ }
+      };
+      handle.addEventListener("pointerdown", (event) => {
+        if (State.mode !== "expanded") return;
+        event.preventDefault();
+        event.stopPropagation();
+        start = { x: event.clientX, y: event.clientY, w: this.openWidth, h: this.openHeight };
+        handle.setPointerCapture(event.pointerId);
+        this.islandEl.classList.add("resizing");
+      });
+      handle.addEventListener("pointermove", (event) => {
+        if (!start) return;
+        const dx = event.clientX - start.x;
+        const dy = event.clientY - start.y;
+        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() * 0.96);
+        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight * 0.92);
+        if (edge === "left" || edge === "right" || edge === "corner") {
+          const sign = edge === "left" ? -1 : 1;
+          this.openWidth = clamp(start.w + sign * 2 * dx, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+        }
+        if (edge === "bottom" || edge === "corner") this.openHeight = clamp(start.h + dy, MIN_OPEN_H, maxHeight);
+        this.width.jump(this.openWidth);
+        this.height.jump(this.openHeight);
+        this.applyGeometry();
+        this.dirty = true;
+        this.ensureRunning();
+      });
+      handle.addEventListener("pointerup", persist);
+      handle.addEventListener("pointercancel", persist);
+      handle.addEventListener("lostpointercapture", () => {
+        this.islandEl.classList.remove("resizing");
+        persist();
+      });
+      handle.addEventListener("keydown", (event) => {
+        if (State.mode !== "expanded" || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 20 : 8;
+        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() * 0.96);
+        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight * 0.92);
+        if (event.key === "ArrowLeft") this.openWidth = clamp(this.openWidth - step, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+        if (event.key === "ArrowRight") this.openWidth = clamp(this.openWidth + step, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+        if (event.key === "ArrowUp") this.openHeight = clamp(this.openHeight - step, MIN_OPEN_H, maxHeight);
+        if (event.key === "ArrowDown") this.openHeight = clamp(this.openHeight + step, MIN_OPEN_H, maxHeight);
+        this.width.jump(this.openWidth);
+        this.height.jump(this.openHeight);
+        this.applyGeometry();
+        this.dirty = true;
+        this.ensureRunning();
+        try {
+          localStorage.setItem("notch-preview-w", String(Math.round(this.openWidth)));
+          localStorage.setItem("notch-preview-h", String(Math.round(this.openHeight)));
+        } catch { /* keyboard resizing remains available */ }
+      });
+    }
+  }
+
   // ── DOM ──────────────────────────────────────────────────────────
 
   private build() {
     const actions: ViewActions = {
       setView: (v) => this.setView(v),
       collapse: () => this.collapse(),
+      focusWindow: (focused) => this.transport.focusWindow?.(focused),
       setFocus: (id) => {
         State.setFocus(id);
         Sound.play("blip");
@@ -151,16 +261,17 @@ export class Island {
     this.contentEl = h("div", { id: "content" }, this.header.el, this.viewsEl);
 
     this.clipEl = h("div", { id: "island-clip" }, this.contentEl);
-    this.archLeft = svg("M 0 0 L 24 0 L 24 24 L 23 24 C 23 10 13.5 0 0 0 Z", 0, { fill: "var(--notch-ear, #000)" });
-    this.archRight = svg("M 24 0 L 0 0 L 0 24 L 1 24 C 1 10 10.5 0 24 0 Z", 0, { fill: "var(--notch-ear, #000)" });
-    for (const arch of [this.archLeft, this.archRight]) {
-      arch.setAttribute("preserveAspectRatio", "none");
-      arch.style.position = "absolute";
-      arch.style.top = "0";
-      arch.style.left = "50%";
-      arch.style.pointerEvents = "none";
-    }
-    this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown);
+    const resizeHandles = h("div", { id: "resize-handles", "aria-label": "Resize conversation panel" },
+      ...(["left", "right", "bottom", "corner"] as const).map((edge) => h("div", {
+        class: `resize-handle ${edge}`,
+        role: "separator",
+        tabindex: "0",
+        "aria-label": `Resize ${edge}`,
+        "data-edge": edge,
+      })),
+    );
+    this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown, resizeHandles);
+    this.wireResize(resizeHandles);
 
     // Behind the island: the island's own outline is a clip path, which would cut off any glow drawn on it.
     const ns = "http://www.w3.org/2000/svg";
@@ -169,11 +280,7 @@ export class Island {
     this.edgeGlow.setAttribute("aria-hidden", "true");
     this.glowShape = document.createElementNS(ns, "g");
     this.glowIsland = document.createElementNS(ns, "path");
-    this.glowEarLeft = document.createElementNS(ns, "path");
-    this.glowEarRight = document.createElementNS(ns, "path");
-    this.glowEarLeft.setAttribute("d", "M 0 0 L 24 0 L 24 24 L 23 24 C 23 10 13.5 0 0 0 Z");
-    this.glowEarRight.setAttribute("d", "M 24 0 L 0 0 L 0 24 L 1 24 C 1 10 10.5 0 24 0 Z");
-    this.glowShape.append(this.glowIsland, this.glowEarLeft, this.glowEarRight);
+    this.glowShape.append(this.glowIsland);
     // The rainbow paint: a full spectrum across the silhouette, set flowing by a hue sweep in CSS.
     const defs = document.createElementNS(ns, "defs");
     const grad = document.createElementNS(ns, "linearGradient");
@@ -190,7 +297,7 @@ export class Island {
     });
     defs.append(grad);
     this.edgeGlow.append(defs, this.glowShape);
-    this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl, this.archLeft, this.archRight);
+    this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl);
     this.applyGeometry();
   }
 
@@ -284,7 +391,9 @@ export class Island {
           if (!this.wasInIsland) this.fsm.mouseLeft();
           break;
         case "home":
-          this.expand(State.defaultView());
+          // Reopening the lip returns to the current surface. Startup selects
+          // conversation, while Home and Settings remain available in-header.
+          this.expand(State.view);
           if (!this.wasInIsland) this.fsm.mouseLeft();
           break;
         case "intro":
@@ -388,8 +497,10 @@ export class Island {
   // ── Geometry ─────────────────────────────────────────────────────
 
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, this.views.get("prompt")?.draftHeight);
-    const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
+    const { w, h } = State.mode === "expanded"
+      ? { w: this.openWidth, h: this.openHeight }
+      : islandSize(State.mode, State.view, State.chatHistory.length, this.views.get("prompt")?.draftHeight);
+    const r = State.mode === "expanded" ? 28 : 15;
     return { w, h, r };
   }
 
@@ -413,8 +524,9 @@ export class Island {
     const r = this.radius.value;
     this.islandEl.style.width = `${w}px`;
     this.islandEl.style.height = `${hh}px`;
+    this.islandEl.classList.toggle("expanded", State.mode === "expanded");
     this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
-    const outline = squirclePath(w, hh, { br: r, bl: r });
+    const outline = notchShapePath(w, hh);
     this.islandEl.style.clipPath = `path('${outline}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
     // The glow is a blurred copy of the whole silhouette (island and both ears) sitting behind it, so the light
@@ -426,14 +538,10 @@ export class Island {
     this.edgeGlow.setAttribute("viewBox", `0 0 ${gw} ${gh}`);
     this.glowShape.setAttribute("transform", `translate(${GLOW_PAD + r} 0)`);
     this.glowIsland.setAttribute("d", outline);
-    const s = r / 24;
-    this.glowEarLeft.setAttribute("transform", `translate(${-r} 0) scale(${s})`);
-    this.glowEarRight.setAttribute("transform", `translate(${w} 0) scale(${s})`);
-    this.applyArches(w, r);
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
 
-    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    const rect = { x: (this.panelWidth() - w) / 2, y: 0, w, h: hh };
     const p = this.pushedRect;
     if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
@@ -441,24 +549,16 @@ export class Island {
     }
   }
 
-  /** Keep the two outward-curving top ears aligned as the pill springs between sizes. */
-  private applyArches(w: number, r: number) {
-    this.archLeft.style.display = r > 0 ? "" : "none";
-    this.archRight.style.display = r > 0 ? "" : "none";
-    if (r <= 0) return;
-    this.archLeft.setAttribute("width", `${r}`);
-    this.archLeft.setAttribute("height", `${r}`);
-    // Each ear overlaps the island by a pixel: edge to edge they left a hairline seam the glow showed through.
-    this.archLeft.style.transform = `translateX(${-(w / 2 + r) + 1}px)`;
-    this.archRight.setAttribute("width", `${r}`);
-    this.archRight.setAttribute("height", `${r}`);
-    this.archRight.style.transform = `translateX(${w / 2 - 1}px)`;
-  }
-
   private islandRect(): { x: number; y: number; w: number; h: number } {
     const w = this.width.value;
     const hh = this.height.value;
-    return { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    return { x: (this.panelWidth() - w) / 2, y: 0, w, h: hh };
+  }
+
+  /** The native window is wider than the old 720px design canvas. Hit testing
+   * must use the real WebView width or the lip becomes clickable only to one side. */
+  private panelWidth(): number {
+    return Math.max(1, window.innerWidth || document.documentElement.clientWidth || PANEL_W);
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ─────
@@ -710,6 +810,7 @@ export class Island {
 
     this.contentEl.style.opacity = expanded ? "1" : "0";
     this.contentEl.style.pointerEvents = expanded ? "auto" : "none";
+    this.contentEl.inert = !expanded;
 
     this.header.sync();
     for (const [name, view] of this.views) {
@@ -722,10 +823,7 @@ export class Island {
     if (this.lastSyncedView !== State.view) {
       const wasChat = this.lastSyncedView === "prompt";
       this.lastSyncedView = State.view;
-      if (State.view === "prompt") {
-        this.transport.focusWindow?.(true);
-        window.setTimeout(() => this.views.get("prompt")?.focus?.(), 120);
-      } else if (wasChat) {
+      if (State.view !== "prompt" && wasChat) {
         this.transport.focusWindow?.(false);
       }
     }

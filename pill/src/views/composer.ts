@@ -394,6 +394,9 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
 
   send.addEventListener("click", () => void submit());
   input.addEventListener("input", () => { resizeDraft(); syncFiles(); });
+  // Opening or resizing the pill is non-activating. Take keyboard focus only
+  // when the owner explicitly presses inside the composer.
+  input.addEventListener("pointerdown", () => actions.focusWindow?.(true));
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();

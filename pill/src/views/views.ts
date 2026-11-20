@@ -18,6 +18,7 @@ export interface ViewActions {
   setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
   setView(v: IslandViewName): void;
   collapse(): void;
+  focusWindow?(focused: boolean): void;
   setFocus(id: string): void;
   decide(d: "allow" | "deny" | "allow_day"): void;
   send(text: string): Promise<string | void>;
@@ -101,7 +102,11 @@ export function buildHeader(actions: ViewActions): ViewHost {
     finally { changingMode = false; workMode.disabled = false; }
   } });
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
+  const faces = h("span", { class: "pill-faces", "aria-hidden": "true" });
+  const toggle = h("button", { class: "pill-toggle", type: "button", onclick: () => {
+    if (State.view === "prompt") actions.collapse();
+    else go("prompt");
+  } }, faces);
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
@@ -114,7 +119,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat),
+    h("div", { class: "tabs" }, tabHome),
+    toggle,
     h("div", { class: "header-actions" }, brokerStatus, workMode, gearBtn, soundBtn),
   );
 
@@ -130,8 +136,15 @@ export function buildHeader(actions: ViewActions): ViewHost {
       workMode.title = State.ownerWorkMode === "working" ? "Background work continues. Foreground turns need your approval." : "Agents may use foreground input. Click to protect your current work.";
       const v = State.view;
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
-      tabChat.classList.toggle("on", v === "prompt");
       gearBtn.classList.toggle("on", v === "settings");
+      const toggleLabel = v === "prompt" ? "Minimize pill" : "Return to conversation";
+      toggle.title = toggleLabel;
+      toggle.setAttribute("aria-label", toggleLabel);
+      const faceKey = State.tasks.map((task) => task.provider).filter((provider, index, all) => all.indexOf(provider) === index).slice(0, 3).join("|");
+      if (faces.dataset.key !== faceKey) {
+        faces.dataset.key = faceKey;
+        faces.replaceChildren(...faceKey.split("|").filter(Boolean).map((provider) => providerLogo(provider as AgentTask["provider"], 22)));
+      }
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
       brokerStatus.dataset.state = connection;
