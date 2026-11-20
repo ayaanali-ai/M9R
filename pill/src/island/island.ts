@@ -1,6 +1,6 @@
 // The island: DOM shell, sizing animation, mark placement, mouse handling, window collapse.
 
-import { Tracked, Spring, clamp } from "../core/anim";
+import { Tracked, Spring, clamp, CLOSE_MS } from "../core/anim";
 import {
   PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
   MEDIA_TONE, botGlowColor, botGlowOpacity, botPosition, islandSize,
@@ -30,31 +30,50 @@ const MIN_OPEN_H = 230;
 const DEFAULT_OPEN_W = 704;
 const DEFAULT_OPEN_H = 432;
 
+/** Size of the outward flare at the top corners of the neck (and of the compact pill's ears). */
+const NECK_FLARE = 15;
+/** Height window (above the compact height) over which the bottom corners and the ears blend between compact and open. */
+const BLEND_H = 30;
+
+const unit = (v: number) => Math.min(1, Math.max(0, v));
+
+/**
+ * One continuous outline for every size, compact through open.
+ *
+ * Compact (reach 0) degenerates to the flat-topped capsule -- its outward top
+ * arches are drawn by archLeft/archRight just outside this box (see applyArches).
+ * Open grows the narrow neck (the lip) above the wider panel.
+ *
+ * This used to switch between two separate paths at `height > LIP_H + 1`, with the
+ * bottom radius jumping 15 -> 28 there. Below ~55px the open path's side walls also
+ * ran backwards (`V height - 28` sat above the shoulder), so the outline crossed
+ * itself. Opening springs through that band in a frame or two. Closing eases into
+ * it slowly, so a close spent many frames showing a self-crossing outline and then
+ * snapped -- the "glitch at the end of the close". Every value below is now a
+ * continuous function of (width, height) and is clamped so the outline never
+ * crosses itself.
+ */
 function notchShapePath(width: number, height: number): string {
   const lip = Math.min(LIP_W, width);
   const reach = Math.max(0, (width - lip) / 2);
-  const open = height > LIP_H + 1;
-  const bottom = open ? 28 : 15;
-  if (!open) {
-    // Flat top: the outward arch at the top corners is drawn by archLeft/archRight,
-    // two small sibling shapes sitting just outside this box (see applyArches), not
-    // by this clip path -- there is no room in this box for a curve to bulge past it.
-    return `M 0 0 H ${width} V ${height - bottom} Q ${width} ${height} ${width - bottom} ${height} H ${bottom} Q 0 ${height} 0 ${height - bottom} Z`;
-  }
-  const expansion = Math.min(1, Math.max(0, (height - LIP_H) / 100));
-  const shoulderY = 15 + 12 * expansion;
+  const expansion = unit((height - LIP_H) / 100);
+  const bottom = Math.min(15 + 13 * unit((height - LIP_H) / BLEND_H), height / 2);
   const flare = Math.min(14, reach * 0.4);
-  const corner = Math.min(24, reach * 0.45);
-  const topInset = Math.max(0, reach - 15);
-  const topRight = Math.min(width, width - reach + 15);
+  // Room between the top edge and where the bottom corners begin; the shoulder and its corner must fit inside it.
+  const room = Math.max(0, height - bottom);
+  const corner = Math.min(24, reach * 0.45, room / 2);
+  const shoulderY = Math.max(0, Math.min(15 + 12 * expansion, room - corner));
+  const neckY = Math.min(NECK_FLARE, shoulderY);
+  const topInset = Math.max(0, reach - NECK_FLARE);
+  const topRight = width - topInset;
   return [
-    `M ${topInset} 0 Q ${reach} 0 ${reach} 15`,
+    `M ${topInset} 0 Q ${reach} 0 ${reach} ${neckY}`,
     `Q ${reach} ${shoulderY} ${reach - flare} ${shoulderY}`,
     `H ${corner} Q 0 ${shoulderY} 0 ${shoulderY + corner}`,
     `V ${height - bottom} Q 0 ${height} ${bottom} ${height}`,
     `H ${width - bottom} Q ${width} ${height} ${width} ${height - bottom}`,
     `V ${shoulderY + corner} Q ${width} ${shoulderY} ${width - corner} ${shoulderY}`,
-    `H ${width - reach + flare} Q ${width - reach} ${shoulderY} ${width - reach} 15`,
+    `H ${width - reach + flare} Q ${width - reach} ${shoulderY} ${width - reach} ${neckY}`,
     `Q ${width - reach} 0 ${topRight} 0 Z`,
   ].join(" ");
 }
@@ -426,6 +445,15 @@ export class Island {
     this.fsm.launch();
   }
 
+  private blurTimer: number | null = null;
+
+  private cancelBlur() {
+    if (this.blurTimer != null) {
+      window.clearTimeout(this.blurTimer);
+      this.blurTimer = null;
+    }
+  }
+
   // ── Mode / view ──────────────────────────────────────────────────
 
   private setMode(mode: IslandMode) {
@@ -437,11 +465,27 @@ export class Island {
       if (State.view === "finished") State.view = State.defaultView();
     }
     State.mode = mode;
-    if (mode === "expanded") Sound.play("open");
+    if (mode === "expanded") {
+      Sound.play("open");
+      // The mark holds still while collapsed (see updateMark). Start the open from the same
+      // resting pose the collapsed mode used to leave it in, so the opening is unchanged.
+      const rest = botPosition(prev, State.view, this.height.value);
+      this.markCx.set(rest.cx);
+      this.markCy.set(rest.cy);
+      this.markSize.set(rest.diameter);
+      this.cancelBlur();
+    }
     if (prev === "expanded") {
       Sound.play("close");
       State.isPinned = false;
-      this.transport.focusWindow?.(false);
+      // Dropping focus flips the native window's focusable style. Doing that on the first
+      // frame of the close could hitch the WebView right as the shrink began. It only has
+      // to happen before the user types elsewhere, so wait until the close curve finishes.
+      this.cancelBlur();
+      this.blurTimer = window.setTimeout(() => {
+        this.blurTimer = null;
+        if (State.mode !== "expanded") this.transport.focusWindow?.(false);
+      }, CLOSE_MS + 20);
     }
     this.updateWindowCollapsed();
     this.animateGeometry(modeOrder(mode) < modeOrder(prev));
@@ -546,7 +590,8 @@ export class Island {
     const outline = notchShapePath(w, hh);
     this.islandEl.style.clipPath = `path('${outline}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
-    this.applyArches(w, hh > LIP_H + 1 ? 0 : r);
+    this.applyContentBox(w);
+    this.applyArches(w, r, hh);
     // The glow is a blurred copy of the whole silhouette (island and both ears) sitting behind it, so the light
     // follows the ears' curve too instead of stopping where they begin.
     const gw = w + 2 * r + 2 * GLOW_PAD;
@@ -567,20 +612,59 @@ export class Island {
     }
   }
 
-  /** Keep the two outward-curving top ears aligned as the pill springs between sizes.
-   * `r` is 0 in expanded mode -- that view's own clip path already draws its top flare,
-   * so the ears hide rather than double it up. */
-  private applyArches(w: number, r: number) {
-    this.archLeft.style.display = r > 0 ? "" : "none";
-    this.archRight.style.display = r > 0 ? "" : "none";
-    if (r <= 0) return;
-    this.archLeft.setAttribute("width", `${r}`);
-    this.archLeft.setAttribute("height", `${r}`);
+  /** Horizontal offset of the content (and the mark) inside the island. */
+  private contentShift(w: number): number {
+    return (w - this.openWidth) / 2;
+  }
+
+  private contentBoxKey = "";
+
+  /** The content is always laid out at the open panel's size, centred, and the island's
+   * outline only crops it. It used to be `inset: 0`, so every frame of an open or close
+   * resized it, and the whole chat/drum/view tree reflowed at an in-between size. Opening
+   * hid that because the content was still fading in. Closing starts with the content
+   * fully visible, so you watched it squash and rewrap while it faded. Now it stays put
+   * and only a compositor transform moves it. */
+  private applyContentBox(w: number) {
+    const key = `${this.openWidth}x${this.openHeight}`;
+    if (key !== this.contentBoxKey) {
+      this.contentBoxKey = key;
+      const s = this.contentEl.style;
+      s.inset = "0 auto auto 0";
+      s.width = `${this.openWidth}px`;
+      s.height = `${this.openHeight}px`;
+    }
+    this.contentEl.style.transform = `translateX(${this.contentShift(w)}px)`;
+  }
+
+  /** Keep the two outward-curving top ears on the neck's top corners as the pill changes size.
+   *
+   * Compact: the neck is the whole island, so the ears sit just outside its edges as before.
+   * Open: notchShapePath draws the same flare inline at the neck's corners. The ears now
+   * follow the neck corner (x = reach) instead of the island's outer edge, so through a
+   * close the inline flare and the ear are the same shape in the same place. The ear fades
+   * only after the inline flare has fully formed (reach >= NECK_FLARE), so the handoff
+   * can't show a gap or a pop. Previously the ears stayed on the panel's outer edge, up to
+   * 15px away from the neck they were meant to continue, while they faded.
+   * They also scale with height below the compact height, so retracting to hidden no longer
+   * leaves two full-size ears hanging over an island of zero height. */
+  private applyArches(w: number, r: number, hh: number) {
+    const reach = Math.max(0, (w - Math.min(LIP_W, w)) / 2);
+    const fade = 1 - unit(Math.max((reach - NECK_FLARE) / 10, (hh - LIP_H - BLEND_H) / BLEND_H));
+    const size = Math.min(r, NECK_FLARE) * unit(hh / LIP_H);
+    const visible = fade > 0 && size > 0.01;
+    this.archLeft.style.opacity = `${fade}`;
+    this.archRight.style.opacity = `${fade}`;
+    this.archLeft.style.display = visible ? "" : "none";
+    this.archRight.style.display = visible ? "" : "none";
+    if (!visible) return;
+    this.archLeft.setAttribute("width", `${size}`);
+    this.archLeft.setAttribute("height", `${size}`);
     // Each ear overlaps the island by a pixel: edge to edge they left a hairline seam the glow showed through.
-    this.archLeft.style.transform = `translateX(${-(w / 2 + r) + 1}px)`;
-    this.archRight.setAttribute("width", `${r}`);
-    this.archRight.setAttribute("height", `${r}`);
-    this.archRight.style.transform = `translateX(${w / 2 - 1}px)`;
+    this.archLeft.style.transform = `translateX(${-(w / 2) + reach - size + 1}px)`;
+    this.archRight.setAttribute("width", `${size}`);
+    this.archRight.setAttribute("height", `${size}`);
+    this.archRight.style.transform = `translateX(${w / 2 - reach - 1}px)`;
   }
 
   private islandRect(): { x: number; y: number; w: number; h: number } {
@@ -753,7 +837,11 @@ export class Island {
   }
 
   private frame = (nowMs: number) => {
-    const dt = Math.min(0.05, (nowMs - this.lastFrame) / 1000);
+    // ensureRunning stamps lastFrame with performance.now(), which is later than this frame's rAF timestamp, so the
+    // first frame of a fresh run used to get a slightly negative dt (springs stepped backwards, curves held still).
+    // Treat that first frame as one nominal frame.
+    const elapsed = (nowMs - this.lastFrame) / 1000;
+    const dt = elapsed > 0 ? Math.min(0.05, elapsed) : 1 / 60;
     this.lastFrame = nowMs;
 
     this.width.step(dt, nowMs);
@@ -792,19 +880,27 @@ export class Island {
   };
 
   private updateMark() {
-    const p = botPosition(State.mode, State.view, this.height.value);
-    this.markCx.target = p.cx;
-    this.markCy.target = p.cy;
-    this.markSize.target = p.diameter;
+    const expanded = State.mode === "expanded";
+    // Expanded content is laid out at the open size (applyContentBox), so the mark is too.
+    const p = botPosition(State.mode, State.view, expanded ? this.openHeight : this.height.value);
+    // Collapsed modes never show the mark (opacity 0). Retargeting it there made it spring
+    // across the shrinking island toward the top-left while it faded -- part of the messy
+    // close. It now stays with the content it belongs to while it fades out.
+    if (expanded) {
+      this.markCx.target = p.cx;
+      this.markCy.target = p.cy;
+      this.markSize.target = p.diameter;
+    }
     this.markEl.style.opacity = p.opacity > 0 ? "1" : "0";
 
-    if (State.mode === "expanded" && p.opacity > 0) {
+    if (expanded && p.opacity > 0) {
       const d = p.diameter;
       const color = botGlowColor(State.effectiveState);
+      const shift = this.markShift();
       this.markGlow.style.display = "block";
       this.markGlow.style.width = `${d * 2.2}px`;
       this.markGlow.style.height = `${d * 2.2}px`;
-      this.markGlow.style.left = `${this.markCx.value - d * 1.1}px`;
+      this.markGlow.style.left = `${shift + this.markCx.value - d * 1.1}px`;
       this.markGlow.style.top = `${this.markCy.value - d * 1.1}px`;
       this.markGlow.style.background = `radial-gradient(circle, ${color} 0%, transparent 62%)`;
       this.markGlow.style.opacity = String(botGlowOpacity(State.effectiveState));
@@ -813,11 +909,17 @@ export class Island {
     }
   }
 
+  /** While closing (and collapsed) the mark rides with the pinned content as it fades, rather
+   * than with the island's moving left edge. Opening keeps its original island-relative flight. */
+  private markShift(): number {
+    return State.mode === "expanded" ? 0 : this.contentShift(this.width.value);
+  }
+
   private placeMark() {
     const d = this.markSize.value;
     this.markEl.style.width = `${d}px`;
     this.markEl.style.height = `${d}px`;
-    this.markEl.style.left = `${this.markCx.value - d / 2}px`;
+    this.markEl.style.left = `${this.markShift() + this.markCx.value - d / 2}px`;
     this.markEl.style.top = `${this.markCy.value - d / 2}px`;
   }
 
