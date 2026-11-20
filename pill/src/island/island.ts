@@ -37,7 +37,7 @@ function notchShapePath(width: number, height: number): string {
   const bottom = open ? 28 : 15;
   if (!open) {
     const top = Math.min(bottom, height / 2);
-    return `M ${top} 0 Q 0 0 0 ${top} V ${height - bottom} Q 0 ${height} ${bottom} ${height} H ${width - bottom} Q ${width} ${height} ${width} ${height - bottom} V ${top} Q ${width} 0 ${width - top} 0 Z`;
+    return `M ${top} 0 Q ${top} ${top} 0 ${top} V ${height - bottom} Q 0 ${height} ${bottom} ${height} H ${width - bottom} Q ${width} ${height} ${width} ${height - bottom} V ${top} Q ${width - top} ${top} ${width - top} 0 Z`;
   }
   const expansion = Math.min(1, Math.max(0, (height - LIP_H) / 100));
   const shoulderY = 15 + 12 * expansion;
