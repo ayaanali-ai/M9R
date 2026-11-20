@@ -14,7 +14,7 @@ import { State, type PillSnapshot } from "../core/state";
 import type { Decision, FileDropHandlers, PillTransport } from "../core/transport";
 import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
 import { providerLogo } from "../views/provider";
-import { h } from "../views/dom";
+import { h, svg } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
 
 /** Margin around the island that still counts as "over it" (the host uses the same value for click-through). */
@@ -36,8 +36,10 @@ function notchShapePath(width: number, height: number): string {
   const open = height > LIP_H + 1;
   const bottom = open ? 28 : 15;
   if (!open) {
-    const top = Math.min(bottom, height / 2);
-    return `M ${top} 0 Q 0 0 0 ${top} V ${height - bottom} Q 0 ${height} ${bottom} ${height} H ${width - bottom} Q ${width} ${height} ${width} ${height - bottom} V ${top} Q ${width} 0 ${width - top} 0 Z`;
+    // Flat top: the outward arch at the top corners is drawn by archLeft/archRight,
+    // two small sibling shapes sitting just outside this box (see applyArches), not
+    // by this clip path -- there is no room in this box for a curve to bulge past it.
+    return `M 0 0 H ${width} V ${height - bottom} Q ${width} ${height} ${width - bottom} ${height} H ${bottom} Q 0 ${height} 0 ${height - bottom} Z`;
   }
   const expansion = Math.min(1, Math.max(0, (height - LIP_H) / 100));
   const shoulderY = 15 + 12 * expansion;
@@ -80,6 +82,8 @@ export class Island {
   private edgeGlow!: SVGSVGElement;
   private glowShape!: SVGGElement;
   private glowIsland!: SVGPathElement;
+  private archLeft!: SVGSVGElement;
+  private archRight!: SVGSVGElement;
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
@@ -274,6 +278,18 @@ export class Island {
     this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown, resizeHandles);
     this.wireResize(resizeHandles);
 
+    // The collapsed pill's top corners arch outward into the surrounding window margin,
+    // which the island's own clip path can't reach (see notchShapePath's flat top above).
+    this.archLeft = svg("M 0 0 L 24 0 L 24 24 L 23 24 C 23 10 13.5 0 0 0 Z", 0, { fill: "var(--notch-ear, #000)" });
+    this.archRight = svg("M 24 0 L 0 0 L 0 24 L 1 24 C 1 10 10.5 0 24 0 Z", 0, { fill: "var(--notch-ear, #000)" });
+    for (const arch of [this.archLeft, this.archRight]) {
+      arch.setAttribute("preserveAspectRatio", "none");
+      arch.style.position = "absolute";
+      arch.style.top = "0";
+      arch.style.left = "50%";
+      arch.style.pointerEvents = "none";
+    }
+
     // Behind the island: the island's own outline is a clip path, which would cut off any glow drawn on it.
     const ns = "http://www.w3.org/2000/svg";
     this.edgeGlow = document.createElementNS(ns, "svg");
@@ -298,7 +314,7 @@ export class Island {
     });
     defs.append(grad);
     this.edgeGlow.append(defs, this.glowShape);
-    this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl);
+    this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl, this.archLeft, this.archRight);
     this.applyGeometry();
   }
 
@@ -530,6 +546,7 @@ export class Island {
     const outline = notchShapePath(w, hh);
     this.islandEl.style.clipPath = `path('${outline}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
+    this.applyArches(w, hh > LIP_H + 1 ? 0 : r);
     // The glow is a blurred copy of the whole silhouette (island and both ears) sitting behind it, so the light
     // follows the ears' curve too instead of stopping where they begin.
     const gw = w + 2 * r + 2 * GLOW_PAD;
@@ -548,6 +565,22 @@ export class Island {
       this.pushedRect = rect;
       this.transport.setIslandRect?.(rect.x, rect.y, rect.w, rect.h);
     }
+  }
+
+  /** Keep the two outward-curving top ears aligned as the pill springs between sizes.
+   * `r` is 0 in expanded mode -- that view's own clip path already draws its top flare,
+   * so the ears hide rather than double it up. */
+  private applyArches(w: number, r: number) {
+    this.archLeft.style.display = r > 0 ? "" : "none";
+    this.archRight.style.display = r > 0 ? "" : "none";
+    if (r <= 0) return;
+    this.archLeft.setAttribute("width", `${r}`);
+    this.archLeft.setAttribute("height", `${r}`);
+    // Each ear overlaps the island by a pixel: edge to edge they left a hairline seam the glow showed through.
+    this.archLeft.style.transform = `translateX(${-(w / 2 + r) + 1}px)`;
+    this.archRight.setAttribute("width", `${r}`);
+    this.archRight.setAttribute("height", `${r}`);
+    this.archRight.style.transform = `translateX(${w / 2 - 1}px)`;
   }
 
   private islandRect(): { x: number; y: number; w: number; h: number } {
