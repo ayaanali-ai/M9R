@@ -47,6 +47,23 @@
         "visible": false
       },
       {
+        "label": "chatter",
+        "title": "M9R Agent Chatter",
+        "url": "chatter.html",
+        "width": 1,
+        "height": 1,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "visible": false
+      },
+      {
         "label": "app",
         "title": "M9R",
         "url": "app.html",
