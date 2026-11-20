@@ -1904,9 +1904,15 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // reconcile against. The post-dispatch read only needs to show the
       // agent what changed, not re-resolve anything -- trimmed here instead.
       const afterDispatch = timing?.afterDispatch === true;
-      const structure = await timed("accessibility-read", () => manager.windowStructure(pid, windowId.toString(),
-        afterDispatch ? { maxElements: 2048, maxDepth: 40 } : { maxElements: 4096, maxDepth: 64 }),
-        { detail: `scope=window;point=${afterDispatch ? "post-dispatch" : "pre-dispatch"}` });
+      // Diagnostic only: record the tree's completeness and size (never labels
+      // or text) so a later fallback to a window capture has a visible cause.
+      let readOutcome = "";
+      const structure = await timed("accessibility-read", async () => {
+        const result = await manager.windowStructure(pid, windowId.toString(),
+          afterDispatch ? { maxElements: 2048, maxDepth: 40 } : { maxElements: 4096, maxDepth: 64 });
+        readOutcome = `;result=${String(result.status).replace(/[^a-z-]/gi, "").slice(0, 24)};elements=${result.elements.length}${result.truncated ? ";truncated" : ""}`;
+        return result;
+      }, () => ({ detail: `scope=window;point=${afterDispatch ? "post-dispatch" : "pre-dispatch"}${readOutcome}` }));
       const indexByPath = new Map<string, bigint>();
       structure.elements.forEach((element, index) => indexByPath.set(JSON.stringify(element.path), BigInt(index)));
       const elements = structure.elements.map((element, index) => {
@@ -1940,16 +1946,17 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       return { structure, elements };
     };
 
-    const captureNativeFrame = async (): Promise<CuaStageWindowFrame> => {
+    const captureNativeFrame = async (reason?: string): Promise<CuaStageWindowFrame> => {
       const timing = timingContext.getStore();
       const image = await timed(timing?.afterDispatch ? "post-action-observation" : "window-capture",
-        () => manager.captureWindow(pid, windowId.toString()), { detail: "scope=registered-window" });
+        () => manager.captureWindow(pid, windowId.toString()),
+        { detail: `scope=registered-window${reason ? `;reason=${reason}` : ""}` });
       return { dataUrl: image.dataUrl, width: image.width, height: image.height,
         windowBounds: boundsAtWindowCapture(image), capturedAt: now().toISOString(), stageName: stage.name,
         identityKey: cursorDetails?.key ?? session };
     };
 
-    const captureNativeWindowWithStructure = async (): Promise<{
+    const captureNativeWindowWithStructure = async (reason?: string): Promise<{
       frame: CuaStageWindowFrame;
       observed?: Awaited<ReturnType<typeof readNativeElements>>;
     }> => {
@@ -1960,7 +1967,7 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // its selected node immediately before dispatch, so this overlap does not
       // relax the stale-target guard.
       const [imageFrame, observed] = await Promise.all([
-        captureNativeFrame(),
+        captureNativeFrame(reason),
         readNativeElements().catch(() => undefined),
       ]);
       const bounds = imageFrame.windowBounds!;
@@ -1991,8 +1998,12 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       let popupCaptureStatus: "complete" | "unavailable" = "complete";
       try {
         const timing = timingContext.getStore();
-        const popups = await timed("accessibility-read", () => manager.ownedPopups(pid, windowId.toString()),
-          { detail: `scope=owned-popups;point=${timing?.afterDispatch ? "post-dispatch" : "pre-dispatch"}` });
+        let popupCount: number | undefined;
+        const popups = await timed("accessibility-read", async () => {
+          const result = await manager.ownedPopups(pid, windowId.toString());
+          popupCount = result.length;
+          return result;
+        }, () => ({ detail: `scope=owned-popups;point=${timing?.afterDispatch ? "post-dispatch" : "pre-dispatch"}${popupCount === undefined ? "" : `;popups=${popupCount}`}` }));
         // The first list is the ownership snapshot for this observation. A
         // second full popup enumeration before every screenshot serialized N
         // helper round-trips without strengthening input safety (popup input
@@ -2027,9 +2038,19 @@ async function driverInputAction(name: string, args: Record<string, unknown>, fa
       // A complete parent window tree may omit an owned dialog opened by the click.
       const popups = usableBounds && preservePopupEvidence ? await captureOwnedPopups() : undefined;
       const structureOnly = usableBounds && (!popups || (popups.popupCaptureStatus === "complete" && popups.ownedPopups.length === 0));
+      // Diagnostic only (does not affect the decision below): name why this
+      // read is falling back to pixels so broker.log shows a cause.
+      const fallbackReason = !preferStructureOnly ? "capture-requested"
+        : !semantic ? "tree-read-failed"
+          : semantic.structure.status !== "complete" ? "tree-incomplete"
+            : semantic.structure.truncated ? "tree-truncated"
+              : semantic.elements.length === 0 ? "tree-empty"
+                : !usableBounds ? "window-rect-unavailable"
+                  : popups?.popupCaptureStatus !== "complete" ? "owned-popup-unreadable"
+                    : "owned-popup-present";
       const { frame, observed } = bounds && structureOnly
         ? { frame: { width: bounds.width, height: bounds.height, windowBounds: bounds, capturedAt: now().toISOString() }, observed: semantic }
-        : preferStructureOnly ? { frame: await captureNativeFrame(), observed: semantic } : await captureNativeWindowWithStructure();
+        : preferStructureOnly ? { frame: await captureNativeFrame(fallbackReason), observed: semantic } : await captureNativeWindowWithStructure(fallbackReason);
       const capturedAt = frame.capturedAt ?? now().toISOString();
       if (observed) {
         const { structure, elements } = observed;
