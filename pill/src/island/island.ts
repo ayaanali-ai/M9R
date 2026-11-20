@@ -79,6 +79,7 @@ export class Island {
   private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
   private homeCollapseAt: number | null = null;
   private lastSyncedView: IslandViewName | null = null;
+  private lastSyncedMode: IslandMode | null = null;
   private markKey = "";
   private screenGlowKey = "";
 
@@ -747,19 +748,21 @@ export class Island {
     }
 
     // The desktop composer belongs to the conversation view and needs keyboard focus when it opens.
-    if (this.lastSyncedView !== State.view) {
+    const viewChanged = this.lastSyncedView !== State.view;
+    const modeChanged = this.lastSyncedMode !== State.mode;
+    if (viewChanged || modeChanged) {
       const wasChat = this.lastSyncedView === "prompt";
       this.lastSyncedView = State.view;
-      if (State.view === "prompt" && State.mode === "expanded") {
+      this.lastSyncedMode = State.mode;
+      if (this.desktopShell && State.mode === "expanded") {
+        this.transport.focusWindow?.(State.view === "prompt");
+      }
+      if (State.view === "prompt" && State.mode === "expanded" && (viewChanged || modeChanged)) {
         this.transport.focusWindow?.(true);
         window.setTimeout(() => this.views.get("prompt")?.focus?.(), 420);
       } else if (wasChat && !this.desktopShell) {
         this.transport.focusWindow?.(false);
       }
-    }
-    if (this.desktopShell) {
-      if (State.view !== "prompt" && State.mode === "expanded") this.transport.focusWindow?.(false);
-      if (State.view === "prompt" && State.mode === "expanded") this.transport.focusWindow?.(true);
     }
 
     // The notch's own edge: one colour at a time, the most immediate thing wins.
