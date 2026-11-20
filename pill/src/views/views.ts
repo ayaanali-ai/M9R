@@ -143,7 +143,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
       const faceKey = State.tasks.map((task) => task.provider).filter((provider, index, all) => all.indexOf(provider) === index).slice(0, 3).join("|");
       if (faces.dataset.key !== faceKey) {
         faces.dataset.key = faceKey;
-        faces.replaceChildren(...faceKey.split("|").filter(Boolean).map((provider) => providerLogo(provider as AgentTask["provider"], 22)));
+        faces.replaceChildren(...faceKey.split("|").filter(Boolean).map((provider) => providerLogo(provider as AgentTask["provider"], 14)));
       }
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
