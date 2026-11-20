@@ -511,13 +511,21 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
               // exclusive directory creation. Publish the owner record only
               // after that directory is acquired; competing writers observe
               // the directory and wait rather than stealing it.
+              let ownsLockDirectory = false;
               try {
                 mkdirSync(lockPath);
+                ownsLockDirectory = true;
                 writeFileSync(join(lockPath, ownerName), JSON.stringify({ pid: process.pid, nonce }), { flag: "wx" });
                 return ownerName;
               } catch (fallbackError) {
-                try { rmSync(join(lockPath, ownerName), { force: true }); } catch { /* preserve a competing owner */ }
-                try { rmdirSync(lockPath); } catch { /* a competing owner may have published */ }
+                // Never clean up a directory we failed to create. It can be a
+                // competing writer's lock in the short interval before its
+                // owner file is published; removing it here creates split-brain
+                // writers and divergent state snapshots.
+                if (ownsLockDirectory) {
+                  try { rmSync(join(lockPath, ownerName), { force: true }); } catch { /* preserve any owner record */ }
+                  try { rmdirSync(lockPath); } catch { /* preserve a lock that is no longer empty */ }
+                }
                 if ((fallbackError as NodeJS.ErrnoException).code === "EEXIST") {
                   continue;
                 }
