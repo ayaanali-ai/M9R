@@ -1260,7 +1260,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .chat-row.user .bubble {
   background: var(--blue);
-  color: #12182a;
+  color: #ffffff;
 }
 
 .sent-message {
@@ -1282,6 +1282,34 @@ input[type="range"]::-webkit-slider-thumb {
   white-space: pre-wrap;
   padding-right: 8px;
   user-select: text;
+}
+
+.narration-row {
+  padding: 2px 0 2px 4px;
+}
+.narration-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 400 11.5px var(--font);
+  font-style: italic;
+  color: var(--dim);
+}
+.narration-text::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warm-accent, var(--green-2));
+  animation: narration-pulse 1.4s ease-in-out infinite;
+  flex: 0 0 auto;
+}
+@keyframes narration-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .narration-text::before { animation: none; }
 }
 
 .typing {

@@ -85,9 +85,11 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
       bubbleEl.append(h("span", { class: "bubble-files" }, ...files.map((f) => h("span", { class: "file-chip sent", title: f },
         svg(ICONS.doc, 11), h("span", { text: f.split(/[\\/]/).pop() ?? f })))));
     }
-    const delivery = message.delivery === "sending" ? "Sending…" : message.delivery === "accepted" ? "Accepted"
-      : message.delivery === "unconfirmed" ? "Send unconfirmed" : "";
-    const status = delivery ? h("span", { class: "message-delivery", role: "status", text: delivery }) : null;
+    // Only the failure case is worth surfacing here; a normal send needs no receipt bubble,
+    // and the agent's reply (or an explicit failure report) is the real confirmation.
+    const status = message.delivery === "unconfirmed"
+      ? h("span", { class: "message-delivery", role: "status", text: "Send unconfirmed" })
+      : null;
     return h("div", { class: "chat-row user" }, who, h("div", { class: "sent-message" }, bubbleEl, status));
   }
   // Replies arrive as "codex: text"; the handle becomes the provider's logo, never raw text in the bubble.
@@ -408,13 +410,23 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   return {
     el,
     sync() {
-      const fingerprint = JSON.stringify(State.chatHistory.map((message) =>
-        [message.id, message.content, message.from, message.to, message.delivery, message.link, message.dismissTaskId]));
+      // The most recent templated step of any actively-working agent, shown as a quiet system-style line
+      // at the bottom of the conversation. This fills the silent gap while a provider is thinking between
+      // tool calls (see T601: ~80s of an 84.6s task was provider wait with nothing shown). Zero tokens:
+      // it only ever reuses the same templated activity strings the broker already maintains per agent.
+      const working = State.tasks.find((t) => t.runState === "working" && t.steps.length);
+      const narrationText = working ? working.steps.at(-1)! : "";
+      const fingerprint = JSON.stringify([
+        State.chatHistory.map((message) =>
+          [message.id, message.content, message.from, message.to, message.delivery, message.link, message.dismissTaskId]),
+        narrationText,
+      ]);
       if (fingerprint !== renderedFingerprint) {
         const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
         renderedFingerprint = fingerprint;
         clear(log);
         for (const m of State.chatHistory) log.append(bubble(m, actions, onHeightChange));
+        if (narrationText) log.append(h("div", { class: "chat-row narration-row" }, h("span", { class: "narration-text", role: "status", text: narrationText })));
         if (nearBottom) log.scrollTop = log.scrollHeight;
       }
       syncAgents();
