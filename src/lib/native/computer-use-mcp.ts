@@ -174,6 +174,7 @@ interface DesktopControl {
   selected?: boolean;
   actions?: string[];
   canReplaceValue?: boolean;
+  focused?: boolean;
   rect?: { x: number; y: number; width: number; height: number };
 }
 
@@ -951,6 +952,7 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
         ...(actions.length ? { actions } : {}),
         ...(element.canReplaceValue === true ? { canReplaceValue: true } : {}),
+        ...(element.focused === true ? { focused: true } : {}),
         ...(validRect(element.rect) ? { rect: element.rect } : {}),
       });
     }
@@ -984,14 +986,45 @@ export function registerComputerUseTools(server: McpServer, deps: ComputerUseMcp
         });
       }
     }
-    const map = new Map(controls.map((control) => [control.ref, control]));
     const logicalKey = input.logicalKey ?? `desktop:${input.taskId}:${input.mode}:${input.view}`;
+    // A pure visual ("capture") observation carries no accessibility tree at all
+    // (capture() is image-only by design -- see cua-stage-driver.ts), so `controls`
+    // built above has no canReplaceValue/focused for anything. Rather than silently
+    // reporting those capabilities as absent, carry them forward from the same
+    // target's last structured observation, matched by stageRef (the stable native
+    // element identity, not the per-call random `ref`), so a capture-only follow-up
+    // doesn't make a control the structured tree already proved editable/focused
+    // look read-only or unfocused.
+    if (!rawElements.length) {
+      const priorTargetId = logicalTargets.get(`${identityKey(input.identity)}\0${logicalKey}`);
+      const priorContext = priorTargetId ? records.get(priorTargetId)?.context : undefined;
+      const priorControls = priorContext && priorContext.kind === "desktop" ? priorContext.controls : undefined;
+      if (priorControls) {
+        const priorByStageRef = new Map([...priorControls.values()]
+          .filter((control) => control.stageRef)
+          .map((control) => [control.stageRef!, control]));
+        for (const control of controls) {
+          if (!control.stageRef) continue;
+          const prior = priorByStageRef.get(control.stageRef);
+          if (!prior) continue;
+          if (control.canReplaceValue === undefined && prior.canReplaceValue) control.canReplaceValue = true;
+          if (control.focused === undefined && prior.focused) control.focused = true;
+        }
+      }
+    }
+    const map = new Map(controls.map((control) => [control.ref, control]));
     // A dispatched semantic click is not focus proof. Use the same fresh native
-    // tree already read for its result, restricted to a focused text control.
+    // tree already read for its result, restricted to a focused text control --
+    // or, when this observation is capture-only, the carried-forward focus state
+    // merged onto `controls` above from the last structured read of this target.
+    const isConfirmableInput = (role: unknown, canReplaceValue: unknown) =>
+      /^(?:edit|textfield|textarea)$/i.test(String(role ?? ""))
+        || (canReplaceValue === true && /^(?:document|combo\s?box)$/i.test(String(role ?? "")));
     const inputSelectionConfirmed = input.inputSelectionConfirmed === true
       || (input.view === "app" && input.confirmInputSelectionFromFocus === true && rawElements.some(element => element.focused === true
-        && element.enabled !== false && (/^(?:edit|textfield|textarea)$/i.test(String(element.role ?? ""))
-          || (element.canReplaceValue === true && /^(?:document|combo\s?box)$/i.test(String(element.role ?? ""))))));
+        && element.enabled !== false && isConfirmableInput(element.role, element.canReplaceValue)))
+      || (input.view === "app" && input.confirmInputSelectionFromFocus === true && !rawElements.length && controls.some(control => control.focused === true
+        && control.enabled !== false && isConfirmableInput(control.role, control.canReplaceValue)));
     const kind = input.view === "app" ? "desktop-window" : "desktop";
     const contextRepresentation = input.representation;
     const rectByStageRef = new Map(controls.filter((control) => control.stageRef && control.rect).map((control) => [control.stageRef!, control.rect!]));
