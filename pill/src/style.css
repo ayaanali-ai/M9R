@@ -89,6 +89,13 @@ body {
   border-radius: 0 0 14px 14px;
   overflow: visible;
   will-change: width, height, transform;
+  /* The compact pill sits directly against the desktop wallpaper on three sides (through
+     the "ear" cutouts either side), while the expanded card mostly borders itself -- same
+     flat #000 fill, but simultaneous contrast against a bright backdrop makes the compact
+     bar read as a lighter/warmer black than the card beneath it. A soft shared shadow on
+     both states gives the pill a consistent edge treatment instead of an abrupt cutout, so
+     it reads as one floating shape instead of two different blacks. */
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.4);
 }
 
 #island-clip {
