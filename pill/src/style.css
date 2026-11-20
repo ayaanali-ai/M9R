@@ -194,16 +194,7 @@ body {
   display: flex;
   align-items: center;
   margin: 0 -10px;
-  transition: opacity 0.2s ease-in-out, background 0.15s ease-out;
-}
-
-/* Clicking anywhere in #header (off a button) collapses the pill -- see island.ts's
-   click handler. Expanded-only, so this never paints the compact notch. */
-#island.expanded #header {
-  cursor: pointer;
-}
-#island.expanded #header:hover {
-  background: rgba(255, 255, 255, 0.07);
+  transition: opacity 0.2s ease-in-out;
 }
 
 .tabs {
