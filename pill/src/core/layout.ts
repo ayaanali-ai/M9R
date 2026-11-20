@@ -42,8 +42,6 @@ export interface ViewLayout {
 // drawn inside it, glued to the top edge and horizontally centred.
 export const PANEL_W = 720;
 export const PANEL_H = 320;
-export const DESKTOP_PANEL_W = 1100;
-export const DESKTOP_PANEL_H = 700;
 
 // No notch on a PC: these are the hidden and compact sizes.
 export const NOTCH_W = 184;
@@ -95,7 +93,7 @@ export function islandSize(
     case "compact":
       return { w: COMPACT_W, h: NOTCH_H };
     case "expanded": {
-      const h = view === "prompt" ? Math.min(DESKTOP_PANEL_H - 90, 415 + Math.max(0, chatCount - 1) * 34 + Math.max(0, Math.min(200, draftHeight) - 20)) : VIEW_LAYOUTS[view].height;
+      const h = view === "prompt" ? chatPromptHeight(chatCount, draftHeight) : VIEW_LAYOUTS[view].height;
       return { w: EXPANDED_W, h };
     }
   }

@@ -91,38 +91,6 @@ body {
   will-change: width, height, transform;
 }
 
-/* Desktop messaging stays inside the existing pill shell and navigation. */
-body.desktop-pill #island { background: #09090a; }
-body.desktop-pill #content { padding: 0; }
-body.desktop-pill #views { min-width: 0; }
-body.desktop-pill #header { height: 54px; flex-basis: 54px; margin: 0; }
-body.desktop-pill .tabs { padding-left: 28px; }
-body.desktop-pill .tab { width: 34px; height: 28px; }
-body.desktop-pill .view.prompt-view { width: 100%; min-height: 0; flex: 1; }
-body.desktop-pill .prompt-view .chat-body {
-  height: 100%; min-height: 0; gap: 12px; padding: 8px 28px 22px;
-}
-body.desktop-pill .desktop-conversation {
-  min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column;
-}
-body.desktop-pill .prompt-view .chat-log { padding: 4px 6px 12px; gap: 10px; }
-body.desktop-pill .prompt-view .chat-log:empty { display: flex; }
-body.desktop-pill .prompt-view .chat-bar {
-  margin: auto 0 0; padding: 8px 9px 8px 13px; border-radius: 23px;
-  background: #09090a; box-shadow: inset 0 0 0 1px #414147;
-}
-body.desktop-pill .prompt-view .chat-bar:focus-within { box-shadow: inset 0 0 0 1px #62626b; }
-body.desktop-pill .composer-line { gap: 10px; }
-body.desktop-pill .prompt-view .chat-input { font-size: 15px; line-height: 22px; }
-body.desktop-pill .composer-rule { display: none; }
-body.desktop-pill .composer-draft { margin-bottom: 4px; }
-body.desktop-pill .prompt-view .send-btn {
-  flex-basis: 34px; width: 34px; height: 34px; color: #fff; background: #3478dc;
-}
-body.desktop-pill .prompt-view .send-btn:disabled { background: #3a3a40; }
-body.desktop-pill .chat-row.user { padding-left: 36px; }
-body.desktop-pill .bubble { padding: 10px 14px; border-radius: 19px; font-size: 15px; }
-
 #island-clip {
   position: absolute;
   inset: 0;

@@ -247,16 +247,7 @@ fn pill_set_rect(window: WebviewWindow, x: f64, y: f64, width: f64, height: f64)
     let window_height = size.height as f64 / scale;
     let rect = IslandRect::checked(x, y, width, height, window_width, window_height)
         .ok_or_else(|| format!("pill hit area ({x}, {y}, {width}, {height}) is outside the {window_width} × {window_height} logical window at scale {scale}"))?;
-    NEXT.lock().unwrap().rect = if rect.w > NOTCH_LIP_W + 2.0 && rect.h > NOTCH_LIP_H + 2.0 {
-        rect
-    } else {
-        IslandRect {
-            x: (window_width - NOTCH_LIP_W.min(window_width * 0.95)) / 2.0,
-            y: 0.0,
-            w: NOTCH_LIP_W.min(window_width * 0.95),
-            h: NOTCH_LIP_H,
-        }
-    };
+    NEXT.lock().unwrap().rect = rect;
     Ok(())
 }
 
@@ -1489,20 +1480,6 @@ mod one_pill_window_tests {
             assert!(!lip.hit(0.0, 0.0, 16.0));
             assert!(IslandRect::checked(lip.x, lip.y, lip.w, lip.h, width, NEXT_H).is_some());
         }
-    }
-
-    #[test]
-    fn click_through_hit_area_covers_the_resized_panel_surface() {
-        let panel = IslandRect::checked(0.0, 0.0, NEXT_W, NEXT_H, NEXT_W, NEXT_H).unwrap();
-        assert!(panel.hit(0.0, NEXT_W / 2.0, NEXT_H / 2.0));
-        assert!(panel.hit(0.0, 8.0, 8.0));
-        assert!(panel.hit(0.0, NEXT_W - 8.0, NEXT_H - 8.0));
-    }
-
-    #[test]
-    fn window_resize_retries_cursor_events_in_the_visible_center() {
-        let panel = IslandRect::checked(0.0, 0.0, NEXT_W, NEXT_H, NEXT_W, NEXT_H).unwrap();
-        assert!(panel.hit(0.0, 550.0, 16.0));
     }
 
     #[test]

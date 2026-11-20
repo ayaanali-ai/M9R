@@ -2,7 +2,7 @@
 
 import { Tracked, Spring, clamp } from "../core/anim";
 import {
-  DESKTOP_PANEL_H, DESKTOP_PANEL_W, EXPANDED_CORNER, NOTCH_W, PANEL_H, PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
+  EXPANDED_CORNER, NOTCH_W, PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
   MEDIA_TONE, botGlowColor, botGlowOpacity, botPosition, islandSize,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
@@ -68,7 +68,6 @@ export class Island {
   private markSize = new Spring(10);
 
   private running = false;
-  private readonly desktopShell = !!(globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   private lastFrame = 0;
   private dirty = true;
 
@@ -86,25 +85,6 @@ export class Island {
     this.root = root;
     this.transport = transport;
     this.build();
-    if (this.desktopShell) {
-      this.width.jump(DESKTOP_PANEL_W);
-      this.height.jump(PANEL_H);
-      this.width.springTo(DESKTOP_PANEL_W);
-      this.height.springTo(PANEL_H);
-      this.root.addEventListener("click", (event) => {
-        if (event.target instanceof Element && event.target.closest("button, input, textarea, select, a")) return;
-        this.expand("prompt");
-      });
-      this.root.addEventListener("mousedown", (event) => {
-        if (State.mode === "expanded" || !(event.target instanceof Element) || event.target.closest("button, input, textarea, select, a")) return;
-        this.expand("prompt");
-      });
-      window.addEventListener("resize", () => {
-        this.width.springTo(Math.min(DESKTOP_PANEL_W, window.innerWidth));
-        this.height.springTo(Math.min(DESKTOP_PANEL_H, window.innerHeight));
-        this.ensureRunning();
-      });
-    }
     this.wireFsm();
     this.wireInput();
     this.wireDrops();
@@ -409,14 +389,7 @@ export class Island {
 
   private targetSize(): { w: number; h: number; r: number } {
     const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, this.views.get("prompt")?.draftHeight);
-    const desktopHeight = Math.min(DESKTOP_PANEL_H, window.innerHeight);
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
-    if (this.desktopShell && State.mode !== "expanded" && w !== DESKTOP_PANEL_W) {
-      return { w: Math.min(DESKTOP_PANEL_W, window.innerWidth), h: Math.min(PANEL_H, window.innerHeight), r };
-    }
-    if (this.desktopShell && State.mode === "expanded") {
-      return { w: Math.min(DESKTOP_PANEL_W, window.innerWidth), h: Math.min(desktopHeight, h), r };
-    }
     return { w, h, r };
   }
 
@@ -460,8 +433,7 @@ export class Island {
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
 
-    const panelWidth = this.desktopShell ? window.innerWidth : PANEL_W;
-    const rect = { x: (panelWidth - w) / 2, y: 0, w, h: hh };
+    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
     const p = this.pushedRect;
     if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
@@ -746,20 +718,16 @@ export class Island {
       if (on) view.sync();
     }
 
-    // The desktop composer belongs to the conversation view and needs keyboard focus when it opens.
+    // The message view is the only one with a text field, so it is the only time the island may take keyboard focus.
     if (this.lastSyncedView !== State.view) {
       const wasChat = this.lastSyncedView === "prompt";
       this.lastSyncedView = State.view;
-      if (State.view === "prompt" && State.mode === "expanded") {
+      if (State.view === "prompt") {
         this.transport.focusWindow?.(true);
-        window.setTimeout(() => this.views.get("prompt")?.focus?.(), 420);
-      } else if (wasChat && !this.desktopShell) {
+        window.setTimeout(() => this.views.get("prompt")?.focus?.(), 120);
+      } else if (wasChat) {
         this.transport.focusWindow?.(false);
       }
-    }
-    if (this.desktopShell) {
-      if (State.view !== "prompt" && State.mode === "expanded") this.transport.focusWindow?.(false);
-      if (State.view === "prompt" && State.mode === "expanded") this.transport.focusWindow?.(true);
     }
 
     // The notch's own edge: one colour at a time, the most immediate thing wins.
