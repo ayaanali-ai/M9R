@@ -1464,7 +1464,7 @@ input[type="range"]::-webkit-slider-thumb {
 
 .composer-rule { flex: 0 0 1px; align-self: center; width: 1px; height: 16px; background: rgba(255, 255, 255, 0.1); }
 
-.composer-draft { position: relative; flex: 1 1 auto; min-width: 0; height: 20px; margin-bottom: 5px; transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.composer-draft { position: relative; flex: 1 1 auto; min-width: 0; height: 20px; margin-bottom: 0; transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
 .prompt-view .chat-input {
   display: block;
   width: 100%;
