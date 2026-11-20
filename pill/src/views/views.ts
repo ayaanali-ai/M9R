@@ -100,8 +100,9 @@ export function buildHeader(actions: ViewActions): ViewHost {
     catch { workMode.title = "Work mode could not be changed. Try again when M9R is connected."; }
     finally { changingMode = false; workMode.disabled = false; }
   } });
-  const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
+  const desktopShell = !!(globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  const tabHome = h("button", { class: "tab", title: "Agents", "aria-label": "Home", onclick: () => go("overview") }, svg(ICONS.house, 13));
+  const tabChat = desktopShell ? null : h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
@@ -111,10 +112,12 @@ export function buildHeader(actions: ViewActions): ViewHost {
     actions.setView(v);
   }
 
+  const tabs = h("div", { class: "tabs" }, tabHome);
+  if (tabChat) tabs.append(tabChat);
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat),
+    tabs,
     h("div", { class: "header-actions" }, brokerStatus, workMode, gearBtn, soundBtn),
   );
 
@@ -129,8 +132,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
       workMode.setAttribute("aria-pressed", String(State.ownerWorkMode === "agents-free"));
       workMode.title = State.ownerWorkMode === "working" ? "Background work continues. Foreground turns need your approval." : "Agents may use foreground input. Click to protect your current work.";
       const v = State.view;
-      tabHome.classList.toggle("on", v === "overview" || v === "empty");
-      tabChat.classList.toggle("on", v === "prompt");
+      tabHome.classList.toggle("on", v === "overview" || v === "empty" || (desktopShell && v === "prompt"));
+      tabChat?.classList.toggle("on", v === "prompt");
       gearBtn.classList.toggle("on", v === "settings");
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";

@@ -281,7 +281,10 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   const line = h("div", { class: "composer-line" }, agents, h("span", { class: "composer-rule", "aria-hidden": "true" }), draft, mic, send);
   const bar = h("div", { class: "chat-bar" }, live, tray, line);
 
-  const el = h("div", { class: "view prompt-view" }, h("div", { class: "chat-body" }, log, asks, bar));
+  const desktopShell = !!(globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  const desktopConversation = h("div", { class: "desktop-conversation" }, log, asks, bar);
+  if (desktopShell) desktopConversation.setAttribute("data-desktop-conversation", "");
+  const el = h("div", { class: "view prompt-view" }, h("div", { class: "chat-body" }, desktopConversation));
 
   let sending = false;
   let renderedFingerprint = "";
@@ -420,7 +423,9 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
       if (mic) mic.disabled = sending;
       send.disabled = sending || !input.value.trim() || !!dictation?.listening;
     },
-    activate() { requestAnimationFrame(resizeDraft); },
+    activate() {
+      requestAnimationFrame(resizeDraft);
+    },
     deactivate() { dictation?.stop(); },
     // The tray and the one-tap starts sit above the line, so they count toward how tall the island needs to be.
     get draftHeight() { return (dictation?.listening ? 64 : draftHeight) + (tray.hidden ? 0 : 34) + (asks.hidden ? 0 : 34); },
