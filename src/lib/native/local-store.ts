@@ -11,7 +11,7 @@ import { renderWorkingContext, workingContextKey, workingContextRetentionIds, wo
 import { taskCompletionReport, type TaskCompletionReport } from "./task-completion-contract";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, posix, win32 } from "node:path";
+import { basename, join, posix, win32 } from "node:path";
 import { isProtectedAction, lapsedPending, ruleCovers, type StandingRule } from "./approval-core";
 import { ALL_STAGE_TIMING_PHASES, MAX_AGENT_REPLY_DEPTH, MAX_RESULT_SUMMARY_CHARS, TRUNCATION_MARKER, addStageTimingToSummary, findByIdempotencyKey, inboxMaxAgeMs, isFreshInboxTask, newTask, normalizeHandle, pruneTasks, redactSecrets, summarizeStageTimingEvents, transitionTaskReceipt, type Approval, type NewTaskInput, type StageTimingEvent, type Task, type TaskDelivery, type TaskLifecycle, type TaskReceiptSource, type TaskReceiptState } from "./inbox-core";
 import { canQueue, normCwd } from "./codex-delivery-core";
@@ -583,12 +583,12 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     return parsedState;
   }
 
-  function parseAndReconcileState(): StoreState {
+  function parseAndReconcileState(path = statePath): StoreState {
     let parsed: Record<string, unknown>;
-    try { parsed = JSON.parse(readFileSync(statePath, "utf8")); }
-    catch { throw new Error(`M9R local state at ${statePath} is invalid. The original file was preserved; restore a verified backup before retrying.`); }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`M9R local state at ${statePath} is invalid; the original file was preserved.`);
-    if (parsed.version !== 1) throw new Error(`M9R local state at ${statePath} has an unsupported version (${String(parsed.version)}). Use a compatible runtime; the original file was preserved.`);
+    try { parsed = JSON.parse(readFileSync(path, "utf8")); }
+    catch { throw new Error(`M9R local state at ${path} is invalid. The original file was preserved; restore a verified backup before retrying.`); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`M9R local state at ${path} is invalid; the original file was preserved.`);
+    if (parsed.version !== 1) throw new Error(`M9R local state at ${path} has an unsupported version (${String(parsed.version)}). Use a compatible runtime; the original file was preserved.`);
     const defaults = emptyState();
     for (const [key, value] of Object.entries(defaults)) {
       const stored = parsed[key];
@@ -596,7 +596,7 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
       const valid = Array.isArray(value) ? Array.isArray(stored)
         : typeof value === "number" ? Number.isSafeInteger(stored) && Number(stored) >= 1
         : stored !== null && typeof stored === "object" && !Array.isArray(stored);
-      if (!valid) throw new Error(`M9R local state at ${statePath} is invalid (${key}); the original file was preserved.`);
+      if (!valid) throw new Error(`M9R local state at ${path} is invalid (${key}); the original file was preserved.`);
     }
     const state = normalizeStoredScopes(root, { ...defaults, ...parsed } as StoreState);
     // A provider turn can be paused or canceled while a native request is still
@@ -622,18 +622,144 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     if (s.events.length > MAX_LOCAL_EVENT_HISTORY) s.events = s.events.slice(-MAX_LOCAL_EVENT_HISTORY);
   };
 
-  /** Retry transient Windows sharing errors, but never replace atomic publication with an in-place copy. */
+  /** Retry transient Windows sharing errors, but never replace atomic commit with an in-place copy. */
   function renameWithRetry(from: string, to: string): void {
     const deadline = Date.now() + LOCK_WAIT_MS;
+    let lastError: unknown;
     for (let attempt = 0; ; attempt += 1) {
       try { renameSync(from, to); return; } catch (error) {
+        lastError = error;
         const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") throw error;
+        if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") {
+          throw localStateCommitError(from, to, error);
+        }
         if (Date.now() >= deadline) break;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(250, 25 * (attempt + 1)));
       }
     }
-    throw new Error(`M9R could not atomically publish local state at ${to}; the previous state and pending snapshot at ${from} were preserved.`);
+    throw localStateCommitError(from, to, lastError);
+  }
+
+  function localStateCommitError(from: string, to: string, cause: unknown): Error {
+    const error = cause as NodeJS.ErrnoException | undefined;
+    const win32Code = (error as (NodeJS.ErrnoException & { win32Code?: unknown }) | undefined)?.win32Code;
+    const detail = [error?.code, error?.syscall, typeof win32Code === "number" ? `win32=${win32Code}` : undefined,
+      error?.message].filter(Boolean).join("; ");
+    return new Error(`M9R could not atomically commit local state to ${to}${detail ? ` (${detail})` : ""}; the previous state and pending snapshot at ${from} were preserved.`, { cause });
+  }
+
+  function snapshotRecordKey(value: unknown): string {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    const item = value as Record<string, unknown>;
+    if (typeof item.at === "string" && typeof item.kind === "string") {
+      return `event:${item.at}:${item.kind}:${String(item.taskId ?? "")}:${String(item.handle ?? "")}:${String(item.text ?? "")}`;
+    }
+    if (typeof item.id === "string") return `id:${item.id}`;
+    if (typeof item.key === "string") return `key:${item.key}`;
+    if (typeof item.bindingId === "string") return `binding:${item.bindingId}`;
+    if (typeof item.operationId === "string") return `operation:${item.operationId}`;
+    if (typeof item.sessionId === "string") return `session:${String(item.handle ?? "")}:${String(item.provider ?? "")}:${item.sessionId}:${String(item.cwd ?? "")}`;
+    return JSON.stringify(value);
+  }
+
+  function sameSnapshotValue(a: unknown, b: unknown): boolean {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  /**
+   * Merge a failed atomic-write snapshot against the last committed snapshot.
+   * Missing array entries are treated as unchanged, not deletions: failed
+   * writers may have started from the same base and a later one must not erase
+   * a task or receipt present only in an earlier pending snapshot.
+   */
+  function mergeSnapshotValue(base: unknown, merged: unknown, incoming: unknown, path: string): unknown {
+    if (sameSnapshotValue(base, incoming)) return merged;
+    if (Array.isArray(incoming)) {
+      const baseArray = Array.isArray(base) ? base : [];
+      const result = Array.isArray(merged) ? [...merged] : [];
+      const baseByKey = new Map(baseArray.map((item) => [snapshotRecordKey(item), item]));
+      const resultByKey = new Map(result.map((item, index) => [snapshotRecordKey(item), index]));
+      for (const item of incoming) {
+        const key = snapshotRecordKey(item);
+        const baseItem = baseByKey.get(key);
+        const index = resultByKey.get(key);
+        if (index === undefined) {
+          resultByKey.set(key, result.length);
+          result.push(item);
+        } else {
+          result[index] = mergeSnapshotValue(baseItem, result[index], item, `${path}[]`);
+        }
+      }
+      if (path === "events") {
+        return result.sort((a, b) => String((a as { at?: unknown }).at ?? "").localeCompare(String((b as { at?: unknown }).at ?? "")))
+          .slice(-MAX_LOCAL_EVENT_HISTORY);
+      }
+      if (path === "tasks") return result.sort((a, b) => Number((a as { seq?: unknown }).seq ?? 0) - Number((b as { seq?: unknown }).seq ?? 0));
+      return result;
+    }
+    if (incoming !== null && typeof incoming === "object" && !Array.isArray(incoming)) {
+      const baseObject = base !== null && typeof base === "object" && !Array.isArray(base) ? base as Record<string, unknown> : {};
+      const result = merged !== null && typeof merged === "object" && !Array.isArray(merged)
+        ? { ...(merged as Record<string, unknown>) } : {};
+      for (const [key, value] of Object.entries(incoming as Record<string, unknown>)) {
+        if (!path) {
+          // Merge the work ledger and monotonic positions across sibling
+          // snapshots. For every other field, the newest complete snapshot is
+          // authoritative; in particular, do not resurrect revoked identities,
+          // removed rules, or retired connection grants from an older branch.
+          result[key] = ["tasks", "events", "nextTaskNo", "nextRuleNo", "nextLinkNo", "nextSeq", "cursors"].includes(key)
+            ? mergeSnapshotValue(baseObject[key], result[key], value, key)
+            : value;
+        } else {
+          result[key] = mergeSnapshotValue(baseObject[key], result[key], value, `${path}.${key}`);
+        }
+      }
+      return result;
+    }
+    if (typeof incoming === "number" && typeof merged === "number"
+      && (/^next(?:TaskNo|RuleNo|LinkNo)$/.test(path) || path.startsWith("nextSeq.") || path.startsWith("cursors."))) {
+      return Math.max(merged, incoming);
+    }
+    // Pending snapshots are applied oldest to newest. For a conflicting scalar,
+    // the later serialized state is the last known update to that field.
+    return incoming;
+  }
+
+  function recoverPendingSnapshots(): void {
+    const prefix = `${basename(statePath)}.tmp-`;
+    const pendingPaths = readdirSync(root).filter((name) => name.startsWith(prefix)).map((name) => join(root, name))
+      .sort((a, b) => statSync(a).mtimeMs - statSync(b).mtimeMs || a.localeCompare(b));
+    if (pendingPaths.length === 0) return;
+
+    const base = existsSync(statePath) ? parseAndReconcileState(statePath) : emptyState();
+    let merged: StoreState = base;
+    const recoveredPaths: string[] = [];
+    for (const path of pendingPaths) {
+      const bytes = Number(statSync(path, { bigint: true }).size);
+      if (bytes > maxStateBytes) throw new LocalStateCapacityError(bytes, maxStateBytes);
+      // A process can be interrupted while writing its unique temp file. Such
+      // a truncated JSON file contains no recoverable snapshot; preserve it for
+      // diagnosis but do not let it permanently prevent future valid writes.
+      try { JSON.parse(readFileSync(path, "utf8")); }
+      catch (error) {
+        if (error instanceof SyntaxError) continue;
+        throw error;
+      }
+      const pending = parseAndReconcileState(path);
+      merged = mergeSnapshotValue(base, merged, pending, "") as StoreState;
+      recoveredPaths.push(path);
+    }
+    const serialized = JSON.stringify(merged);
+    const serializedBytes = Buffer.byteLength(serialized, "utf8");
+    if (serializedBytes > maxStateBytes) throw new LocalStateCapacityError(serializedBytes, maxStateBytes);
+    const recoveryPath = `${statePath}.tmp-${process.pid}-${randomUUID()}`;
+    writeFileSync(recoveryPath, serialized, "utf8");
+    renameWithRetry(recoveryPath, statePath);
+    cachedState = undefined;
+    cachedStateFingerprint = undefined;
+    for (const path of recoveredPaths) {
+      try { rmSync(path, { force: true }); } catch { /* successful commit is authoritative; keep an unremovable recovery input */ }
+    }
   }
 
   /** Runs `fn` on the state under the lock and writes the result atomically. */
@@ -642,13 +768,14 @@ export function createLocalStore(root: string, deps: LocalStoreDeps = {}) {
     try {
       // readState() returns the shared cache entry; clone before mutating
       // so concurrent read-only callers never see a partially-written state.
+      recoverPendingSnapshots();
       const state = structuredClone(readState());
       const out = fn(state);
       if (shouldPersist && !shouldPersist(out)) return out;
       const serialized = JSON.stringify(state);
       const serializedBytes = Buffer.byteLength(serialized, "utf8");
       if (serializedBytes > maxStateBytes) throw new LocalStateCapacityError(serializedBytes, maxStateBytes);
-      const tmp = `${statePath}.tmp-${process.pid}`;
+      const tmp = `${statePath}.tmp-${process.pid}-${randomUUID()}`;
       writeFileSync(tmp, serialized, "utf8");
       renameWithRetry(tmp, statePath);
       // Never reuse a pre-write snapshot, even if filesystem timestamps collide.
