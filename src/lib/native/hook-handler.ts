@@ -10,10 +10,11 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { inboxMaxAgeMs, redactSecrets, renderAutoDeliveryPendingAck, renderHeldAck, renderInboxAck, renderInboxInjection, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
+import { inboxMaxAgeMs, redactSecrets, renderAutoDeliveryPendingAck, renderHeldAck, renderInboxAck, renderInboxInjection, renderMemoryInjection, renderResultsInjection, renderSentAck, renderSessionCard, MAX_GOAL_CHARS } from "./inbox-core";
 import { buildQueueMessage, canQueue, isM9rPushedPrompt, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
 import { findEndpointMentions } from "./mention-core";
 import { findMemoryHints, renderMemoryHint } from "./memory-hint-core";
+import { createMemoryLog, type MemoryEntry } from "./memory-log";
 import { handleForProvider, type LocalStore } from "./local-store";
 import { deliveredTaskContext } from "./task-execution-context";
 
@@ -68,6 +69,17 @@ export interface HookContext {
   onTaskCreated?: (taskId: string, to: string) => void;
   /** Exact stdin bytes decoded as UTF-8 by m9r-hook, only forwarded to an explicit diagnostic capture. */
   rawPayload?: string;
+  /** The bounded global+persona memory slice for this agent, injected at SessionStart. Injected for tests; defaults to a real read from the store root. */
+  memorySlice?: (self: string) => readonly MemoryEntry[];
+}
+
+/** Top MEMORY_SLICE_ITEMS of global ∪ persona:<self>, merged newest-first -- the free, no-search-needed default path. */
+const MEMORY_SLICE_ITEMS = 12;
+function defaultMemorySlice(root: string, self: string): readonly MemoryEntry[] {
+  const log = createMemoryLog(root);
+  const merged = [...log.list("global"), ...log.list(`persona:${self}`)];
+  merged.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  return merged.slice(0, MEMORY_SLICE_ITEMS);
 }
 
 type AdditionalContext = { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
@@ -310,7 +322,8 @@ export function handleHookEvent(input: HookInput, ctx: HookContext): AdditionalC
       // A compaction/resume hook restores existing state without redelivering work.
       const recovery = recoveryTasks.length === 1 ? ctx.store.renderWorkingContextForTask(recoveryTasks[0].id)
         : recoveryTasks.length > 1 ? "M9R has several open tasks. Recover m9r_working_context for the exact current task; do not replay all open work." : "";
-      return out(event, [card, sessionStartWork, recovery].filter(Boolean).join("\n\n"));
+      const memory = renderMemoryInjection((ctx.memorySlice ?? ((s) => defaultMemorySlice(ctx.store.root, s)))(self));
+      return out(event, [card, sessionStartWork, recovery, memory].filter(Boolean).join("\n\n"));
     }
 
     // The OpenCode plugin polls independently of user prompts, then inserts an approved task as a real prompt into
