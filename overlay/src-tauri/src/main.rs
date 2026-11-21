@@ -83,7 +83,11 @@ impl HoldToTalkState {
     }
 }
 
-/// The engine child the overlay started, so quitting the overlay stops it too.
+/// Tells spawn_broker_watchdog's background thread to stop polling/restarting the broker. The overlay
+/// never started the broker or m9r-engine as its own children -- those are an intentional background
+/// service (the broker is launched by its own Windows Scheduled Task specifically so it survives
+/// independent of this pill process, serving MCP for every agent session) -- so this flag only affects
+/// this process's own watchdog thread, nothing else keeps running or stops because of it.
 static BROKER_WATCHDOG_STOPPING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) const PILL: &str = "pill";
@@ -1260,6 +1264,10 @@ fn has_open_app_argument(args: &[String]) -> bool {
     args.iter().any(|arg| arg == OPEN_APP_ARGUMENT)
 }
 
+/// Exits this pill overlay process only. The broker/engine keep running in the background for other
+/// agent sessions -- that is intentional, not a bug (see BROKER_WATCHDOG_STOPPING's own comment) -- and
+/// startDesktopOverlay's own retry loop (desktop-pill-presence.ts) checks this heartbeat removal and
+/// deliberately does not relaunch the pill after this call, so an intentional quit stays quit.
 fn shutdown_pill(app: &AppHandle) {
     let _ = fs::remove_file(heartbeat_path());
     stop_engine();
@@ -1373,7 +1381,10 @@ fn main() {
             let open = MenuItem::with_id(app, "open-app", "Open M9R", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "toggle", &format!("Show / hide pill ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            // Labeled "Close Pill," not "Quit": this only exits the pill overlay process. The
+            // broker/engine background service keeps running for other agent sessions by design
+            // (see shutdown_pill's own comment) -- "Quit" would wrongly imply it stops everything.
+            let quit = MenuItem::with_id(app, "quit", "Close Pill", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &show, &dnd, &quit])?;
             let mut tray = TrayIconBuilder::new().tooltip("M9R").menu(&menu);
             if let Some(icon) = app.default_window_icon() {

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { appendFileSync, existsSync } from "node:fs";
@@ -82,6 +82,20 @@ function overlaySpawnEnv(): NodeJS.ProcessEnv {
 // nowhere near the real app's state.
 function debugLogPath(logRoot: string | undefined): string {
   return join(logRoot ?? defaultStoreRoot(homedir(), process.env), "cursor-overlay-debug.log");
+}
+
+/**
+ * Kills any m9r-native-input-host.exe left running from a PREVIOUS broker process -- the broker is a
+ * singleton (one per machine), so at the moment a new broker starts, before it has created any session's
+ * overlay host, every instance of this image is necessarily an orphan: either the prior broker exited
+ * ungracefully (crash, SIGKILL, taskkill /F) and skipped AgentCursorOverlayHost.close()'s own kill, or it
+ * never got the chance to spawn one that then outlived it. Safe to call unconditionally at broker startup,
+ * and nowhere else -- once real sessions exist this would kill their live overlay too. Windows-only like
+ * the host itself; a no-op everywhere else.
+ */
+export function killStaleAgentCursorOverlayHosts(run: typeof spawnSync = spawnSync): void {
+  if (process.platform !== "win32") return;
+  try { run("taskkill", ["/IM", "m9r-native-input-host.exe", "/F"], { stdio: "ignore" }); } catch { /* none were running */ }
 }
 
 /**

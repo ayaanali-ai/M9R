@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { createTaskDesktopStageService } from "@/lib/native/task-desktop-stage";
+import { killStaleAgentCursorOverlayHosts } from "@/lib/native/agent-cursor-overlay-host";
 import { readOwnerWorkMode, setOwnerWorkMode } from "@/lib/native/owner-work-mode";
 import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
@@ -161,6 +162,11 @@ async function main(): Promise<void> {
   // desktop stage service. Both dispatch real input from this process, so this
   // is the only place a shared lease can arbitrate same-target contention.
   const mutationFence = createMultiplayerDispatchFence({ store });
+  // The broker is a singleton; anything still running under this image name at this exact moment,
+  // before any session of THIS broker has created its own overlay host, is necessarily an orphan
+  // left by a previous broker that exited ungracefully (crash/SIGKILL) rather than through stop()'s
+  // own cleanup. See killStaleAgentCursorOverlayHosts's own comment for why this is safe here only.
+  killStaleAgentCursorOverlayHosts();
   const taskStages = createTaskDesktopStageService({ store, mutationFence, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
   const stopCursorChatter = subscribeA2ACursorChatter({
     multiplayer,

@@ -4,7 +4,7 @@ import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createAgentCursorOverlayHost } from "../src/lib/native/agent-cursor-overlay-host";
+import { createAgentCursorOverlayHost, killStaleAgentCursorOverlayHosts } from "../src/lib/native/agent-cursor-overlay-host";
 
 // Without this the host's debug log falls back to the real ~/.m9r -- every run of this
 // file used to spam the developer's own live cursor-overlay-debug.log with real entries.
@@ -174,4 +174,22 @@ test("shutdown while an initial marker is queued finishes without respawning it"
   await host.close();
   await placing;
   assert.ok(launched.every(child => child.exitCode !== null));
+});
+
+test("killStaleAgentCursorOverlayHosts force-kills the native host image by name, and is a no-op off Windows", () => {
+  const calls: Array<{ command: string; args: readonly string[] }> = [];
+  const fakeRun = ((command: string, args: readonly string[]) => { calls.push({ command, args }); return { status: 0 } as never; }) as never;
+  const originalPlatform = process.platform;
+  try {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    killStaleAgentCursorOverlayHosts(fakeRun);
+    assert.deepEqual(calls, [{ command: "taskkill", args: ["/IM", "m9r-native-input-host.exe", "/F"] }]);
+
+    calls.length = 0;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    killStaleAgentCursorOverlayHosts(fakeRun);
+    assert.deepEqual(calls, [], "never runs off Windows -- the host itself only exists there");
+  } finally {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+  }
 });
