@@ -1,3 +1,4 @@
+import "@fontsource/fredoka/600.css";
 import "./chatter.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";

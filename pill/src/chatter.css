@@ -78,8 +78,8 @@ html, body {
 }
 
 .chatter-bubble .line {
-  color: #15151a;
-  font: 600 14.5px/1.25 system-ui, "Segoe UI Variable Text", "Segoe UI", "Segoe UI Emoji", sans-serif;
+  color: #0d0d12;
+  font: 600 15px/1.25 "Fredoka", system-ui, "Segoe UI Variable Text", "Segoe UI", sans-serif;
   letter-spacing: -0.1px;
   white-space: nowrap;
   overflow: hidden;
