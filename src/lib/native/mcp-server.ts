@@ -1576,6 +1576,14 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const memoryReminder = report.status === "completed"
         ? " If you learned a stable fact worth every future agent already knowing (a preference, a workflow, something to never redo) -- not a detail specific to this one task -- save it with m9r_memory."
         : "";
+      // Automatic handoff logging: completing a task another AGENT sent you (not a
+      // human/"you") is mechanically a clean handoff -- no extra agent decision needed,
+      // unlike relate's other three kinds (correction/praise/friction), which stay
+      // agent-initiated because they require judgment this call site can't make.
+      // Best-effort and never blocks or fails the result: this is bookkeeping, not the point of the call.
+      if (report.status === "completed" && existing.from !== "you" && existing.from !== identity.handle) {
+        try { relationshipLog.relate(existing.from, identity.handle, "handoff", summary.slice(0, 160)); } catch { /* best effort */ }
+      }
       return { content: [{ type: "text", text: report.status === "incomplete"
         ? `Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed.${inRoom(identity) ? " M9R will deliver the reply to the sender's room." : (answerText || " The sender can retrieve the blocker with m9r_inbox.")}`
         : inRoom(identity)

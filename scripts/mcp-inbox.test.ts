@@ -421,6 +421,30 @@ test("m9r_result nudges toward m9r_memory only on a genuine completion, not on i
   } finally { t.done(); }
 });
 
+test("m9r_result automatically logs a handoff when a task from another AGENT completes, never for a human-sent task", async () => {
+  const t = setup();
+  try {
+    const fromPeer = t.store.addTask({ from: "claude", to: "codex", goal: "Hand off review", origin: "agent_initiated", idempotencyKey: "auto-handoff-1", targetSession: "x1" }).task;
+    t.store.markDelivered([fromPeer.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: fromPeer.id, summary: "Reviewed and merged.", completion: { status: "completed", remainingWork: [] } });
+
+    const summary = await t.call("m9r_memory", { token: t.codex, action: "relationship", with: "claude" });
+    assert.match(summary, /handoffs: 1, corrections: 0, praise: 0, friction: 0/);
+
+    const fromHuman = t.store.addTask({ from: "you", to: "codex", goal: "Human task", origin: "human_typed", idempotencyKey: "auto-handoff-2", targetSession: "x1" }).task;
+    t.store.markDelivered([fromHuman.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: fromHuman.id, summary: "Done.", completion: { status: "completed", remainingWork: [] } });
+    const summaryAfterHuman = await t.call("m9r_memory", { token: t.codex, action: "relationship", with: "claude" });
+    assert.match(summaryAfterHuman, /handoffs: 1, corrections: 0, praise: 0, friction: 0/, "a human-sent task is never logged as an inter-agent handoff");
+
+    const incompletePeer = t.store.addTask({ from: "claude", to: "codex", goal: "Blocked review", origin: "agent_initiated", idempotencyKey: "auto-handoff-3", targetSession: "x1" }).task;
+    t.store.markDelivered([incompletePeer.id], "x1");
+    await t.call("m9r_result", { token: t.codex, taskId: incompletePeer.id, summary: "Blocked.", completion: { status: "incomplete", remainingWork: ["needs input"] } });
+    const summaryAfterIncomplete = await t.call("m9r_memory", { token: t.codex, action: "relationship", with: "claude" });
+    assert.match(summaryAfterIncomplete, /handoffs: 1, corrections: 0, praise: 0, friction: 0/, "incomplete work is never logged as a handoff");
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
