@@ -15,16 +15,24 @@ export interface MemoryEntry {
   id: string;
   text: string;
   scope: MemoryScope;
+  /** Which agent/persona wrote this (e.g. "codex", "claude-code"); undefined for user/system-authored entries. */
+  author?: string;
   createdAt: string;
 }
 
 export interface MemoryLog {
-  add(text: string, scope?: MemoryScope): MemoryEntry | undefined;
+  add(text: string, scope?: MemoryScope, author?: string): MemoryEntry | undefined;
   list(scope?: MemoryScope): readonly MemoryEntry[];
   remove(id: string): boolean;
 }
 
-const FILE_NAME = "memory-log.json";
+// JSONL, not one big JSON array: every agent is a separate OS process sharing this one
+// file (the "teammates, no walls" model), and an append is effectively race-safe across
+// processes where a read-modify-rewrite of a whole array is not -- two agents writing at
+// nearly the same moment would otherwise silently clobber each other's entry. remove()
+// still has to rewrite (you can't un-append a line), but removes are rare/user-driven,
+// unlike add() which happens constantly as agents work.
+const FILE_NAME = "memory-log.jsonl";
 const MAX_ENTRIES = 300;
 const MAX_TEXT_CHARS = 240;
 
@@ -38,37 +46,52 @@ function valid(value: unknown): value is MemoryEntry {
   return typeof item.id === "string" && item.id.length > 0
     && typeof item.text === "string" && item.text.length > 0 && item.text.length <= MAX_TEXT_CHARS
     && validScope(item.scope)
+    && (item.author === undefined || (typeof item.author === "string" && item.author.length > 0))
     && typeof item.createdAt === "string" && Number.isFinite(Date.parse(item.createdAt));
+}
+
+function readAll(path: string): MemoryEntry[] {
+  let raw: string;
+  try { raw = readFileSync(path, "utf8"); } catch { return []; }
+  const out: MemoryEntry[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (valid(parsed)) out.push(parsed);
+    } catch { /* a torn/partial line from a concurrent writer is skipped, not fatal */ }
+  }
+  return out;
+}
+
+function rewrite(path: string, entries: MemoryEntry[]): void {
+  const temp = `${path}.tmp-${process.pid}`;
+  try {
+    writeFileSync(temp, entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : ""), { encoding: "utf8", mode: 0o600 });
+    renameSync(temp, path);
+  } catch { try { unlinkSync(temp); } catch { /* best effort */ } }
 }
 
 export function createMemoryLog(root: string, now: () => Date = () => new Date()): MemoryLog {
   const path = join(root, FILE_NAME);
-  let entries: MemoryEntry[] = [];
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    const items = parsed && typeof parsed === "object" && Array.isArray((parsed as { entries?: unknown }).entries)
-      ? (parsed as { entries: unknown[] }).entries
-      : [];
-    entries = items.filter(valid).slice(-MAX_ENTRIES);
-  } catch { /* missing or malformed memory is intentionally treated as empty */ }
+  // Compacted (bounded, de-duped against malformed lines) once at load, so the file's
+  // size cap is enforced even though add() below no longer rewrites the whole file.
+  const loaded = readAll(path);
+  let entries: MemoryEntry[] = loaded.slice(-MAX_ENTRIES);
+  if (entries.length !== loaded.length) rewrite(path, entries);
 
   let pending = Promise.resolve();
-  const persist = () => {
-    const temp = `${path}.tmp-${process.pid}`;
-    try {
-      writeFileSync(temp, JSON.stringify({ version: 1, entries }) + "\n", { encoding: "utf8", mode: 0o600 });
-      renameSync(temp, path);
-    } catch { try { unlinkSync(temp); } catch { /* best effort */ } }
-  };
 
   return {
-    add(text, scope = "global") {
+    add(text, scope = "global", author) {
       const trimmed = text.trim().slice(0, MAX_TEXT_CHARS);
       if (!trimmed || !validScope(scope)) return undefined;
-      const entry: MemoryEntry = { id: randomUUID(), text: trimmed, scope, createdAt: now().toISOString() };
+      const entry: MemoryEntry = { id: randomUUID(), text: trimmed, scope, ...(author ? { author } : {}), createdAt: now().toISOString() };
       entries.push(entry);
       if (entries.length > MAX_ENTRIES) entries = entries.slice(entries.length - MAX_ENTRIES);
-      pending = pending.then(persist, persist);
+      pending = pending.then(() => {
+        try { writeFileSync(path, JSON.stringify(entry) + "\n", { encoding: "utf8", mode: 0o600, flag: "a" }); } catch { /* best effort */ }
+      });
       return entry;
     },
     list(scope) {
@@ -82,7 +105,7 @@ export function createMemoryLog(root: string, now: () => Date = () => new Date()
       const before = entries.length;
       entries = entries.filter((e) => e.id !== id);
       if (entries.length === before) return false;
-      pending = pending.then(persist, persist);
+      pending = pending.then(() => rewrite(path, entries));
       return true;
     },
   };

@@ -11,21 +11,24 @@ test("memory log is local, scoped, deletable, and survives a reload", async () =
   try {
     const log = createMemoryLog(root, () => new Date("2026-11-20T12:00:00.000Z"));
     const a = log.add("prefers terse commit messages");
-    const b = log.add("deep in the pill redesign this week", "persona:ry");
+    const b = log.add("deep in the pill redesign this week", "persona:ry", "codex");
     assert.ok(a && b);
+    assert.equal(b!.author, "codex");
+    assert.equal(a!.author, undefined);
     assert.deepEqual(log.list().map((e) => e.text), [b!.text, a!.text]);
     assert.deepEqual(log.list("persona:ry").map((e) => e.text), [b!.text]);
 
     // Persists asynchronously so a capture call never waits on disk.
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const raw = readFileSync(join(root, "memory-log.json"), "utf8");
+    const raw = readFileSync(join(root, "memory-log.jsonl"), "utf8");
     assert.match(raw, /prefers terse commit messages/);
     assert.match(raw, /persona:ry/);
+    assert.match(raw, /"author":"codex"/);
 
     assert.equal(log.remove(a!.id), true);
     assert.equal(log.remove(a!.id), false);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const raw2 = readFileSync(join(root, "memory-log.json"), "utf8");
+    const raw2 = readFileSync(join(root, "memory-log.jsonl"), "utf8");
     assert.doesNotMatch(raw2, /prefers terse commit messages/);
 
     const reloaded = createMemoryLog(root);
