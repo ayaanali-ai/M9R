@@ -2351,35 +2351,37 @@ input[type="range"]::-webkit-slider-thumb {
 /* Unified desktop notch: the same Island owns Home, Settings, and the live conversation. */
 body.pill-preview { background: radial-gradient(ellipse at 13% 78%, #ddc9b8, transparent 58%), radial-gradient(ellipse at 76% 34%, #92a8b9, transparent 62%), #c4c4c6; }
 #content { padding: 0 20px 18px; }
+/* The expanded card keeps the collapsed pill's eared/notch silhouette: the clip-path (see
+   notchShapePath in island.ts) only leaves a 288px-wide "neck" open at the very top, centered,
+   regardless of how wide the card is. Anything in the header outside that band is invisible --
+   clipped by the shape itself, not hidden by CSS. So the header can't span the full card width;
+   it has to live inside that same narrow neck, same as the center toggle always did. */
 #header {
   position: relative;
   height: 74px;
   flex: 0 0 74px;
-  margin: 0 -20px;
+  width: min(252px, 90vw);
+  margin: 0 auto;
   align-items: flex-start;
   justify-content: space-between;
   z-index: 3;
 }
-#header .tabs { padding: 8px 0 0 18px; }
-#header .header-actions { padding: 8px 18px 0 0; gap: 10px; }
+#header .tabs { padding: 10px 0 0 0; }
+#header .header-actions { padding: 10px 0 0 0; gap: 10px; }
+/* A plain click target, not a visual control: no fill, no hover state, no border -- it should
+   never read as a button someone is meant to look at, just a place that's clickable. */
 .pill-toggle {
   position: absolute;
   top: 0;
   left: 50%;
   transform: translateX(-50%);
-  width: min(288px, 95vw);
+  width: 92px;
   height: 32px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
   border: 0;
-  border-radius: 0 0 15px 15px;
-  background: #09090a;
-  color: var(--ink);
+  background: transparent;
   cursor: pointer;
   z-index: 2;
 }
-.pill-toggle:hover { background: #111113; }
 #island.expanded #resize-handles { display: block; }
 #resize-handles { display: none; position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 .resize-handle { position: absolute; pointer-events: auto; touch-action: none; }

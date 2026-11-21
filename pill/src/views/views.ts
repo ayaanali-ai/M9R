@@ -104,13 +104,10 @@ export function buildHeader(actions: ViewActions): ViewHost {
   } });
   const msgBtn = h("button", { class: "tab", title: "Messages", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  // Bare click target, not a visual control: expands/collapses the island. Messaging and
-  // Settings each have their own icon now, so this no longer needs to show anything (it used
-  // to render provider-logo avatars here; that's gone).
-  const toggle = h("button", { class: "pill-toggle", type: "button", onclick: () => {
-    if (State.view === "prompt") actions.collapse();
-    else go("prompt");
-  } });
+  // Minimizes the pill, from whichever view is open. A plain click target, not a visual
+  // control -- Messages/Settings each have their own icon now, so this never needs to show
+  // or do anything else.
+  const toggle = h("button", { class: "pill-toggle", type: "button", onclick: () => actions.collapse() });
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
@@ -142,9 +139,8 @@ export function buildHeader(actions: ViewActions): ViewHost {
       msgBtn.classList.toggle("on", v === "prompt");
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       gearBtn.classList.toggle("on", v === "settings");
-      const toggleLabel = v === "prompt" ? "Minimize pill" : "Return to conversation";
-      toggle.title = toggleLabel;
-      toggle.setAttribute("aria-label", toggleLabel);
+      toggle.title = "Minimize pill";
+      toggle.setAttribute("aria-label", "Minimize pill");
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
       brokerStatus.dataset.state = connection;
