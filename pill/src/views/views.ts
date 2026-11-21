@@ -102,12 +102,15 @@ export function buildHeader(actions: ViewActions): ViewHost {
     catch { workMode.title = "Work mode could not be changed. Try again when M9R is connected."; }
     finally { changingMode = false; workMode.disabled = false; }
   } });
+  const msgBtn = h("button", { class: "tab", title: "Messages", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const faces = h("span", { class: "pill-faces", "aria-hidden": "true" });
+  // Bare click target, not a visual control: expands/collapses the island. Messaging and
+  // Settings each have their own icon now, so this no longer needs to show anything (it used
+  // to render provider-logo avatars here; that's gone).
   const toggle = h("button", { class: "pill-toggle", type: "button", onclick: () => {
     if (State.view === "prompt") actions.collapse();
     else go("prompt");
-  } }, faces);
+  } });
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
@@ -120,7 +123,7 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome),
+    h("div", { class: "tabs" }, msgBtn, tabHome),
     toggle,
     h("div", { class: "header-actions" }, brokerStatus, workMode, gearBtn, soundBtn),
   );
@@ -136,16 +139,12 @@ export function buildHeader(actions: ViewActions): ViewHost {
       workMode.setAttribute("aria-pressed", String(State.ownerWorkMode === "agents-free"));
       workMode.title = State.ownerWorkMode === "working" ? "Background work continues. Foreground turns need your approval." : "Agents may use foreground input. Click to protect your current work.";
       const v = State.view;
+      msgBtn.classList.toggle("on", v === "prompt");
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
       gearBtn.classList.toggle("on", v === "settings");
       const toggleLabel = v === "prompt" ? "Minimize pill" : "Return to conversation";
       toggle.title = toggleLabel;
       toggle.setAttribute("aria-label", toggleLabel);
-      const faceKey = State.tasks.map((task) => task.provider).filter((provider, index, all) => all.indexOf(provider) === index).slice(0, 3).join("|");
-      if (faces.dataset.key !== faceKey) {
-        faces.dataset.key = faceKey;
-        faces.replaceChildren(...faceKey.split("|").filter(Boolean).map((provider) => providerLogo(provider as AgentTask["provider"], 14)));
-      }
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
       brokerStatus.dataset.state = connection;

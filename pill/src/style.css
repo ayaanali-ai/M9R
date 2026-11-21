@@ -2380,12 +2380,6 @@ body.pill-preview { background: radial-gradient(ellipse at 13% 78%, #ddc9b8, tra
   z-index: 2;
 }
 .pill-toggle:hover { background: #111113; }
-.pill-faces { display: flex; align-items: center; justify-content: center; }
-.pill-faces .logo { display: grid; place-items: center; width: 22px; height: 22px; padding: 3px; border: 1px solid #101012; border-radius: 50%; background: #dedbd7; }
-.pill-faces .logo + .logo { margin-left: -4px; }
-.pill-faces img { display: block; }
-/* These sit on a light circle, not the dark island -- undo the global invert so the mark stays legible. */
-.pill-faces .logo img { filter: none; opacity: 1; }
 #island.expanded #resize-handles { display: block; }
 #resize-handles { display: none; position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 .resize-handle { position: absolute; pointer-events: auto; touch-action: none; }
