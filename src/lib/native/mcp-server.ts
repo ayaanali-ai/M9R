@@ -33,6 +33,7 @@ import { registerComputerUseTools } from "./computer-use-mcp";
 import { createWorkflowPreferenceLedger } from "./workflow-preferences";
 import { createObservationModalityLedger } from "./observation-modality-ledger";
 import { createMemoryLog, type MemoryScope } from "./memory-log";
+import { createRelationshipLog, type RelationshipKind } from "./relationship-log";
 import type { MultiplayerA2ASendInput } from "./multiplayer-runtime";
 
 export interface McpServerDeps {
@@ -267,6 +268,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const workflowPreferences = createWorkflowPreferenceLedger(deps.store.root, deps.now ?? (() => new Date()));
   const observationModalityLedger = createObservationModalityLedger(deps.store.root, deps.now ?? (() => new Date()));
   const memoryLog = createMemoryLog(deps.store.root, deps.now ?? (() => new Date()));
+  const relationshipLog = createRelationshipLog(deps.store.root, deps.now ?? (() => new Date()));
   // Whether this process was ever told anything connection-mode-shaped at startup. This stays a
   // static fact about how the process was launched (its env/deps genuinely never changes after
   // that) -- what changed is that it no longer freezes the *schema* or skips a fresh resolution
@@ -1630,16 +1632,19 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   server.registerTool(
     "m9r_memory",
     {
-      description: "Durable, shared cross-agent memory: short factual notes every M9R agent reads, like teammates with no walls between them. Not a chat log or scratch pad -- one short declarative sentence per entry (240 chars max), never raw transcripts, screenshots, or secrets. Use it for a stable preference you learned (\"user prefers terse commit messages\"), a workflow fact (\"deploys go to staging first\"), or anything worth every future run already knowing -- not for a one-off detail about the current task. Scope defaults to \"global\" (every agent sees it); use \"persona:<name>\" only for a note specific to one agent. Actions: add, list, remove.",
+      description: "Durable, shared cross-agent memory: short factual notes every M9R agent reads, like teammates with no walls between them. Not a chat log or scratch pad -- one short declarative sentence per entry (240 chars max), never raw transcripts, screenshots, or secrets. Use it for a stable preference you learned (\"user prefers terse commit messages\"), a workflow fact (\"deploys go to staging first\"), or anything worth every future run already knowing -- not for a one-off detail about the current task. Scope defaults to \"global\" (every agent sees it); use \"persona:<name>\" only for a note specific to one agent. Actions: add, list, remove, relate (log a notable moment with another named agent -- a clean handoff, a correction you had to make, work worth praising, or friction/conflicting output -- so collaboration history between that pair builds up over time), relationship (read the count/recent-notes summary for you and another named agent).",
       inputSchema: {
         ...AUTH_FIELD,
-        action: z.enum(["add", "list", "remove"]),
+        action: z.enum(["add", "list", "remove", "relate", "relationship"]),
         text: z.string().min(1).max(240).optional().describe("For add only: one short, declarative sentence."),
         scope: z.string().max(120).optional().describe('Defaults to "global". Use "persona:<name>" to scope a note to one specific agent.'),
         id: z.string().min(1).optional().describe("For remove only: the entry id."),
+        with: z.string().min(1).max(120).optional().describe("For relate/relationship only: the other agent's handle."),
+        kind: z.enum(["handoff", "correction", "praise", "friction"]).optional().describe("For relate only."),
+        note: z.string().min(1).max(160).optional().describe("For relate only: one short sentence on what happened."),
       },
     },
-    async ({ token, action, text, scope, id }) => {
+    async ({ token, action, text, scope, id, with: withAgent, kind, note }) => {
       const identity = await requireIdentity(token);
       const resolvedScope = (scope?.trim() || "global") as MemoryScope;
       if (action === "add") {
@@ -1651,6 +1656,23 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       if (action === "remove") {
         if (!id) return { content: [{ type: "text" as const, text: "For remove, id is required." }], isError: true };
         return { content: [{ type: "text" as const, text: memoryLog.remove(id) ? `Removed ${id}.` : `No entry ${id} found; it may already be removed.` }] };
+      }
+      if (action === "relate") {
+        if (!withAgent?.trim() || !kind || !note?.trim()) {
+          return { content: [{ type: "text" as const, text: "For relate, with, kind, and note are all required." }], isError: true };
+        }
+        const entry = relationshipLog.relate(identity.handle, withAgent, kind as RelationshipKind, note);
+        if (!entry) return { content: [{ type: "text" as const, text: "Could not save that -- with must name a different agent, and note must be non-empty." }], isError: true };
+        return { content: [{ type: "text" as const, text: `Logged a ${entry.kind} with ${withAgent}.` }] };
+      }
+      if (action === "relationship") {
+        if (!withAgent?.trim()) return { content: [{ type: "text" as const, text: "For relationship, with is required." }], isError: true };
+        const summary = relationshipLog.summary(identity.handle, withAgent);
+        const total = Object.values(summary.counts).reduce((a, b) => a + b, 0);
+        if (!total) return { content: [{ type: "text" as const, text: `No relationship history yet with ${withAgent}.` }] };
+        const counts = `handoffs: ${summary.counts.handoff}, corrections: ${summary.counts.correction}, praise: ${summary.counts.praise}, friction: ${summary.counts.friction}`;
+        const recent = summary.recentNotes.map((n) => `- (${n.kind}) ${n.note}`).join("\n");
+        return { content: [{ type: "text" as const, text: `With ${withAgent} -- ${counts}.\n${recent}` }] };
       }
       const entries = memoryLog.list(scope?.trim() as MemoryScope | undefined);
       if (!entries.length) return { content: [{ type: "text" as const, text: scope ? `No memory entries for scope "${scope}".` : "No memory entries yet." }] };

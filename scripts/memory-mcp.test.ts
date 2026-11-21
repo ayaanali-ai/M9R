@@ -61,6 +61,38 @@ test("m9r_memory is real, shared cross-agent memory -- not a fake/placeholder su
   }
 });
 
+test("m9r_memory's relate/relationship actions build pair history regardless of who asks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-memory-mcp-"));
+  try {
+    const local = createLocalStore(root);
+    const codex = local.issueIdentity("codex", "codex", "session-codex");
+    const claude = local.issueIdentity("claude-code", "claude-code", "session-claude");
+    const server = createM9rMcpServer({ store: local });
+    const tool = (server as unknown as ToolServer)._registeredTools.m9r_memory;
+    const call = (args: unknown) => tool.handler(args);
+
+    const noHistory = await call({ token: codex.token, action: "relationship", with: "claude-code" });
+    assert.match(noHistory.content[0].text, /No relationship history yet/);
+
+    const handoff = await call({ token: codex.token, action: "relate", with: "claude-code", kind: "handoff", note: "Picked up the pill redesign cleanly." });
+    assert.match(handoff.content[0].text, /Logged a handoff/);
+    const correction = await call({ token: claude.token, action: "relate", with: "codex", kind: "correction", note: "Had to fix a missing scope check." });
+    assert.equal(correction.isError, undefined);
+
+    // Either side of the pair sees the same combined history.
+    const fromClaude = await call({ token: claude.token, action: "relationship", with: "codex" });
+    assert.match(fromClaude.content[0].text, /handoffs: 1, corrections: 1, praise: 0, friction: 0/);
+    assert.match(fromClaude.content[0].text, /Had to fix a missing scope check/);
+
+    const badKind = await call({ token: codex.token, action: "relate", with: "claude-code", kind: "nonsense", note: "x" });
+    assert.equal(badKind.isError, true);
+    const selfPair = await call({ token: codex.token, action: "relate", with: "codex", kind: "praise", note: "x" });
+    assert.equal(selfPair.isError, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("m9r_memory refuses invalid identity and empty text", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-memory-mcp-"));
   try {

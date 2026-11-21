@@ -236,6 +236,7 @@
   "windows-desktop-stage.test.ts",
   "task-stage-actions.test.ts",
   "memory-log.test.ts",
+  "relationship-log.test.ts",
   "memory-mcp.test.ts",
   "memory-injection.test.ts"
 ]
