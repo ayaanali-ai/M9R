@@ -165,6 +165,10 @@
   background: linear-gradient(180deg, #fbfbfb 0%, #ededed 42%, #e4e4e4 100%);
 }
 .ds-pill-button.large { min-width: 132px; padding: 11px 26px 13px; font-size: 22px; line-height: 28px; }
+/* Compact variant -- in-pill rows (settings/memory) have far less vertical room
+   than a full homepage page, so the button keeps its gradient/border/shadow
+   recipe but drops to a size that fits a single dense row of controls. */
+.ds-pill-button.small { padding: 2px 10px; font-size: 12px; line-height: 15px; letter-spacing: 0; border-width: 0.8px; }
 .ds-pill-button:hover { opacity: 0.8; }
 .ds-pill-button:active { transform: scale(0.97); }
 .ds-pill-button:focus-visible,

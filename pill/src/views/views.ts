@@ -394,33 +394,58 @@ function buildNote(): ViewHost {
 
 // ── Settings ─────────────────────────────────────────────────────
 
+/** Two-state on/off control built from the site's own jelly-pill button pair --
+ * the live homepage has no toggle-switch element, so this follows the same
+ * "blue pill = chosen, grey pill = not" pattern used everywhere else, just at
+ * `.small` size to fit a dense settings row instead of a hero button. */
+function pillToggle(onClick: (value: boolean) => void): { el: HTMLElement; sync(value: boolean): void } {
+  const onBtn = h("button", { class: "ds-pill-button small", type: "button", text: "On", onclick: () => onClick(true) });
+  const offBtn = h("button", { class: "ds-pill-button small neutral", type: "button", text: "Off", onclick: () => onClick(false) });
+  return {
+    el: h("div", { class: "settings-toggle" }, onBtn, offBtn),
+    sync(value) {
+      onBtn.classList.toggle("neutral", !value);
+      offBtn.classList.toggle("neutral", value);
+    },
+  };
+}
+
+/** A row of mutually-exclusive jelly-pill choices (voice rate, auto-close, glow style). */
+function pillChoices<T>(options: { label: string; value: T }[], onPick: (value: T) => void): { el: HTMLElement; sync(value: T): void } {
+  const buttons = options.map((o) => h("button", { class: "ds-pill-button small neutral", type: "button", text: o.label, onclick: () => onPick(o.value) }));
+  return {
+    el: h("div", { class: "settings-choices" }, ...buttons),
+    sync(value) { buttons.forEach((b, i) => b.classList.toggle("neutral", options[i].value !== value)); },
+  };
+}
+
 function buildSettings(actions: ViewActions): ViewHost {
-  const soundSwitch = h("button", { class: "switch", onclick: () => actions.toggleSound() });
-  const autoLabel = h("span", {});
-  const segButtons = [10, 15, 30].map((s) => h("button", { onclick: () => actions.setAutoClose(s) }, `${s}s`));
-  const voiceSwitch = h("button", { class: "switch", onclick: () => actions.updateSettings({ voiceEnabled: !State.settings.voiceEnabled }) });
+  const soundToggle = pillToggle((on) => actions.toggleSound !== undefined && State.settings.soundEnabled !== on ? actions.toggleSound() : undefined);
+  const autoLabel = h("span", { class: "settings-label" });
+  const autoClose = pillChoices([10, 15, 30].map((s) => ({ label: `${s}s`, value: s })), (s) => actions.setAutoClose(s));
+  const voiceToggle = pillToggle((on) => actions.updateSettings({ voiceEnabled: on }));
   const RATES = [{ label: "Slower", rate: 0.85 }, { label: "Normal", rate: 1 }, { label: "Faster", rate: 1.2 }];
-  const rateButtons = RATES.map((r) => h("button", { onclick: () => actions.updateSettings({ voiceRate: r.rate }) }, r.label));
-  const preview = h("button", { class: "link-btn voice-preview", text: "Preview", onclick: () => speak("Codex is done. Found three deals on monitors.", { force: true }) });
+  const voiceRate = pillChoices(RATES.map((r) => ({ label: r.label, value: r.rate })), (rate) => actions.updateSettings({ voiceRate: rate }));
+  const preview = h("button", { class: "ds-chrome-button", type: "button", text: "Preview", onclick: () => speak("Codex is done. Found three deals on monitors.", { force: true }) });
   const voiceNote = h("span", { class: "voice-note" });
   const GLOWS = [{ label: "Status", style: "status" }, { label: "Rainbow", style: "rainbow" }, { label: "Off", style: "off" }] as const;
-  const glowButtons = GLOWS.map((g) => h("button", { onclick: () => actions.updateSettings({ glowStyle: g.style }) }, g.label));
+  const glowStyle = pillChoices(GLOWS.map((g) => ({ label: g.label, value: g.style })), (style) => actions.updateSettings({ glowStyle: style }));
   const glowColorInput = h("input", { class: "glow-color-input", type: "color", tabindex: -1, "aria-hidden": true }) as HTMLInputElement;
   glowColorInput.addEventListener("change", () => actions.updateSettings({ glowColor: glowColorInput.value }));
   const glowColorButton = h("button", { class: "glow-picker", type: "button", title: "Choose a custom edge-glow color",
     "aria-label": "Choose a custom edge-glow color", onclick: () => glowColorInput.click() });
-  const glowColorReset = h("button", { class: "glow-reset", type: "button", text: "Auto", title: "Use the current status colors again",
+  const glowColorReset = h("button", { class: "ds-chrome-button", type: "button", text: "Auto", title: "Use the current status colors again",
     onclick: () => actions.updateSettings({ glowColor: null }) });
-  const glowColorRow = h("div", { class: "settings-row glow-row" }, glowColorButton,
-    h("span", { text: "Edge glow" }), h("div", { class: "seg" }, ...glowButtons), glowColorReset, glowColorInput);
 
   const rows = h(
     "div",
     { class: "settings-rows" },
-    h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" })),
-    h("div", { class: "settings-row" }, voiceSwitch, h("span", { text: "Spoken updates" }), preview, h("div", { class: "seg" }, ...rateButtons)),
-    h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, h("div", { class: "seg" }, ...segButtons)),
-    glowColorRow,
+    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Sound" }), soundToggle.el),
+    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Spoken updates" }), voiceToggle.el, preview),
+    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Speed" }), voiceRate.el),
+    h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, autoClose.el),
+    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Edge glow" }), glowStyle.el),
+    h("div", { class: "settings-row" }, glowColorButton, glowColorReset, glowColorInput),
     voiceNote,
   );
 
@@ -430,10 +455,10 @@ function buildSettings(actions: ViewActions): ViewHost {
     el,
     sync() {
       const s = State.settings;
-      soundSwitch.classList.toggle("on", s.soundEnabled);
-      voiceSwitch.classList.toggle("on", s.voiceEnabled);
-      rateButtons.forEach((b, i) => b.classList.toggle("on", s.voiceRate === RATES[i].rate));
-      glowButtons.forEach((b, i) => b.classList.toggle("on", s.glowStyle === GLOWS[i].style));
+      soundToggle.sync(s.soundEnabled);
+      voiceToggle.sync(s.voiceEnabled);
+      voiceRate.sync(s.voiceRate);
+      glowStyle.sync(s.glowStyle);
       glowColorButton.style.setProperty("--glow-picked", s.glowColor ?? "transparent");
       glowColorButton.classList.toggle("custom", s.glowColor !== null);
       glowColorReset.hidden = s.glowColor === null;
@@ -441,7 +466,7 @@ function buildSettings(actions: ViewActions): ViewHost {
       const name = voiceName();
       voiceNote.textContent = name ? `Voice: ${name.replace(/^Microsoft\s+/, "").replace(/\s+-.*$/, "")}` : "No voice available on this device.";
       autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
-      segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
+      autoClose.sync(s.autoCloseInterval);
     },
   };
 }

@@ -1,5 +1,7 @@
 /* M9R pill: palette, sizes and type scale. */
 
+@import "./design-system.css";
+
 :root {
   color-scheme: dark;
 
@@ -1108,38 +1110,22 @@ body {
   gap: 10px;
   font: 400 12.5px var(--font);
   color: #c5c8cd;
+  flex-wrap: wrap;
 }
 
-.switch {
-  position: relative;
-  width: 32px;
-  height: 18px;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.15);
-  flex: 0 0 32px;
-  transition: background 0.18s;
-  cursor: default;
-  border: 0;
+.settings-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
-.switch.on {
-  background: var(--green);
-}
-
-.switch::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 0.18s;
-}
-
-.switch.on::after {
-  transform: translateX(14px);
+/* Jelly-pill controls dropped into a dense pill row -- see design-system.css
+   for the shared .ds-pill-button recipe; these two wrappers just lay out the
+   on/off pair and the choice groups that reuse it. */
+.settings-toggle,
+.settings-choices {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
 }
 
 input[type="range"] {
@@ -1159,25 +1145,9 @@ input[type="range"]::-webkit-slider-thumb {
   background: #fff;
 }
 
-.seg {
-  display: flex;
-  gap: 6px;
-  margin-left: auto;
-}
-
-.seg button {
-  font: 400 11px var(--font);
-  padding: 3px 7px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--dim-3);
-  cursor: default;
-}
-
-.seg button.on {
-  background: #252830;
-  color: var(--ink);
+.glow-picker,
+.glow-reset {
+  flex: 0 0 auto;
 }
 
 /* ── Utility ────────────────────────────────────────────────────────────── */
