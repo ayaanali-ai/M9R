@@ -1,7 +1,6 @@
 import "./chatter.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { providerLogo } from "./views/provider";
 import type { Provider } from "./core/state";
 
 /** One agent-to-agent chatter line, already accepted and bounded by sayAgentCursor
@@ -22,13 +21,11 @@ let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
 function ensureBubble(): HTMLElement {
   if (bubble) return bubble;
-  const logo = document.createElement("span");
-  logo.className = "logo";
   const line = document.createElement("span");
   line.className = "line";
   const el = document.createElement("div");
   el.className = "chatter-bubble";
-  el.append(logo, line);
+  el.append(line);
   root?.append(el);
   bubble = el;
   return el;
@@ -46,9 +43,7 @@ function apply(state: ChatterState): void {
   if (!state.visible) { el.classList.remove("visible"); return; }
   el.style.setProperty("--bx", `${state.x}px`);
   el.style.setProperty("--by", `${state.y}px`);
-  const logo = el.querySelector(".logo");
-  const mark = providerLogo(state.provider, 12).querySelector("img");
-  if (logo && mark) logo.replaceChildren(mark);
+  el.dataset.provider = state.provider;
   const line = el.querySelector(".line");
   if (line) line.textContent = state.text.slice(0, 160);
   // Reflow before adding .visible so the fade-in transition actually runs
