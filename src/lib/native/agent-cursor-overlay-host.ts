@@ -72,11 +72,16 @@ function overlaySpawnEnv(): NodeJS.ProcessEnv {
 // never rendered", and "spawned, rendered, but the ack IPC stalled". This
 // writes every spawn/exit/timeout to a durable log the engine's own stdout
 // doesn't carry, so the next live task run tells us which one it actually is.
-const DEBUG_LOG_PATH = join(defaultStoreRoot(homedir(), process.env), "cursor-overlay-debug.log");
-function debugLog(event: string, detail: Record<string, unknown> = {}): void {
-  try {
-    appendFileSync(DEBUG_LOG_PATH, `${new Date().toISOString()} ${event} ${JSON.stringify(detail)}\n`);
-  } catch { /* diagnostic logging must never affect overlay behavior */ }
+//
+// logRoot is injectable (defaults to the real ~/.m9r) for exactly one reason: every
+// test that exercises this host used to fall through to the real path unconditionally
+// -- no test file sandboxed it -- so every test run on a dev machine spammed the
+// developer's own live cursor-overlay-debug.log with thousands of real entries
+// (confirmed: a single `node scripts/run-test-suite.mjs all` run left ~50 "spawned"/
+// "executable-missing" lines per test file). A test passing a tmp logRoot now writes
+// nowhere near the real app's state.
+function debugLogPath(logRoot: string | undefined): string {
+  return join(logRoot ?? defaultStoreRoot(homedir(), process.env), "cursor-overlay-debug.log");
 }
 
 /**
@@ -87,9 +92,17 @@ export function createAgentCursorOverlayHost(input: {
   executablePath: string;
   spawnProcess?: SpawnOverlay;
   pathExists?: (path: string) => boolean;
+  /** Root directory for this host's own debug log; defaults to the real ~/.m9r. Tests should pass a tmp dir. */
+  logRoot?: string;
 }): AgentCursorOverlayHost {
   const spawnProcess = input.spawnProcess ?? spawn;
   const pathExists = input.pathExists ?? existsSync;
+  const logPath = debugLogPath(input.logRoot);
+  function debugLog(event: string, detail: Record<string, unknown> = {}): void {
+    try {
+      appendFileSync(logPath, `${new Date().toISOString()} ${event} ${JSON.stringify(detail)}\n`);
+    } catch { /* diagnostic logging must never affect overlay behavior */ }
+  }
   let child: OverlayChild | undefined;
   let ready: Promise<boolean> | undefined;
   let nextRequestId = 1;

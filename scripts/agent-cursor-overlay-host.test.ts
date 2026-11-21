@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createAgentCursorOverlayHost } from "../src/lib/native/agent-cursor-overlay-host";
+
+// Without this the host's debug log falls back to the real ~/.m9r -- every run of this
+// file used to spam the developer's own live cursor-overlay-debug.log with real entries.
+const TEST_LOG_ROOT = join(tmpdir(), "m9r-test-agent-cursor-overlay-host");
 
 class FakeOverlayChild extends EventEmitter {
   readonly stdin = new PassThrough();
@@ -45,7 +51,7 @@ test("serializes acknowledged cursor frames and closes the renderer process on s
     child = new FakeOverlayChild();
     return child;
   }) as never;
-  const host = createAgentCursorOverlayHost({ executablePath: "C:\\M9R\\m9r-native-input-host.exe", spawnProcess, pathExists: () => true });
+  const host = createAgentCursorOverlayHost({ logRoot: TEST_LOG_ROOT, executablePath: "C:\\M9R\\m9r-native-input-host.exe", spawnProcess, pathExists: () => true });
 
   assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: -1200, y: 80 }), true);
   assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: -1190, y: 95 }), true);
@@ -78,7 +84,7 @@ test("a renderer that was missing at startup is picked up once it shows up, inst
     return child;
   }) as never;
   let exists = false;
-  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess, pathExists: () => exists });
+  const host = createAgentCursorOverlayHost({ logRoot: TEST_LOG_ROOT, executablePath: "M9R-host.exe", spawnProcess, pathExists: () => exists });
 
   assert.equal(await host.upsert({ id: "agent-test", label: "Codex", color: [40, 140, 230], x: 10, y: 10 }), false,
     "no renderer exists yet, so presentation fails without ever spawning one");
@@ -98,7 +104,7 @@ test("warming starts the transparent renderer once before the first task marker"
     launched.push(child);
     return child;
   }) as never;
-  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess, pathExists: () => true });
+  const host = createAgentCursorOverlayHost({ logRoot: TEST_LOG_ROOT, executablePath: "M9R-host.exe", spawnProcess, pathExists: () => true });
 
   assert.equal(await host.warm?.(), true);
   assert.equal(launched.length, 1);
@@ -115,7 +121,7 @@ test("A2A bubbles require an acknowledged visible sender and sanitize bounded te
     launched.push(child);
     return child;
   }) as never;
-  const host = createAgentCursorOverlayHost({ executablePath: "M9R-host.exe", spawnProcess, pathExists: () => true });
+  const host = createAgentCursorOverlayHost({ logRoot: TEST_LOG_ROOT, executablePath: "M9R-host.exe", spawnProcess, pathExists: () => true });
 
   assert.equal(await host.say({ id: "agent-codex", text: "hello" }), false,
     "an invisible sender cannot produce a free-floating bubble");
@@ -138,7 +144,7 @@ test("A2A bubbles require an acknowledged visible sender and sanitize bounded te
 
 test("a timed-out upsert still sends a real hide and cannot speak as a confirmed marker", async () => {
   const child = new FakeOverlayChild(message => message.cmd !== "upsert");
-  const host = createAgentCursorOverlayHost({ executablePath: "fixture.exe", pathExists: () => true, spawnProcess: (() => child) as never });
+  const host = createAgentCursorOverlayHost({ logRoot: TEST_LOG_ROOT, executablePath: "fixture.exe", pathExists: () => true, spawnProcess: (() => child) as never });
   try {
     assert.equal(await host.upsert({ id: "uncertain", label: "Codex", x: 10, y: 10, color: [1, 2, 3] }), false);
     assert.equal(await host.say({ id: "uncertain", text: "hello" }), false);
@@ -150,7 +156,7 @@ test("a timed-out upsert still sends a real hide and cannot speak as a confirmed
 
 test("hide during initial startup follows its upsert instead of preceding it", async () => {
   const child = new FakeOverlayChild();
-  const host = createAgentCursorOverlayHost({ executablePath: "fixture.exe", pathExists: () => true, spawnProcess: (() => child) as never });
+  const host = createAgentCursorOverlayHost({ logRoot: TEST_LOG_ROOT, executablePath: "fixture.exe", pathExists: () => true, spawnProcess: (() => child) as never });
   try {
     const placing = host.upsert({ id: "startup", label: "Codex", x: 10, y: 10, color: [1, 2, 3] });
     const hiding = host.hide("startup");
@@ -162,7 +168,7 @@ test("hide during initial startup follows its upsert instead of preceding it", a
 
 test("shutdown while an initial marker is queued finishes without respawning it", async () => {
   const launched: FakeOverlayChild[] = [];
-  const host = createAgentCursorOverlayHost({ executablePath: "fixture.exe", pathExists: () => true,
+  const host = createAgentCursorOverlayHost({ logRoot: TEST_LOG_ROOT, executablePath: "fixture.exe", pathExists: () => true,
     spawnProcess: (() => { const child = new FakeOverlayChild(); launched.push(child); return child; }) as never });
   const placing = host.upsert({ id: "shutdown", label: "Codex", x: 10, y: 10, color: [1, 2, 3] });
   await host.close();

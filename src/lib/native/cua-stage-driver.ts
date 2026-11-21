@@ -1058,7 +1058,7 @@ export function createCuaStageDriver(deps: CuaStageDriverDependencies = {}) {
   // once the exe lands, instead of staying permanently without it for its
   // whole lifetime.
   const cursorOverlayHost = deps.cursorOverlayHost
-    ?? (process.platform === "win32" ? createAgentCursorOverlayHost({ executablePath: cursorOverlayExecutable }) : undefined);
+    ?? (process.platform === "win32" ? createAgentCursorOverlayHost({ executablePath: cursorOverlayExecutable, logRoot: root }) : undefined);
   // The renderer is transparent and non-activating before it receives a
   // marker. Warm it during broker startup so the first task avoids cold spawn.
   void cursorOverlayHost?.warm?.().catch(() => undefined);
