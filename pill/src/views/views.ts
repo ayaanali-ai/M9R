@@ -11,8 +11,9 @@ import type { SpeechEnv } from "../core/speech";
 import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
 import { plainStep, displayName } from "../core/humanize";
 import { buildDrum } from "./drum";
+import { buildSettingsDrum } from "./settings-drum";
+import { dotSlider } from "./dot-slider";
 import { buildWidgets } from "./widgets";
-import { speak, voiceName } from "../core/voice";
 
 export interface ViewActions {
   setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
@@ -394,79 +395,57 @@ function buildNote(): ViewHost {
 
 // ── Settings ─────────────────────────────────────────────────────
 
-/** Two-state on/off control built from the site's own jelly-pill button pair --
- * the live homepage has no toggle-switch element, so this follows the same
- * "blue pill = chosen, grey pill = not" pattern used everywhere else, just at
- * `.small` size to fit a dense settings row instead of a hero button. */
-function pillToggle(onClick: (value: boolean) => void): { el: HTMLElement; sync(value: boolean): void } {
-  const onBtn = h("button", { class: "ds-pill-button small", type: "button", text: "On", onclick: () => onClick(true) });
-  const offBtn = h("button", { class: "ds-pill-button small neutral", type: "button", text: "Off", onclick: () => onClick(false) });
-  return {
-    el: h("div", { class: "settings-toggle" }, onBtn, offBtn),
-    sync(value) {
-      onBtn.classList.toggle("neutral", !value);
-      offBtn.classList.toggle("neutral", value);
-    },
-  };
-}
-
-/** A row of mutually-exclusive jelly-pill choices (voice rate, auto-close, glow style). */
-function pillChoices<T>(options: { label: string; value: T }[], onPick: (value: T) => void): { el: HTMLElement; sync(value: T): void } {
-  const buttons = options.map((o) => h("button", { class: "ds-pill-button small neutral", type: "button", text: o.label, onclick: () => onPick(o.value) }));
-  return {
-    el: h("div", { class: "settings-choices" }, ...buttons),
-    sync(value) { buttons.forEach((b, i) => b.classList.toggle("neutral", options[i].value !== value)); },
-  };
+/** One Settings card: the plain setting name, then its control. */
+function settingsCard(title: string, control: HTMLElement): HTMLElement {
+  return h("div", { class: "settings-card" }, h("div", { class: "settings-card-title", text: title }), control);
 }
 
 function buildSettings(actions: ViewActions): ViewHost {
-  const soundToggle = pillToggle((on) => actions.toggleSound !== undefined && State.settings.soundEnabled !== on ? actions.toggleSound() : undefined);
-  const autoLabel = h("span", { class: "settings-label" });
-  const autoClose = pillChoices([10, 15, 30].map((s) => ({ label: `${s}s`, value: s })), (s) => actions.setAutoClose(s));
-  const voiceToggle = pillToggle((on) => actions.updateSettings({ voiceEnabled: on }));
+  const ONOFF = ["Off", "On"];
+  const sound = dotSlider(ONOFF, "Sound", (i) => { if (State.settings.soundEnabled !== (i === 1)) actions.toggleSound(); });
+  const voice = dotSlider(ONOFF, "Spoken updates", (i) => actions.updateSettings({ voiceEnabled: i === 1 }));
   const RATES = [{ label: "Slower", rate: 0.85 }, { label: "Normal", rate: 1 }, { label: "Faster", rate: 1.2 }];
-  const voiceRate = pillChoices(RATES.map((r) => ({ label: r.label, value: r.rate })), (rate) => actions.updateSettings({ voiceRate: rate }));
-  const preview = h("button", { class: "ds-chrome-button", type: "button", text: "Preview", onclick: () => speak("Codex is done. Found three deals on monitors.", { force: true }) });
-  const voiceNote = h("span", { class: "voice-note" });
+  const rate = dotSlider(RATES.map((r) => r.label), "Speed", (i) => actions.updateSettings({ voiceRate: RATES[i].rate }));
+  const CLOSES = [10, 15, 30];
+  const autoClose = dotSlider(CLOSES.map((s) => `${s}s`), "Auto-close", (i) => actions.setAutoClose(CLOSES[i]));
   const GLOWS = [{ label: "Status", style: "status" }, { label: "Rainbow", style: "rainbow" }, { label: "Off", style: "off" }] as const;
-  const glowStyle = pillChoices(GLOWS.map((g) => ({ label: g.label, value: g.style })), (style) => actions.updateSettings({ glowStyle: style }));
+  const glow = dotSlider(GLOWS.map((g) => g.label), "Edge glow", (i) => actions.updateSettings({ glowStyle: GLOWS[i].style }));
+
   const glowColorInput = h("input", { class: "glow-color-input", type: "color", tabindex: -1, "aria-hidden": true }) as HTMLInputElement;
   glowColorInput.addEventListener("change", () => actions.updateSettings({ glowColor: glowColorInput.value }));
-  const glowColorButton = h("button", { class: "glow-picker", type: "button", title: "Choose a custom edge-glow color",
+  const glowColorButton = h("button", { class: "settings-swatch", type: "button", title: "Choose a custom edge-glow color",
     "aria-label": "Choose a custom edge-glow color", onclick: () => glowColorInput.click() });
-  const glowColorReset = h("button", { class: "ds-chrome-button", type: "button", text: "Auto", title: "Use the current status colors again",
+  const glowColorReset = h("button", { class: "settings-btn", type: "button", text: "Auto", title: "Use the current status colors again",
     onclick: () => actions.updateSettings({ glowColor: null }) });
 
-  const rows = h(
-    "div",
-    { class: "settings-rows" },
-    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Sound" }), soundToggle.el),
-    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Spoken updates" }), voiceToggle.el, preview),
-    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Speed" }), voiceRate.el),
-    h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, autoClose.el),
-    h("div", { class: "settings-row" }, h("span", { class: "settings-label", text: "Edge glow" }), glowStyle.el),
-    h("div", { class: "settings-row" }, glowColorButton, glowColorReset, glowColorInput),
-    voiceNote,
-  );
+  const drum = buildSettingsDrum([
+    settingsCard("Sound", sound.el),
+    settingsCard("Spoken updates", voice.el),
+    settingsCard("Speed", rate.el),
+    settingsCard("Auto-close", autoClose.el),
+    settingsCard("Edge glow", glow.el),
+    settingsCard("Custom color", h("div", { class: "settings-color" }, glowColorButton, glowColorReset, glowColorInput)),
+  ], () => actions.blip());
 
-  const el = h("div", { class: "view" }, card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 84px" }, rows)));
+  const el = h("div", { class: "view" }, h("div", { class: "settings-view" }, drum.el));
+
+  /** Index of the stop nearest `value`, so an off-list saved value still lands on a stop. */
+  const nearest = (list: readonly number[], value: number) =>
+    list.reduce((best, v, i) => (Math.abs(v - value) < Math.abs(list[best] - value) ? i : best), 0);
 
   return {
     el,
     sync() {
       const s = State.settings;
-      soundToggle.sync(s.soundEnabled);
-      voiceToggle.sync(s.voiceEnabled);
-      voiceRate.sync(s.voiceRate);
-      glowStyle.sync(s.glowStyle);
+      sound.sync(s.soundEnabled ? 1 : 0);
+      voice.sync(s.voiceEnabled ? 1 : 0);
+      rate.sync(nearest(RATES.map((r) => r.rate), s.voiceRate));
+      autoClose.sync(nearest(CLOSES, s.autoCloseInterval));
+      glow.sync(Math.max(0, GLOWS.findIndex((g) => g.style === s.glowStyle)));
       glowColorButton.style.setProperty("--glow-picked", s.glowColor ?? "transparent");
       glowColorButton.classList.toggle("custom", s.glowColor !== null);
       glowColorReset.hidden = s.glowColor === null;
       glowColorInput.value = s.glowColor ?? "#FFFFFF";
-      const name = voiceName();
-      voiceNote.textContent = name ? `Voice: ${name.replace(/^Microsoft\s+/, "").replace(/\s+-.*$/, "")}` : "No voice available on this device.";
-      autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
-      autoClose.sync(s.autoCloseInterval);
     },
   };
 }

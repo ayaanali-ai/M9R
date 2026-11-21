@@ -628,9 +628,6 @@ body {
   .drum-tag.live::before, .drum-row.entering > * { animation: none; }
 }
 
-.voice-preview { color: var(--blue); padding: 0 2px; }
-.voice-preview:hover { text-decoration: underline; }
-.voice-note { font: 400 10px var(--font); color: var(--dim-3); }
 .glow-picker {
   flex: 0 0 18px;
   width: 18px;
@@ -650,17 +647,7 @@ body {
   background: var(--glow-picked, transparent);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
 }
-.glow-picker:focus-visible, .glow-reset:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-.glow-reset {
-  padding: 2px 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--dim-2);
-  font: 500 10px var(--font);
-  cursor: pointer;
-}
-.glow-reset[hidden] { display: none; }
+.glow-picker:focus-visible { outline: 2px solid var(--ds-focus); outline-offset: 2px; }
 .glow-color-input {
   position: fixed;
   width: 1px;
@@ -1096,37 +1083,179 @@ body {
   color: var(--dim-2);
 }
 
-/* ── Settings view (in-island) ──────────────────────────────────────────── */
+/* ── Settings view (in-island) ───────────────────────────────────────────
+   Six frosted-glass cards on a vertical drum (views/settings-drum.ts): the
+   centred card is full size and interactive, neighbours shrink and fade away.
+   Every control is the shared dot-stop slider (views/dot-slider.ts). Pill
+   tokens and font only -- nothing from design-system.css. */
 
-.settings-rows {
+.settings-view {
+  position: absolute;
+  inset: 0 16px 0 84px;
+}
+
+.sdrum {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  perspective: 600px;
+  outline: none;
+  touch-action: none;
+  user-select: none;
+  /* Neighbours fade into the chrome at the top and bottom edges. */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+}
+
+.sdrum-wheel {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+}
+
+.sdrum-card {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  margin-top: -44px;
+  height: 88px;
+  will-change: transform, opacity;
+}
+
+.settings-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
-.settings-row {
+.settings-card-title {
+  font: 500 12.5px var(--font);
+  color: var(--ink);
+}
+
+/* ── Dot-stop slider ─────────────────────────────────────────────────── */
+
+.dot-slider {
+  position: relative;
+  padding: 0 7px;
+  outline: none;
+  touch-action: none;
+  cursor: default;
+}
+
+.dot-slider-track {
+  position: relative;
+  height: 4px;
+  margin: 5px 0;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.dot-slider-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  background: var(--blue);
+}
+
+.dot-slider-dot {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.dot-slider-dot.passed { background: #fff; opacity: 0.9; }
+
+.dot-slider-thumb {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.dot-slider:focus-visible .dot-slider-thumb { box-shadow: 0 0 0 3px rgba(122, 162, 247, 0.45), 0 1px 4px rgba(0, 0, 0, 0.45); }
+
+.dot-slider-captions {
+  position: relative;
+  height: 13px;
+  margin-top: 6px;
+}
+
+.dot-slider-caption {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font: 400 10.5px/13px var(--font);
+  color: var(--dim-3);
+}
+
+.dot-slider-caption.first { transform: translateX(-7px); }
+.dot-slider-caption.last { transform: translateX(calc(-100% + 7px)); }
+.dot-slider-caption.on { color: var(--ink-2); }
+
+/* ── Custom color card ───────────────────────────────────────────────── */
+
+.settings-color {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font: 400 12.5px var(--font);
-  color: #c5c8cd;
-  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.settings-label {
-  flex: 0 0 auto;
-  white-space: nowrap;
+.settings-swatch {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 3px;
+  border: 0;
+  border-radius: 50%;
+  background: conic-gradient(#ff5f6d, #ffb347, #f9f871, #47e891, #4fc3ff, #8b6cff, #ff5fd2, #ff5f6d);
+  cursor: default;
 }
 
-/* Jelly-pill controls dropped into a dense pill row -- see design-system.css
-   for the shared .ds-pill-button recipe; these two wrappers just lay out the
-   on/off pair and the choice groups that reuse it. */
-.settings-toggle,
-.settings-choices {
-  display: flex;
-  gap: 6px;
-  margin-left: auto;
+.settings-swatch::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: var(--glow-picked, transparent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
 }
+
+.settings-btn {
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--dim-2);
+  font: 500 11px var(--font);
+  cursor: default;
+}
+
+.settings-btn[hidden] { display: none; }
+
+.settings-swatch:focus-visible,
+.settings-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 input[type="range"] {
   -webkit-appearance: none;
