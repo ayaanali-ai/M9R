@@ -1,19 +1,17 @@
-// Island views: overview (focused agent's activity plus the others), approval, error, finished, message composer, settings.
+// Island views: overview (agents sidebar plus the selected agent's activity), approval, error, finished, message composer, settings.
 
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
-import { Ticker } from "./ticker";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
-import { State, type AgentTask, type LinkOffer, type PillModelAgent, type Settings } from "../core/state";
+import { buddy } from "./buddy";
+import { State, PROVIDER_COLORS, type AgentTask, type ChatMessage, type LinkOffer, type PillModelAgent, type Settings } from "../core/state";
 import type { SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
-import { plainStep, displayName } from "../core/humanize";
-import { buildDrum } from "./drum";
+import { plainStep, plainStatus, displayName } from "../core/humanize";
 import { buildSettingsDrum } from "./settings-drum";
 import { dotSlider } from "./dot-slider";
-import { buildWidgets } from "./widgets";
 
 export interface ViewActions {
   setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
@@ -152,29 +150,319 @@ export function buildHeader(actions: ViewActions): ViewHost {
   };
 }
 
-// ── Overview ─────────────────────────────────────────────────────
+// ── Overview (home) ──────────────────────────────────────────────
+// Two panes, HeyClicky's home structure: a sidebar of agents as conversations on the left, and on the right either an
+// idle greeting or the selected agent's own activity. Everything shown comes from State; nothing is sampled or invented.
+
+/** Messages in the shared thread that this agent sent or was sent, oldest first. */
+function agentMessages(task: AgentTask): ChatMessage[] {
+  return State.chatHistory.filter((m) => m.from === task.name || m.to === task.name);
+}
+
+/** A thread message as plain text: the store prefixes agent replies with "handle: ", which the row already names. */
+function messageText(m: ChatMessage): string {
+  const prefix = m.from && m.role === "assistant" ? `${m.from}: ` : "";
+  const text = prefix && m.content.startsWith(prefix) ? m.content.slice(prefix.length) : m.content;
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** The row's one-line preview: the last message involving the agent, else its latest plain-language step. */
+function agentPreview(task: AgentTask): string {
+  const last = agentMessages(task).at(-1);
+  if (last) return (last.role === "user" ? "You: " : "") + messageText(last);
+  return plainStep(task, task.steps.at(-1));
+}
+
+function shortTime(at: number, now = Date.now()): string {
+  const mins = Math.floor((now - at) / 60_000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const d = new Date(at);
+  if (d.toDateString() === new Date(now).toDateString()) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toLocaleDateString([], { weekday: "short" });
+}
+
+function greeting(now = new Date()): string {
+  const hour = now.getHours();
+  if (hour >= 5 && hour < 12) return "Good morning.";
+  if (hour >= 12 && hour < 17) return "Good afternoon.";
+  if (hour >= 17 && hour < 22) return "Good evening.";
+  return "Up late.";
+}
+
+/** The desktop shell's hold-to-talk hotkey is Ctrl+Alt held on its own (overlay/src-tauri/src/ctrl_alt_hold.rs). */
+const HOLD_HINT = "Hold Ctrl + Alt and tell me what to take off your plate.";
+
+/** Connected agent apps: each distinct provider among live agents and the model picker's agents. */
+function connectedApps(): AgentTask["provider"][] {
+  const seen = new Set<AgentTask["provider"]>();
+  for (const t of State.tasks) seen.add(t.provider);
+  for (const a of State.models?.agents ?? []) {
+    if (a.availability !== "not_connected" && (a.provider === "claude" || a.provider === "codex" || a.provider === "opencode")) seen.add(a.provider);
+  }
+  return [...seen];
+}
+
+const CONNECTION_LABEL: Record<typeof State.brokerConnection, string> = {
+  connected: "Connected", connecting: "Connecting", disconnected: "Offline", unknown: "Local",
+};
+
+/** "2 working · 1 needs you", from the live agent states. */
+function teamSummary(): string {
+  const tasks = State.tasks;
+  if (!tasks.length) return "No agents connected yet. Send a message to get one started.";
+  const needs = tasks.filter((t) => t.state === "approval").length;
+  const busy = tasks.filter((t) => t.runState === "working" || t.runState === "starting" || t.runState === "waiting").length;
+  const parts = [`${tasks.length} agent${tasks.length === 1 ? "" : "s"} connected`];
+  if (busy) parts.push(`${busy} working`);
+  if (needs) parts.push(`${needs} need${needs === 1 ? "s" : ""} you`);
+  return `${parts.join(" · ")}. Pick one to see what it's doing.`;
+}
+
+const HOME_RANK: Record<AgentTask["runState"], number> = {
+  blocked: 0, failed: 1, working: 2, starting: 3, waiting: 3, idle: 4, seen: 4, stopped: 5, unknown: 6, not_connected: 7,
+};
 
 function buildOverview(actions: ViewActions): ViewHost {
-  const ticker = new Ticker();
-  // Focus changes come from the wheel itself, so they skip the setFocus action's own blip; the detent tick is the sound.
-  const drum = buildDrum(ticker.el, (id) => State.setFocus(id), () => actions.blip());
-  const widgets = buildWidgets();
-  const el = h("div", { class: "view overview" }, drum.el, widgets.el);
+  // Sidebar, top to bottom as in HeyClicky's home: home button, search + new, agent faces, conversations, apps, account.
+  const homeBtn = h("button", { class: "home-home", type: "button", title: "Home", "aria-label": "Home", onclick: () => { actions.blip(); select(null); } }, svg(ICONS.house, 13));
+  const search = h("input", { class: "home-search-input", type: "text", placeholder: "Search", "aria-label": "Search agents" }) as HTMLInputElement;
+  const searchGroup = h("label", { class: "home-search" }, svg(ICONS.search, 11, { stroke: 2.2 }), search);
+  const newBtn = h("button", { class: "home-new", type: "button", title: "New message", "aria-label": "New message", onclick: () => {
+    actions.blip(); State.composeTo = null; actions.setView("prompt");
+  } }, svg(ICONS.plus, 12));
+  const avatars = h("div", { class: "home-avatars", role: "group", "aria-label": "Active agents" });
+  const rows = h("div", { class: "home-rows", role: "listbox", "aria-label": "Conversations" });
+  const apps = h("button", { class: "home-apps", type: "button", title: "Connected agent apps and their models", onclick: () => { actions.blip(); actions.setView("models"); } });
+  const acctAvatar = h("span", { class: "home-acct-avatar", text: "M" });
+  const acctStatus = h("span", { class: "home-acct-status" });
+  const account = h("div", { class: "home-acct" },
+    acctAvatar,
+    h("span", { class: "home-acct-text" }, h("span", { class: "home-acct-name", text: "M9R on this computer" }), acctStatus),
+    h("button", { class: "home-acct-gear", type: "button", title: "Settings", "aria-label": "Settings", onclick: () => { actions.blip(); actions.setView("settings"); } }, svg(ICONS.gearFill, 14)),
+  );
+  const side = h("aside", { class: "home-side" },
+    h("div", { class: "home-side-top" }, homeBtn),
+    h("div", { class: "home-search-row" }, searchGroup, newBtn),
+    avatars, rows,
+    h("div", { class: "home-apps-row" }, apps),
+    account,
+  );
+
+  // Main pane: the buddy peeking over the input pill, then the greeting and the hold-to-talk hint.
+  const closeBtn = h("button", { class: "home-close", type: "button", title: "Minimize", "aria-label": "Minimize pill", onclick: () => actions.collapse() }, svg(ICONS.xmark, 13));
+  const hello = h("div", { class: "home-hello" });
+  const summary = h("div", { class: "home-summary", text: HOLD_HINT });
+  const hero = h("div", { class: "home-hero", "aria-hidden": "true" }, buddy(PROVIDER_COLORS.codex, 138, { hero: true, seed: "m9r" }));
+  const inputPill = h("button", { class: "home-input-pill", type: "button", onclick: () => { actions.blip(); actions.setView("prompt"); } },
+    svg(ICONS.mic, 13), h("span", { text: "Hi, how can I help ^_^?" }));
+  const idle = h("div", { class: "home-idle" }, h("div", { class: "home-stage" }, hero, inputPill), hello, summary);
+
+  // Main pane: the selected agent's activity.
+  const dName = h("span", { class: "home-d-name" });
+  const dDot = h("span", { class: "home-d-dot" });
+  const dStatus = h("span", { class: "home-d-status" });
+  const dActions = h("div", { class: "home-d-actions" });
+  const dTask = h("div", { class: "home-d-task" });
+  const dFeed = h("div", { class: "home-d-feed" });
+  const detail = h("div", { class: "home-detail" },
+    h("div", { class: "home-d-head" }, dDot, dName, dStatus, h("div", { class: "grow" }), dActions),
+    dTask,
+    dFeed,
+  );
+  const main = h("section", { class: "home-main" }, idle, detail, closeBtn);
+  const el = h("div", { class: "view overview home" }, side, main);
+
+  let selectedId: string | null = null;
+  // When the pill last saw each agent's preview change: the thread carries no timestamps, so this is observation time.
+  const seen = new Map<string, { text: string; at: number }>();
+  let rowsKey = "";
+  let detailKey = "";
+
+  function lastSeen(task: AgentTask, text: string): number {
+    const prev = seen.get(task.id);
+    if (prev && prev.text === text) return prev.at;
+    const at = Date.now();
+    seen.set(task.id, { text, at });
+    return at;
+  }
+
+  function select(id: string | null) {
+    selectedId = id;
+    if (id) actions.setFocus(id);
+    else { rowsKey = ""; detailKey = ""; sync(); }
+  }
+
+  function renderSidebar() {
+    const needle = search.value.trim().toLowerCase();
+    const items = State.tasks.map((task) => {
+      const preview = agentPreview(task);
+      return { task, preview, at: lastSeen(task, preview), pending: State.approvals.filter((a) => a.agent === task.id).length };
+    });
+    items.sort((a, b) => (a.task.state === "approval" ? -1 : 0) - (b.task.state === "approval" ? -1 : 0)
+      || b.at - a.at || (HOME_RANK[a.task.runState] ?? 6) - (HOME_RANK[b.task.runState] ?? 6));
+    const shown = needle
+      ? items.filter((i) => `${displayName(i.task)} ${i.task.name} ${i.preview}`.toLowerCase().includes(needle))
+      : items;
+    const providers = connectedApps();
+    const conn = State.brokerConnection;
+    const firstApproval = State.approvals[0];
+    const key = JSON.stringify([selectedId, needle, items.map((i) => [i.task.id, i.task.color, i.task.state, i.preview, shortTime(i.at), i.pending]),
+      providers, conn, State.approvals.length, firstApproval?.id]);
+    if (key === rowsKey) return;
+    rowsKey = key;
+
+    avatars.replaceChildren(...items.map(({ task }) => {
+      const b = h("button", {
+        class: "home-avatar" + (task.id === selectedId ? " on" : ""), type: "button",
+        title: `${displayName(task)} · ${plainStatus(task).label}`, "aria-label": displayName(task),
+        onclick: () => select(task.id),
+      }, h("span", { class: "home-avatar-circle", style: `--tint:${task.color}` }, buddy(task.color, 40, { seed: task.id })),
+        h("span", { class: "home-avatar-label", text: displayName(task) }));
+      b.classList.toggle("live", plainStatus(task).live);
+      return b;
+    }));
+    avatars.hidden = items.length === 0;
+
+    // Pinned first row, HeyClicky's "Suggestions" slot: what is waiting on the owner, with its count.
+    const waiting = State.approvals.length;
+    const requests = needle ? null : h("button", {
+      class: "home-row home-row-requests", type: "button", role: "option", "aria-selected": "false",
+      "aria-label": waiting ? `Requests: ${waiting} waiting on you` : "Requests: nothing waiting",
+      onclick: () => { if (!waiting) return; actions.blip(); actions.setView("approval"); },
+    },
+      h("span", { class: "home-row-thumb home-row-spark" }, svg(ICONS.star, 13)),
+      h("span", { class: "home-row-body" },
+        h("span", { class: "home-row-head" },
+          h("span", { class: "home-row-name", text: "Requests" }),
+          waiting ? h("span", { class: "home-row-badge", text: String(waiting) }) : null,
+          h("span", { class: "home-row-time", text: waiting ? "now" : "" }),
+        ),
+        h("span", { class: "home-row-preview", text: firstApproval
+          ? approvalSentence(displayName(State.tasks.find((t) => t.id === firstApproval.agent) ?? { provider: "agent", name: firstApproval.agent }), firstApproval.title)
+          : "Nothing needs you right now." }),
+      ),
+    );
+
+    const agentRows = shown.map(({ task, preview, at, pending }) => {
+      const on = task.id === selectedId;
+      return h("button", {
+        class: "home-row" + (on ? " on" : ""), type: "button", role: "option", "aria-selected": on ? "true" : "false",
+        "aria-label": `${displayName(task)}: ${preview}`,
+        onclick: () => select(on ? null : task.id),
+      },
+        h("span", { class: "home-row-thumb", style: `--tint:${task.color}` }, buddy(task.color, 30, { seed: task.id })),
+        h("span", { class: "home-row-body" },
+          h("span", { class: "home-row-head" },
+            h("span", { class: "home-row-name", text: displayName(task) }),
+            pending ? h("span", { class: "home-row-badge", text: String(pending), title: `${pending} waiting on you` }) : null,
+            h("span", { class: "home-row-time", text: shortTime(at) }),
+          ),
+          h("span", { class: "home-row-preview", text: preview }),
+        ),
+      );
+    });
+    const empty = shown.length ? null : h("div", { class: "mp-empty" }, items.length
+      ? h("div", { class: "mp-empty-title", text: "No matches" })
+      : h("div", { class: "mp-empty-title", text: "No agents yet" }), items.length ? "Try a different name." : "Connected agents show up here.");
+    rows.replaceChildren(...([requests, ...agentRows, empty] as (HTMLElement | null)[]).filter((x): x is HTMLElement => !!x));
+
+    // Apps strip: the connected agent apps' own logos, then the count past four.
+    const shownApps = providers.slice(0, 4);
+    apps.replaceChildren(...[
+      ...shownApps.map((p) => h("span", { class: "home-app-icon" }, providerLogo(p, 13))),
+      providers.length > 4 ? h("span", { class: "home-apps-more", text: `+${providers.length - 4}` }) : null,
+      h("span", { class: "home-apps-label", text: providers.length === 1 ? "App" : "Apps" }),
+      svg(ICONS.plus, 10),
+    ].filter((x): x is HTMLElement | SVGSVGElement => !!x));
+    apps.hidden = false;
+
+    acctStatus.replaceChildren(h("span", { text: CONNECTION_LABEL[conn] }), h("i", { class: "home-acct-ring" }));
+    acctStatus.dataset.state = conn;
+  }
+
+  function renderDetail() {
+    const task = selectedId ? State.tasks.find((t) => t.id === selectedId) ?? null : null;
+    idle.hidden = !!task;
+    detail.hidden = !task;
+    if (!task) {
+      hello.textContent = greeting();
+      summary.textContent = State.tasks.length ? HOLD_HINT : teamSummary();
+      summary.title = teamSummary();
+      detailKey = "";
+      return;
+    }
+    const status = plainStatus(task);
+    const steps = task.steps.map((s) => plainStep(task, s)).filter((s, i, all) => s && all.indexOf(s) === i);
+    const messages = agentMessages(task);
+    const pending = State.approvals.filter((a) => a.agent === task.id);
+    const key = JSON.stringify([task.id, task.color, task.task, status, steps, messages.map((m) => [m.id, m.role, m.content]), pending.map((a) => a.id)]);
+    if (key === detailKey) return;
+    detailKey = key;
+
+    dDot.replaceChildren(dot(task.color, 9));
+    dName.textContent = displayName(task);
+    dStatus.textContent = status.label;
+    dStatus.style.setProperty("--tone", status.color);
+    dStatus.classList.toggle("live", status.live);
+    dTask.textContent = task.task ? plainStep(task, task.task) : "";
+    dTask.hidden = !task.task;
+
+    dActions.replaceChildren(...[
+      pending.length ? btn("Review", "primary", () => { actions.setFocus(task.id); actions.setView("approval"); }) : null,
+      btn("Message", pending.length ? "secondary" : "primary", () => {
+        actions.setFocus(task.id);
+        State.composeTo = [task.id];
+        actions.setView("prompt");
+      }),
+    ].filter((x): x is HTMLElement => !!x));
+
+    const feed: HTMLElement[] = [];
+    feed.push(h("div", { class: "home-d-kicker", text: "Activity" }));
+    if (steps.length) {
+      feed.push(h("ol", { class: "home-d-steps" }, ...steps.slice(-8).map((s, i, all) =>
+        h("li", { class: "home-d-step" + (i === all.length - 1 ? " now" : ""), text: s }))));
+    } else {
+      feed.push(h("div", { class: "home-d-empty", text: plainStep(task, "") }));
+    }
+    if (messages.length) {
+      feed.push(h("div", { class: "home-d-kicker", text: "Messages" }));
+      for (const m of messages.slice(-6)) {
+        const mine = m.role === "user";
+        feed.push(h("div", { class: "home-d-msg" + (mine ? " mine" : "") },
+          h("span", { class: "home-d-from", text: mine ? "You" : displayName(State.tasks.find((t) => t.name === m.from) ?? { provider: "agent", name: m.from ?? task.name }) }),
+          h("span", { class: "home-d-text", text: messageText(m) }),
+        ));
+      }
+    }
+    dFeed.replaceChildren(...feed);
+    dFeed.scrollTop = dFeed.scrollHeight;
+  }
+
+  function sync() {
+    if (selectedId && !State.tasks.some((t) => t.id === selectedId)) selectedId = null;
+    renderSidebar();
+    renderDetail();
+  }
+
+  search.addEventListener("input", () => { rowsKey = ""; renderSidebar(); });
+  search.addEventListener("pointerdown", () => actions.focusWindow?.(true));
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && search.value) { e.stopPropagation(); search.value = ""; rowsKey = ""; renderSidebar(); }
+  });
 
   return {
     el,
-    tick(nowMs: number) {
-      ticker.tick(nowMs);
+    sync,
+    activate() {
+      // Home always opens on the greeting; picking an agent is the owner's move.
+      selectedId = null;
+      search.value = "";
+      rowsKey = "";
+      detailKey = "";
     },
-    get animating() {
-      return ticker.animating;
-    },
-    sync() {
-      const task = State.focusTask;
-      ticker.sync(task ? { ...task, steps: task.steps.length ? task.steps.map((s) => plainStep(task, s)) : [plainStep(task, "")] } : null);
-      // Widgets take the right side only while they have something real to show; otherwise the drum keeps the width.
-      el.classList.toggle("with-widgets", widgets.sync());
-      drum.sync();
+    deactivate() {
+      if (document.activeElement === search) { search.blur(); actions.focusWindow?.(false); }
     },
   };
 }

@@ -119,7 +119,8 @@ export function botPosition(
       // Collapsed means solid black, nothing overlaid — no status mark, no provider logo.
       return { cx: 40, cy: 16, diameter: 20, opacity: 0 };
     case "expanded": {
-      if (view === "models" || view === "prompt" || view === "drop") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
+      // Home (overview) draws its own idle mark inside its main pane; the island's mark would sit on the sidebar.
+      if (view === "overview" || view === "models" || view === "prompt" || view === "drop") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
       const layout = VIEW_LAYOUTS[view];
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };
