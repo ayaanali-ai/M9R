@@ -1,0 +1,206 @@
+@import "./design-system.css";
+
+/* Settings window -- the same m9r.dev page as the memory screen: dark bezel,
+   paper desk, cream nav bar, one Haas headline, and the site's brushed retro
+   window holding the controls on a white pane. Choices are jelly pills (blue =
+   chosen, neutral = not), secondary actions are the window's own "OK" buttons. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: var(--ds-bezel);
+  overflow: hidden;
+}
+
+#settings-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 14px 18px 20px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- nav */
+
+.settings-nav { flex: none; }
+.settings-brand { color: var(--ds-nav-ink); }
+.settings-nav-label { display: inline-flex; align-items: center; gap: 6px; }
+.settings-nav-glyph { font-size: 15px; line-height: 1; }
+
+/* ---------------------------------------------------------------- hero */
+
+.settings-hero {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 20px 4px 18px;
+}
+
+.settings-title {
+  margin: 9px 0 0;
+  font-size: 33px;
+}
+
+.settings-lede {
+  margin: 8px 0 0;
+  max-width: 320px;
+  font: 17px/1.3 var(--ds-font-serif);
+  letter-spacing: -0.011em;
+  color: var(--ds-ink-muted);
+}
+
+/* ---------------------------------------------------------------- window */
+
+.settings-window {
+  flex: 1;
+  min-height: 180px;
+}
+
+.settings-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+}
+
+.settings-group { padding: 14px 16px 16px; }
+.settings-group + .settings-group { box-shadow: inset 0 1px rgba(0, 0, 0, 0.08); }
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-label {
+  margin: 0;
+  font: 400 21px/1.15 var(--ds-font-serif);
+  letter-spacing: -0.018em;
+  color: #000;
+}
+
+/* Scraps sit a little crooked, like the ones pinned around the site's hero. */
+.settings-value { transform: rotate(1.4deg); }
+.settings-group:nth-child(even) .settings-value { transform: rotate(-1.6deg); }
+
+.settings-note {
+  margin: 4px 0 0;
+  max-width: 330px;
+  font: 15px/1.3 var(--ds-font-serif);
+  color: var(--ds-ink-muted);
+}
+
+.settings-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 11px;
+}
+/* Pane-scale jelly pills: same recipe, sized down from the hero's .large pair. */
+.settings-choice { min-width: 56px; padding: 4px 13px 5px; font-size: 16px; line-height: 18px; }
+
+/* A dependent control row (speed under voice, tint under glow). */
+.settings-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px dashed rgba(0, 0, 0, 0.12);
+  transition: opacity 0.15s;
+}
+.settings-sub .settings-choices { margin-top: 0; }
+.settings-sub.is-muted { opacity: 0.45; }
+
+.settings-sublabel {
+  min-width: 38px;
+  font: 11px/16.5px var(--ds-font-pixel);
+  letter-spacing: -0.176px;
+  color: var(--ds-ink-status);
+}
+
+/* Color picker: the native input, dressed as the window's round chrome ring. */
+.settings-swatch {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 40px;
+  height: 23px;
+  border-radius: var(--ds-radius-pill);
+  background: linear-gradient(180deg, #fff 0%, #e7e7e7 42%, #fbfbfb 100%);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+.settings-color {
+  position: absolute;
+  inset: 3px;
+  width: calc(100% - 6px);
+  height: calc(100% - 6px);
+  padding: 0;
+  border: 0;
+  border-radius: var(--ds-radius-pill);
+  background: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.settings-color::-webkit-color-swatch-wrapper { padding: 0; }
+.settings-color::-webkit-color-swatch {
+  border: 0;
+  border-radius: var(--ds-radius-pill);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+.settings-color::-moz-color-swatch { border: 0; border-radius: var(--ds-radius-pill); }
+.settings-color:focus-visible { outline: 2px solid var(--ds-focus); outline-offset: 4px; }
+/* No custom tint: the swatch shows the per-status rainbow it falls back to. */
+.settings-swatch.is-auto::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: var(--ds-radius-pill);
+  background: linear-gradient(90deg, #7aa2f7, #34d399, #f5c451, #d97757);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+
+.settings-tint-name {
+  font: 11px/16.5px var(--ds-font-pixel);
+  letter-spacing: -0.176px;
+  color: #000;
+}
+
+/* A choice row with a trailing window button (Preview beside voice On/Off). */
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 11px;
+}
+.settings-row .settings-choices { margin-top: 0; }
+
+.settings-preview,
+.settings-reset { margin-left: auto; }
+
+@media (max-height: 520px) {
+  .settings-hero { padding: 16px 4px 12px; }
+  .settings-lede { display: none; }
+  .settings-window .ds-window-toolbar { display: none; }
+}
+
+@media (max-width: 380px) {
+  #settings-root { padding-inline: 14px; }
+  .settings-title { font-size: 27px; }
+  .settings-group { padding-inline: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-sub { transition: none; }
+}

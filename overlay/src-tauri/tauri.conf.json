@@ -79,6 +79,21 @@
         "visible": false
       },
       {
+        "label": "settings",
+        "title": "M9R Settings",
+        "url": "settings.html",
+        "width": 420,
+        "height": 600,
+        "minWidth": 340,
+        "minHeight": 440,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "visible": false
+      },
+      {
         "label": "app",
         "title": "M9R",
         "url": "app.html",
