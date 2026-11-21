@@ -32,6 +32,7 @@ import { prepareTaskStageNotice } from "./task-stage-notice";
 import { registerComputerUseTools } from "./computer-use-mcp";
 import { createWorkflowPreferenceLedger } from "./workflow-preferences";
 import { createObservationModalityLedger } from "./observation-modality-ledger";
+import { createMemoryLog, type MemoryScope } from "./memory-log";
 import type { MultiplayerA2ASendInput } from "./multiplayer-runtime";
 
 export interface McpServerDeps {
@@ -265,6 +266,7 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
   const pageNotes = deps.pageNotes ?? createPageNotesStore(deps.store.root);
   const workflowPreferences = createWorkflowPreferenceLedger(deps.store.root, deps.now ?? (() => new Date()));
   const observationModalityLedger = createObservationModalityLedger(deps.store.root, deps.now ?? (() => new Date()));
+  const memoryLog = createMemoryLog(deps.store.root, deps.now ?? (() => new Date()));
   // Whether this process was ever told anything connection-mode-shaped at startup. This stays a
   // static fact about how the process was launched (its env/deps genuinely never changes after
   // that) -- what changed is that it no longer freezes the *schema* or skips a fresh resolution
@@ -1616,6 +1618,38 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
       const result = pageNotes.exportMarkdown(room, sourceUrl);
       if (!result.ok) return { content: [{ type: "text" as const, text: result.error }], isError: true };
       return { content: [{ type: "text" as const, text: result.value }] };
+    },
+  );
+
+  server.registerTool(
+    "m9r_memory",
+    {
+      description: "Durable, shared cross-agent memory: short factual notes every M9R agent reads, like teammates with no walls between them. Not a chat log or scratch pad -- one short declarative sentence per entry (240 chars max), never raw transcripts, screenshots, or secrets. Use it for a stable preference you learned (\"user prefers terse commit messages\"), a workflow fact (\"deploys go to staging first\"), or anything worth every future run already knowing -- not for a one-off detail about the current task. Scope defaults to \"global\" (every agent sees it); use \"persona:<name>\" only for a note specific to one agent. Actions: add, list, remove.",
+      inputSchema: {
+        ...AUTH_FIELD,
+        action: z.enum(["add", "list", "remove"]),
+        text: z.string().min(1).max(240).optional().describe("For add only: one short, declarative sentence."),
+        scope: z.string().max(120).optional().describe('Defaults to "global". Use "persona:<name>" to scope a note to one specific agent.'),
+        id: z.string().min(1).optional().describe("For remove only: the entry id."),
+      },
+    },
+    async ({ token, action, text, scope, id }) => {
+      const identity = await requireIdentity(token);
+      const resolvedScope = (scope?.trim() || "global") as MemoryScope;
+      if (action === "add") {
+        if (!text?.trim()) return { content: [{ type: "text" as const, text: "For add, text is required." }], isError: true };
+        const entry = memoryLog.add(text, resolvedScope, identity.handle);
+        if (!entry) return { content: [{ type: "text" as const, text: `Could not save that note. scope must be "global" or "persona:<name>".` }], isError: true };
+        return { content: [{ type: "text" as const, text: `Saved ${entry.id} to ${entry.scope === "global" ? "shared global memory" : `scope "${entry.scope}"`}.` }] };
+      }
+      if (action === "remove") {
+        if (!id) return { content: [{ type: "text" as const, text: "For remove, id is required." }], isError: true };
+        return { content: [{ type: "text" as const, text: memoryLog.remove(id) ? `Removed ${id}.` : `No entry ${id} found; it may already be removed.` }] };
+      }
+      const entries = memoryLog.list(scope?.trim() as MemoryScope | undefined);
+      if (!entries.length) return { content: [{ type: "text" as const, text: scope ? `No memory entries for scope "${scope}".` : "No memory entries yet." }] };
+      const rendered = entries.map((e) => `- [${e.id}] (${e.scope}${e.author ? `, @${e.author}` : ""}, ${new Date(e.createdAt).toISOString()})\n  ${e.text}`).join("\n");
+      return { content: [{ type: "text" as const, text: rendered }] };
     },
   );
 

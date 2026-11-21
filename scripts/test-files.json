@@ -235,5 +235,6 @@
   "multiplayer-cursor-chatter.test.ts",
   "windows-desktop-stage.test.ts",
   "task-stage-actions.test.ts",
-  "memory-log.test.ts"
+  "memory-log.test.ts",
+  "memory-mcp.test.ts"
 ]
