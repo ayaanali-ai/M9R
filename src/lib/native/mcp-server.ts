@@ -1568,11 +1568,17 @@ export function createM9rMcpServer(deps: McpServerDeps): McpServer {
         && linkedOwner.receipt?.state !== "paused" && linkedOwner.receipt?.state !== "canceled" && linkedOwner.receipt?.state !== "failed") {
         ownerReminder = ` This resolves peer message ${taskId}, not owner task ${linkedOwner.id}. Continue any remaining owner requirements. Only once all are verified, report m9r_result with taskId ${linkedOwner.id}; otherwise preserve its incomplete outcome.`;
       }
+      // The one real automatic capture trigger: a completed task is the natural, bounded moment to
+      // ask "did you learn anything worth every future run already knowing" -- never a continuous
+      // scan, never forced, the agent still decides. Only on genuine completion, not every turn.
+      const memoryReminder = report.status === "completed"
+        ? " If you learned a stable fact worth every future agent already knowing (a preference, a workflow, something to never redo) -- not a detail specific to this one task -- save it with m9r_memory."
+        : "";
       return { content: [{ type: "text", text: report.status === "incomplete"
         ? `Recorded incomplete outcome and preserved remaining work for an M9R continuation. The task is not marked completed.${inRoom(identity) ? " M9R will deliver the reply to the sender's room." : (answerText || " The sender can retrieve the blocker with m9r_inbox.")}`
         : inRoom(identity)
-          ? `Recorded result. M9R will deliver it to the sender's room.${answerText}`
-          : `Recorded result.${answerText || " The sending session can retrieve it with m9r_inbox."}${ownerReminder}` }] };
+          ? `Recorded result. M9R will deliver it to the sender's room.${answerText}${memoryReminder}`
+          : `Recorded result.${answerText || " The sending session can retrieve it with m9r_inbox."}${ownerReminder}${memoryReminder}` }] };
     },
   );
 

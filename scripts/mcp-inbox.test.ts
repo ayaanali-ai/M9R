@@ -406,6 +406,21 @@ test("a serial provider session reports the newest delivered result when an olde
   } finally { t.done(); }
 });
 
+test("m9r_result nudges toward m9r_memory only on a genuine completion, not on incomplete work", async () => {
+  const t = setup();
+  try {
+    const incomplete = t.store.addTask({ from: "you", to: "codex", goal: "Blocked work", origin: "human_typed", idempotencyKey: "incomplete-nudge", targetSession: "x1" }).task;
+    t.store.markDelivered([incomplete.id], "x1");
+    const incompleteReply = await t.call("m9r_result", { token: t.codex, taskId: incomplete.id, summary: "Blocked on an owner decision.", completion: { status: "incomplete", remainingWork: ["needs owner input"] } });
+    assert.doesNotMatch(incompleteReply, /m9r_memory/);
+
+    const completed = t.store.addTask({ from: "you", to: "codex", goal: "Finished work", origin: "human_typed", idempotencyKey: "completed-nudge", targetSession: "x1" }).task;
+    t.store.markDelivered([completed.id], "x1");
+    const completedReply = await t.call("m9r_result", { token: t.codex, taskId: completed.id, summary: "Done.", completion: { status: "completed", remainingWork: [] } });
+    assert.match(completedReply, /m9r_memory/);
+  } finally { t.done(); }
+});
+
 async function connectMcp(store: ReturnType<typeof createLocalStore>, name: string) {
   const server = createM9rMcpServer({ store });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
