@@ -64,6 +64,21 @@
         "visible": false
       },
       {
+        "label": "memory",
+        "title": "M9R Memory",
+        "url": "memory.html",
+        "width": 420,
+        "height": 560,
+        "minWidth": 340,
+        "minHeight": 400,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "visible": false
+      },
+      {
         "label": "app",
         "title": "M9R",
         "url": "app.html",

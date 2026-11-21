@@ -22,6 +22,7 @@ export default defineConfig({
         app: resolve(projectRoot, "app.html"),
         screenGlow: resolve(projectRoot, "edge-glow.html"),
         chatter: resolve(projectRoot, "chatter.html"),
+        memory: resolve(projectRoot, "memory.html"),
       },
     },
   },
