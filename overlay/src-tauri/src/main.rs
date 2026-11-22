@@ -884,6 +884,16 @@ fn parse_mentions(text: &str) -> (Vec<String>, String) {
     (handles, kept.join(" "))
 }
 
+/// Checks for a signed, newer M9R release. Never applies anything -- this only answers the
+/// pill's "Update available" button with a verified version comparison (see engine-update-core.ts).
+#[tauri::command]
+async fn check_for_update() -> Result<String, String> {
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["update", "check"]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Saves a fact or decision to the shared project memory agents read at session start (`m9r note`).
 #[tauri::command]
 async fn save_memory(text: String) -> Result<String, String> {
@@ -1325,7 +1335,7 @@ fn main() {
         // merged-feed, provider-session linking, or compatibility decision
         // commands to the production window; those paths could resurrect
         // historical provider/session state after a restart.
-        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, set_owner_work_mode, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings, read_screen_glow, set_screen_glow])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, set_owner_work_mode, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings, read_screen_glow, set_screen_glow, check_for_update])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.

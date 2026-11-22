@@ -29,6 +29,9 @@
 # misc
 .DS_Store
 *.pem
+# The update-manifest VERIFICATION key is public by design and must ship/commit;
+# only this one file is exempted. Never add a similar exception for a private key.
+!release-assets/update-public-key.pem
 
 # debug
 npm-debug.log*

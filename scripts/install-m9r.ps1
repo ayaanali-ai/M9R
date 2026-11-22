@@ -56,6 +56,7 @@ $checksumName = "$assetName.sha256"
 $policyName = 'm9r-accepted-runtime.json'
 $releaseTagPrefix = 'm9r-engine-v'
 $script:TrustedRuntimePolicyPath = $null
+$script:ReleaseTag = $null
 $script:CandidateReceipt = $null
 $script:VerifiedCandidateReceiptPath = $null
 $script:PackageSha256 = $null
@@ -131,6 +132,7 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
                 }
                 Invoke-WebRequest -Uri $assets.Policy.browser_download_url -OutFile $policyPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
                 $script:TrustedRuntimePolicyPath = $policyPath
+                $script:ReleaseTag = $assets.Release.tag_name
             } else {
                 $script:TrustedRuntimePolicyPath = $localPolicy
             }
@@ -150,6 +152,7 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
         Invoke-WebRequest -Uri $assets.Checksum.browser_download_url -OutFile $shaPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
         Invoke-WebRequest -Uri $assets.Policy.browser_download_url -OutFile $policyPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
         $script:TrustedRuntimePolicyPath = $policyPath
+        $script:ReleaseTag = $assets.Release.tag_name
     }
 
     if (-not (Test-Path -LiteralPath $shaPath -PathType Leaf)) { throw "Checksum sidecar is missing: $shaPath" }
@@ -181,7 +184,7 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt', 'update-public-key.pem', 'VERSION')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }
@@ -815,6 +818,21 @@ try {
     $brokerResumeEngine = $installedEngine
     Install-ManagedWebBroker $packageBroker
     Restore-ManagedBrokerAutoStart $brokerTaskState
+    if (-not $AllowLocalCandidate -and $script:ReleaseTag) {
+        $installedVersion = (Get-Content -LiteralPath (Join-Path $payload 'VERSION') -Raw).Trim()
+        $updatePublicKeyPem = Get-Content -LiteralPath (Join-Path $payload 'update-public-key.pem') -Raw
+        $updateManifestBase = "https://github.com/$repo/releases/download/$($script:ReleaseTag)/m9r-update-manifest.json"
+        $updateConfig = [ordered]@{
+            schemaVersion  = 1
+            currentVersion = $installedVersion
+            source         = [ordered]@{
+                manifestUrl  = $updateManifestBase
+                signatureUrl = "$updateManifestBase.sig"
+                publicKeyPem = $updatePublicKeyPem
+            }
+        }
+        ($updateConfig | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $env:M9R_HOME 'update-config.json') -Encoding UTF8
+    }
     Write-Host ''
     Write-Host 'M9R setup finished. The broker-owned provider processes are ready.' -ForegroundColor Green
     Write-Host "To undo the managed setup later: `"$installedEngine`" uninstall"
