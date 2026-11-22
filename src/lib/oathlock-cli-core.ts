@@ -1542,8 +1542,8 @@ async function cmdConnect(deps: CliDeps, parsed: ParsedArgs): Promise<number> {
       deps.err(`Local web broker could not be installed: ${error instanceof Error ? error.message : "unknown error"}. The approved agent connections remain saved.`);
     }
   }
-  if (!startupApproved) deps.out("Local broker login startup skipped. Browser actions require explicit web setup.");
-  deps.out("Browser extension next step: npx m9r-cli web setup. Follow its instructions to install the unpacked extension in Chrome.");
+  if (!startupApproved) deps.out("Local broker login startup skipped. To enable it later on Windows, run npx m9r-cli web setup --broker-only.");
+  deps.out("Browser-extension transport is retired. Browser and desktop work use M9R's native desktop controls; no extension install is required.");
   // Only human-approved connections reach this point. Machine sync remains
   // disabled when secure local storage is unavailable or minting fails.
   if (deps.writeSecretFile) {
@@ -3349,6 +3349,8 @@ Usage:
   m9r-cli update check                    Check the signed M9R runtime manifest without applying an update
   m9r-cli uninstall [--yes] [--purge]       Remove everything setup added and restore your files exactly
   m9r-cli tasks                             List tasks and what is waiting for your approval
+  m9r-cli task-log <task id>                Export retained task evidence as JSON (owner terminal only)
+  m9r-cli observation-stats                 Show real tree-vs-screenshot counts for desktop observations (owner terminal only)
   m9r-cli approvals purge [--apply]         Dry-run stale approvals; apply expires them but keeps history
   m9r-cli feed [--watch]                    Write the native overlay feed (~/.m9r/feed.json); web activity stays separate
   m9r-cli dismiss <task id>...              Clear items from the overlay list (changes nothing else)
@@ -3482,9 +3484,13 @@ export async function run(argv: string[], deps: CliDeps): Promise<number> {
     case "pill-decide":
     case "pill-note":
     case "pill-model":
+    case "pill-work-mode":
     case "note":
+    case "latency":
     case "cloud":
     case "tasks":
+    case "task-log":
+    case "observation-stats":
     case "feed":
     case "dismiss":
     case "sessions":

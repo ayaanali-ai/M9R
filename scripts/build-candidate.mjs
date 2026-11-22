@@ -8,6 +8,69 @@ import { spawnSync } from "node:child_process";
 import { verifyRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Flow guard 3A: build only from the one designated folder, only on the
+// designated trunk branch, only with a clean tree -- no exceptions. See
+// BUILD_INSTALL_FLOW.md. Set CI=1 to allow a CI checkout's own working
+// directory instead of the one hardcoded developer path.
+const CANONICAL_ROOT = "C:\\RunLeak\\runleak";
+if (!process.env.CI && resolve(root).toLowerCase() !== CANONICAL_ROOT.toLowerCase()) {
+  throw new Error(`Refusing to build from ${root}; the designated folder is ${CANONICAL_ROOT} (see BUILD_INSTALL_FLOW.md, flow guard 3A).`);
+}
+{
+  const branchResult = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, encoding: "utf8" });
+  if (branchResult.error || branchResult.status !== 0) throw new Error("Cannot determine the current branch; refusing to build.");
+  const currentBranch = String(branchResult.stdout).trim();
+  const trunkBranch = readFileSync(join(root, "scripts", "trunk-branch.txt"), "utf8").trim();
+  if (!trunkBranch) throw new Error("scripts/trunk-branch.txt is empty; refusing to build without a designated trunk branch.");
+  if (currentBranch !== trunkBranch) {
+    throw new Error(`Refusing to build from branch "${currentBranch}"; the designated trunk branch is "${trunkBranch}" (update scripts/trunk-branch.txt to change this, see BUILD_INSTALL_FLOW.md flow guard 3A/2B).`);
+  }
+  const dirtyCheck = spawnSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8", maxBuffer: 1024 * 1024 });
+  if (dirtyCheck.error || dirtyCheck.status !== 0) throw new Error("Cannot determine whether the working tree is clean; refusing to build.");
+  const dirtyLines = String(dirtyCheck.stdout).split(/\r?\n/).filter(Boolean);
+  // engine/candidates/ holds this very script's own prior outputs, which are
+  // never source; everything else (including the rest of engine/) is a real
+  // dirty-build failure with no exceptions, per flow guard 3A.
+  const realDirtyLines = dirtyLines.filter((line) => !/^(?:\?\?|[ MARCD]{2})\s+engine\/candidates\//.test(line));
+  if (realDirtyLines.length > 0) {
+    throw new Error(`Refusing to build from a dirty working tree (flow guard 3A). Uncommitted/untracked paths:\n${realDirtyLines.join("\n")}`);
+  }
+}
+
+// Flow guard 3B: a project-wide typecheck, before any compile step. 3A only proves the tree is clean and on
+// trunk -- it says nothing about whether the source itself is valid. A real regression shipped past this gap
+// on 2026-11-14: a reference to a variable out of scope (`deps` used inside a function that does not close
+// over it) compiled fine under the bundler (no cross-file type resolution) and only surfaced live, after
+// install, as "Blocked: ... the native desktop helper is unavailable (deps is not defined)". `tsc --noEmit`
+// catches that class of error in seconds; nothing before this guard ever ran it as part of the build.
+{
+  // shell: true -- on Windows, npx resolves to npx.cmd, which spawnSync cannot exec directly without a shell
+  // (confirmed live: "spawnSync npx ENOENT" on the very first run of this guard). Matches build-engine.mjs's
+  // existing `spawnSync("npm", ..., { shell: true })` for the identical reason.
+  const typecheck = spawnSync("npx", ["tsc", "--noEmit", "-p", "."], { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, shell: true });
+  if (typecheck.error) throw new Error(`Could not run the project typecheck (flow guard 3B): ${typecheck.error.message}`);
+  if (typecheck.status !== 0) {
+    throw new Error(`Refusing to build: the project does not typecheck (flow guard 3B).\n${typecheck.stdout}${typecheck.stderr}`);
+  }
+}
+
+// Flow guard 3C: the real behavioral test suite, immediately after typechecking and before any
+// compile step. 3A/3B prove the tree is clean and the source typechecks -- neither proves the
+// source actually behaves correctly. Before this guard, a type-correct behavioral regression
+// could ship through this exact flow with nothing to catch it (confirmed gap, 2026-11-14 audit).
+// Uses the same aggregate "all" suite `npm test` runs -- it deliberately excludes real-desktop-
+// side-effect tests (background-input-phase0*, falsifying-test-*, native-same-window-streams),
+// so this gate never kills a real window or touches owner state as a side effect of a build.
+{
+  const tests = spawnSync(process.execPath, [join(root, "scripts", "run-test-suite.mjs"), "all"],
+    { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 600_000 });
+  if (tests.error) throw new Error(`Could not run the behavioral test suite (flow guard 3C): ${tests.error.message}`);
+  if (tests.status !== 0) {
+    throw new Error(`Refusing to build: the behavioral test suite failed (flow guard 3C).\n${tests.stdout}${tests.stderr}`);
+  }
+}
+
 const engineDir = join(root, "engine");
 const candidatesRoot = resolve(engineDir, "candidates");
 const resumeIndex = process.argv.indexOf("--resume");
@@ -35,7 +98,7 @@ if (resumePath) {
     throw new Error("This candidate predates the accepted-live-pill build receipt and cannot be resumed. Create a new candidate; the old directory was left untouched.");
   }
   const priorBuildReceipt = JSON.parse(readFileSync(buildReceiptPath, "utf8"));
-  if (priorBuildReceipt.schemaVersion !== 1 || priorBuildReceipt.buildMode !== "accepted-live-overlay"
+  if (priorBuildReceipt.schemaVersion !== 1 || priorBuildReceipt.buildMode !== "pill-built-from-source"
     || priorBuildReceipt.runtimeBuildId !== priorManifest.buildId
     || priorBuildReceipt.sourceCommit !== sourceCommit
     || priorBuildReceipt.pillSha256 !== priorManifest.artifacts["m9r-overlay.exe"]) {
@@ -71,7 +134,6 @@ function runNodeScript(script, env) {
 }
 
 if (!resumePath) {
-  runNodeScript("build-cli.mjs", { M9R_CLI_OUTPUT_DIR: cliOutput });
   runNodeScript("build-engine.mjs", {
     M9R_CLI_OUTPUT_DIR: cliOutput,
     M9R_ENGINE_OUTPUT_DIR: runtimeOutput,
@@ -80,21 +142,19 @@ if (!resumePath) {
 
 const runtimeIdentity = verifyRuntimeBuildManifest(runtimeOutput, { exact: true });
 const pillSha256 = runtimeIdentity.artifacts["m9r-overlay.exe"];
-const acceptedPath = join(root, "release-assets", "accepted-runtime.json");
-const accepted = JSON.parse(readFileSync(acceptedPath, "utf8"));
+// Flow guard 4A: the pill was just built from overlay/ source by build-engine.mjs,
+// in this same run, with no separate "accepted" value to compare against -- a
+// fresh pill build IS the candidate's pill, unconditionally.
 if (!/^[a-f0-9]{64}$/.test(pillSha256 ?? "") || !existsSync(join(runtimeOutput, "m9r-overlay.exe"))) {
-  throw new Error("Candidate runtime does not contain the owner-accepted live pill.");
+  throw new Error("Candidate runtime does not contain a built pill.");
 }
 if (createHash("sha256").update(readFileSync(join(runtimeOutput, "m9r-overlay.exe"))).digest("hex") !== pillSha256) {
   throw new Error("Candidate runtime pill hash does not match its complete runtime manifest.");
 }
-if (pillSha256 !== accepted.artifacts?.["m9r-overlay.exe"]) {
-  throw new Error("Candidate runtime pill differs from the owner-accepted live pill; refusing to package it.");
-}
 if (!resumePath) {
   const buildReceipt = {
     schemaVersion: 1,
-    buildMode: "accepted-live-overlay",
+    buildMode: "pill-built-from-source",
     candidateId,
     sourceCommit,
     runtimeBuildId: runtimeIdentity.buildId,
@@ -125,7 +185,7 @@ if (!new RegExp(`^${zipHash}\\s+\\*?m9r-engine-windows-x64\\.zip$`, "i").test(si
 }
 const receipt = {
   schemaVersion: 1,
-  buildMode: "accepted-live-overlay",
+  buildMode: "pill-built-from-source",
   candidateId,
   sourceCommit,
   runtimeBuildId: runtimeIdentity.buildId,

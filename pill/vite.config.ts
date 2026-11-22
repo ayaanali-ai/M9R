@@ -20,6 +20,10 @@ export default defineConfig({
       input: {
         pill: resolve(projectRoot, "index.html"),
         app: resolve(projectRoot, "app.html"),
+        screenGlow: resolve(projectRoot, "edge-glow.html"),
+        chatter: resolve(projectRoot, "chatter.html"),
+        memory: resolve(projectRoot, "memory.html"),
+        settings: resolve(projectRoot, "settings.html"),
       },
     },
   },

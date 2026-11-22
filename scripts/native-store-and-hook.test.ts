@@ -100,6 +100,52 @@ test("state survives a new store instance on the same folder, cursors are per se
   done();
 });
 
+test("orphaned local snapshots merge sibling task updates before a later write", () => {
+  const { root, store, done } = tempStore();
+  store.addTask(task({ idempotencyKey: "snapshot-base" }));
+  const statePath = join(root, "state.json");
+  const base = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+  const taskA = structuredClone(base);
+  const taskAList = taskA.tasks as Array<Record<string, unknown>>;
+  const siblingTask = structuredClone(taskAList[0]!);
+  siblingTask.id = "T2";
+  siblingTask.seq = 2;
+  siblingTask.idempotencyKey = "snapshot-pending-task";
+  siblingTask.goal = "preserve the accepted task";
+  taskAList.push(siblingTask);
+  taskA.nextTaskNo = Number(taskA.nextTaskNo) + 1;
+  taskA.events = [...(taskA.events as unknown[]), {
+    at: "2026-11-19T12:00:00.000Z", kind: "task.created", taskId: "T2", text: "preserve the accepted task",
+  }];
+  taskA.rules = [{ id: "R1", from: "codex", to: "claude", createdAt: "2026-11-19T12:00:00.000Z", expiresAt: "2026-11-20T12:00:00.000Z" }];
+  writeFileSync(join(root, "state.json.tmp-legacy-older"), JSON.stringify(taskA), "utf8");
+
+  const cancellation = structuredClone(base);
+  const canceledTask = (cancellation.tasks as Array<Record<string, unknown>>)[0]!;
+  canceledTask.receipt = { ...(canceledTask.receipt as Record<string, unknown>), state: "canceled", updatedAt: "2026-11-19T12:00:01.000Z" };
+  cancellation.events = [...(cancellation.events as unknown[]), {
+    at: "2026-11-19T12:00:01.000Z", kind: "task.canceled", taskId: canceledTask.id, text: "preserve the later cancellation",
+  }];
+  writeFileSync(join(root, "state.json.tmp-legacy-newer"), JSON.stringify(cancellation), "utf8");
+  const truncatedPath = join(root, "state.json.tmp-interrupted-write");
+  writeFileSync(truncatedPath, "{ interrupted", "utf8");
+
+  const afterRecovery = store.addTask(task({ idempotencyKey: "snapshot-after-recovery" }));
+  const saved = JSON.parse(readFileSync(statePath, "utf8")) as {
+    events: Array<{ text: string }>;
+    rules: unknown[];
+    tasks: Array<{ id: string; goal: string; receipt?: { state?: string } }>;
+  };
+  assert.equal(afterRecovery.task.id, "T3");
+  assert.equal(saved.tasks.find((savedTask) => savedTask.id === "T2")?.goal, "preserve the accepted task");
+  assert.equal(saved.tasks.find((savedTask) => savedTask.id === "T1")?.receipt?.state, "canceled");
+  assert.ok(saved.events.some((event) => event.text === "preserve the accepted task"));
+  assert.ok(saved.events.some((event) => event.text === "preserve the later cancellation"));
+  assert.equal(saved.rules.length, 0, "a later snapshot remains authoritative for revocable authorization state");
+  assert.equal(readFileSync(truncatedPath, "utf8"), "{ interrupted", "unreadable recovery evidence is preserved for diagnosis");
+  done();
+});
+
 test("an untargeted task is claimed by one Claude session and cannot be answered from a different session", () => {
   const { store, done } = tempStore();
   const created = store.addTask({ from: "codex", to: "claude", goal: "check the build", origin: "human_typed", idempotencyKey: "k1" });
@@ -476,7 +522,7 @@ test("the prompt the broker builds for a web-room agent never becomes tasks for 
   store.registerEndpoint({ provider: "opencode" });
   const prompt = `${CODEX_WEB_PREFACE}
 
-${webAgentPrompt("codex", "tok_test", ["claude", "opencode"], "project-x")}
+${webAgentPrompt("codex", ["claude", "opencode"], "project-x")}
 
 The owner says:
 read the page`;
@@ -488,7 +534,7 @@ read the page`;
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "w1b", cwd: "/repo", prompt: resumePrompt }, ctx(store, "codex"));
   assert.equal(store.tasksFor("claude").length, 0, "a resumed worker's short prompt is machine-written too");
   assert.equal(store.tasksFor("opencode").length, 0);
-  assert.equal(isBrokerAgentPrompt(webAgentPrompt("claude", "tok", ["codex"])), true, "the bare agent prompt (no Codex preface) is recognised by its header");
+  assert.equal(isBrokerAgentPrompt(webAgentPrompt("claude", ["codex"])), true, "the bare agent prompt (no Codex preface) is recognised by its header");
   assert.equal(isBrokerAgentPrompt("@claude please look at the relay bug"), false, "a person's message is not");
   // A person typing the same handles still routes normally.
   handleHookEvent({ hook_event_name: "UserPromptSubmit", session_id: "w2", cwd: "/repo", prompt: "@claude and @opencode please compare notes" }, ctx(store, "codex"));

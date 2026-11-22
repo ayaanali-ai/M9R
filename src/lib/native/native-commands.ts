@@ -31,10 +31,10 @@ import type { DeliveryDeps } from "./codex-delivery";
 import { renameStateFile } from "./atomic-file";
 import { DEFAULT_CLOUD_URL, clearCloudConfig, cloudUrlProblem, loadCloudConfig, pullCloudNotes, pushCloudNote, saveCloudConfig } from "./cloud-memory";
 import { requestOwnerPipe } from "./owner-pipe";
-import { ownerPipePath } from "./web-broker-paths";
+import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { canQueue, isWindowsSystemCwd, normCwd } from "./codex-delivery-core";
-import { isHumanContext, isProtectedAction } from "./approval-core";
-import { runAllow, runDecision, runLink, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTasks, runUnlink } from "./approval-commands";
+import { isAgentContext, isHumanContext, isProtectedAction } from "./approval-core";
+import { runAllow, runDecision, runLink, runObservationStats, runPurgeStaleApprovals, runRevoke, runRules, runSessions, runSessionsJson, runTaskLog, runTasks, runUnlink } from "./approval-commands";
 import { acquireFeedLock, feedPath, runFeed } from "./feed-writer";
 import { USER_STEPS } from "./onboarding-steps";
 import { readRuntimeBuildId, readRuntimeBuildIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
@@ -719,7 +719,19 @@ function printOpenSteps(io: NativeIo): void {
 export async function runUninstall(io: NativeIo, flags: { yes?: boolean; purge?: boolean }): Promise<number> {
   const p = nativePaths(io);
   const manifest = readManifest(p.manifest);
-  if (!manifest || manifest.entries.length === 0) { io.out("Nothing to uninstall: M9R has not set anything up here."); return 0; }
+  // A standalone runtime install can legitimately have no profile/config
+  // entries: the installer owns only the engine image (and possibly its
+  // autostart/broker records). Treat the runtime manifest as setup state too;
+  // otherwise uninstall would report success while leaving m9r-engine.exe
+  // and all of its companions in place.
+  const hasManagedState = Boolean(manifest && (
+    manifest.entries.length > 0
+    || (manifest.runtimeFiles?.length ?? 0) > 0
+    || manifest.autostart === true
+    || manifest.brokerAutostart === true
+    || manifest.activeRuntime
+  ));
+  if (!manifest || !hasManagedState) { io.out("Nothing to uninstall: M9R has not set anything up here."); return 0; }
   io.out("M9R uninstall will:");
   for (const e of manifest.entries) io.out(`  - ${e.existedBefore ? "restore or clean" : "remove"} ${e.path}`);
   if (flags.purge) io.out(`  - delete the local M9R data in ${p.m9r}`);
@@ -880,8 +892,16 @@ export async function runSend(io: NativeIo, input: { to: string; text: string; f
 type DesktopPillOwnerResponse = { ok: boolean; error?: string };
 
 async function runDesktopPillOwnerRequest(io: NativeIo, path: string, body: Record<string, unknown>, label: string): Promise<number> {
+  let ownerKey: string;
+  try {
+    ownerKey = readFileSync(brokerKeyPath(nativePaths(io).m9r), "utf8").trim();
+    if (!ownerKey) throw new Error("missing owner credential");
+  } catch {
+    io.err("The desktop pill owner credential is unavailable; no owner mutation was sent.");
+    return 1;
+  }
   const result = await requestOwnerPipe<DesktopPillOwnerResponse>(ownerPipePath(nativePaths(io).m9r), {
-    method: "POST", path, body,
+    method: "POST", path, body, ownerKey,
   }, 15_000);
   if (!result) {
     io.err(`The M9R owner broker did not answer the desktop pill ${label}; no browser or inbox fallback was used.`);
@@ -978,6 +998,23 @@ export function printNativeStatus(io: NativeIo): void {
  * Saves a fact or decision to the shared project memory that every agent reads at session start (the same store `m9r_note`
  * writes). The room is the folder the broker was set up for, so a note saved from the desktop pill lands where the agents look.
  */
+export async function runLatency(io: NativeIo): Promise<number> {
+  const root = nativePaths(io).m9r;
+  const response = await requestOwnerPipe<{ ok?: boolean; summary?: { sampleCount: number; phases: Record<string, { count: number; avgMs: number; maxMs: number; budgetMs: number; exceededCount: number }> }; error?: string }>(
+    ownerPipePath(root), { method: "GET", path: "/web/diagnostics/latency" }, 2_000);
+  if (!response || !response.ok || !response.summary) {
+    io.err(response?.error ?? "Could not reach the M9R broker for latency diagnostics.");
+    return 1;
+  }
+  const { sampleCount, phases } = response.summary;
+  if (sampleCount === 0) { io.out("No computer-use actions recorded yet in this broker run."); return 0; }
+  io.out(`Computer-use latency over ${sampleCount} recorded action(s):`);
+  for (const [phase, stats] of Object.entries(phases)) {
+    io.out(`  ${phase}: avg ${stats.avgMs}ms, max ${stats.maxMs}ms (budget ${stats.budgetMs}ms), exceeded ${stats.exceededCount}/${stats.count}`);
+  }
+  return 0;
+}
+
 export async function runNote(io: NativeIo, text: string): Promise<number> {
   const note = text.trim();
   if (!note) { io.err("Say what to remember: m9r note \"the staging URL is ...\""); return 1; }
@@ -1063,11 +1100,18 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   }
   if (command === "uninstall") return runUninstall(io, { yes: has("--yes", "-y"), purge: has("--purge") });
   if (command === "note") return runNote(io, positionals.join(" "));
+  if (command === "latency") return runLatency(io);
   if (command === "cloud") return runCloud(io, positionals, value("--url"));
   if (command === "send") return runSend(io, { to: positionals[0] ?? "", text: positionals.slice(1).join(" "), from: value("--from"), key: value("--key"), session: value("--session") });
   if (command === "pill-send") return runPillSend(io, rest.join(" "));
   if (command === "pill-decide") return runPillDecision(io, rest[0] ?? "", rest[1] ?? "");
   if (command === "pill-note") return runPillNote(io, rest.join(" "));
+  if (command === "pill-work-mode") {
+    if (isAgentContext(io.env)) { io.err("Only the owner can change the work mode."); return 1; }
+    const mode = positionals[0];
+    if (mode !== "working" && mode !== "agents-free") { io.err("Choose working or agents-free."); return 1; }
+    return runDesktopPillOwnerRequest(io, "/web/ui/work-mode", { mode }, "work mode");
+  }
   if (command === "pill-model") return runPillModel(io, positionals[0] ?? "", positionals[1], positionals[2]);
   const root = nativePaths(io).m9r;
   if (command === "feed") {
@@ -1119,6 +1163,8 @@ export async function runNativeCommand(command: string, rest: string[], io: Nati
   }
   if (command === "dismiss") { const n = createLocalStore(root).dismiss(positionals.map((p) => p.toUpperCase())); io.out(n ? `Cleared ${n} from the overlay list.` : "Nothing to clear."); return 0; }
   if (command === "tasks") return runTasks(io, root);
+  if (command === "task-log") return runTaskLog(io, root, positionals[0]);
+  if (command === "observation-stats") return runObservationStats(io, root);
   if (command === "sessions") return runSessions(io, root, positionals[0]);
   if (command === "sessions-json") return runSessionsJson(io, root, positionals[0]);
   if (command === "approvals" && positionals[0] === "purge") return runPurgeStaleApprovals(io, root, has("--apply"));

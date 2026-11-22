@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createRuntimeBuildInfo, readRuntimeBuildIdentity } from "../src/lib/native/runtime-build-identity";
+import { calculateRuntimeBuildId, createRuntimeBuildInfo, readRuntimeBuildIdentity } from "../src/lib/native/runtime-build-identity";
 import { writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
 
 test("runtime identity verifies the running executable against the adjacent build manifest", () => {
@@ -22,6 +22,21 @@ test("runtime identity verifies the running executable against the adjacent buil
     assert.equal(identity.actualSha256, digest);
     assert.match(identity.buildId ?? "", /^[a-f0-9]{64}$/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("runtime build identity is stable when SEA staging changes executable bytes", () => {
+  const source = { sourceCommit: "a".repeat(40), sourceDirty: false };
+  const first = calculateRuntimeBuildId({
+    "m9r-engine.exe": "1".repeat(64),
+    "m9r-web-broker.exe": "2".repeat(64),
+    "m9r-overlay.exe": "3".repeat(64),
+  }, source);
+  const rebuilt = calculateRuntimeBuildId({
+    "m9r-engine.exe": "4".repeat(64),
+    "m9r-web-broker.exe": "5".repeat(64),
+    "m9r-overlay.exe": "3".repeat(64),
+  }, source);
+  assert.equal(first, rebuilt);
 });
 
 test("runtime identity detects a stale or replaced executable without declaring the broker healthy", () => {

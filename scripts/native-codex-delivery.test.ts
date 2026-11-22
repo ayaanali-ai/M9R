@@ -461,7 +461,7 @@ test("answer push refuses a same-id Codex session that is ambiguous across folde
   store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/one" });
   store.registerEndpoint({ provider: "codex", sessionId: A, cwd: "C:/two" });
   const task = store.addTask({ from: "codex", to: "claude", goal: "review", origin: "human_typed", idempotencyKey: "same-id-answer", fromSession: A }).task;
-  store.setResult(task.id, "done");
+  store.setResult(task.id, "done", { status: "completed", remainingWork: [] });
   const deps = fakeDeps();
   assert.deepEqual(await pushAnswerToCodex(store, task.id, deps), { state: "failed", reason: "the originating Codex session is ambiguous; no answer was pushed" });
   assert.equal(deps.calls.length, 0);

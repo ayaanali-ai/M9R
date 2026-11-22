@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { supabase } from "@/lib/supabase";
-import { requireStripe, intervalForPriceId } from "@/lib/stripe";
+import { requireStripe, cohortForPriceId } from "@/lib/stripe";
 
 export const dynamic = "force-dynamic";
 
@@ -74,7 +74,7 @@ async function userIdForSubscription(subscriptionId: string): Promise<string | n
 async function upsertSubscription(userId: string, customerId: string, subscription: Stripe.Subscription): Promise<void> {
   if (!supabase) return;
   const priceId = subscription.items.data[0]?.price?.id ?? "";
-  const tier = intervalForPriceId(priceId);
+  const tier = cohortForPriceId(priceId);
   const currentPeriodEnd = subscription.items.data[0]?.current_period_end;
 
   const { error } = await supabase.from("subscriptions").upsert(

@@ -5,18 +5,24 @@ import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CuaDriverLike } from "@trycua/cua-driver";
 
-const DRIVER_VERSION = "0.34.0";
-const START_TIMEOUT_MS = 12_000;
+export const CUA_DRIVER_VERSION = "0.37.0";
+const START_TIMEOUT_MS = 30_000;
 const RETRY_INTERVAL_MS = 100;
 
 class HostConfigurationError extends Error {}
 
 export function validateCuaDriverHostMetadata(metadata: { driverVersion: string; embedded: boolean }): void {
-  if (metadata.driverVersion !== DRIVER_VERSION) {
-    throw new HostConfigurationError(`The Cua Driver host is ${metadata.driverVersion}; M9R requires ${DRIVER_VERSION}.`);
+  if (metadata.driverVersion !== CUA_DRIVER_VERSION) {
+    throw new HostConfigurationError(`The Cua Driver host is ${metadata.driverVersion}; M9R requires ${CUA_DRIVER_VERSION}.`);
   }
   if (metadata.embedded !== false) {
     throw new HostConfigurationError("The Cua Driver host connected in embedded mode; the visible Windows overlay requires the standalone DPI-aware host.");
+  }
+}
+
+export function validateCuaDriverPackageVersion(version: unknown, source: string): void {
+  if (version !== CUA_DRIVER_VERSION) {
+    throw new HostConfigurationError(`${source} is ${String(version)}; M9R requires ${CUA_DRIVER_VERSION}.`);
   }
 }
 

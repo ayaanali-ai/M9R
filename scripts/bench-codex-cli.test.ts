@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { codexArgs, codexAsClaudeJson, usageFromJsonl } from "./bench/codex-cli";
-import { reportFrom, totalsOf } from "./bench/real-runner";
+import { reportFrom, totalsOf } from "./bench/usage-report";
 
 const events = [
   JSON.stringify({ type: "thread.started", thread_id: "t" }),

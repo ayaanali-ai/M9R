@@ -27,6 +27,7 @@ export interface FeedAgent {
 
 export type NeedsYou =
   | { surface: "native"; kind: "approval"; taskId: string; from: string; to: string; goal: string; protected: boolean }
+  | { surface: "native"; kind: "paused"; taskId: string; from: string; to: string; reason: string }
   | { surface: "native"; kind: "push_failed"; taskId: string; from: string; fromSession?: string; to: string; reason: string; fix: string; linkable: boolean }
   | { surface: "native"; kind: "delivery_uncertain"; taskId: string; from: string; to: string; reason: string }
   | { surface: "native"; kind: "answer"; taskId: string; from: string; summary: string };
@@ -190,9 +191,20 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
   const out: NeedsYou[] = [];
   const nowMs = input.now.getTime();
   for (const t of input.tasks) {
-    if (t.retiredAt || t.dismissedAt || t.receipt?.state === "canceled" || t.receipt?.state === "paused") continue;
+    if (t.retiredAt || t.dismissedAt || t.receipt?.state === "canceled") continue;
     if (t.approval === "pending" && input.pendingIds.has(t.id)) {
       out.push({ surface: "native", kind: "approval", taskId: t.id, from: t.from, to: t.to, goal: safe(t.goal, GOAL_CHARS), protected: isProtectedAction(t.goal) });
+    } else if (t.receipt?.state === "paused" && t.completion?.status === "incomplete") {
+      // A provider-paused task (e.g. "background route couldn't do this,
+      // need approval to finish in the foreground") carries its own ask in
+      // completion.summary/remainingWork. This never went through the
+      // approval-core "pending" flag, so it needs its own branch here --
+      // without it, the task sits paused forever with nothing telling the
+      // owner it is waiting on them (this was T231's exact failure).
+      const reason = t.completion.summary || t.completion.remainingWork.join(" ") || "This task is paused and needs your input to continue.";
+      out.push({ surface: "native", kind: "paused", taskId: t.id, from: t.from, to: t.to, reason: safe(reason, REASON_CHARS) });
+    } else if (t.receipt?.state === "paused") {
+      continue;
     } else if ((t.delivery?.state === "uncertain"
       || (t.delivery?.state === "sending" && Number.isFinite(Date.parse(t.delivery.claimedAt ?? ""))
         && nowMs - Date.parse(t.delivery.claimedAt!) >= DELIVERY_CONFIRMATION_WINDOW_MS))
@@ -206,8 +218,8 @@ function needsYouFrom(input: FeedInput): NeedsYou[] {
       out.push({ surface: "native", kind: "answer", taskId: t.id, from: t.to, summary: safe(t.resultSummary, SUMMARY_CHARS) });
     }
   }
-  // Approvals first (they block work), then failures, then answers; newest first within each.
-  const rank = { approval: 0, delivery_uncertain: 1, push_failed: 2, answer: 3 } as const;
+  // Approvals/paused-tasks first (they block work), then failures, then answers; newest first within each.
+  const rank = { approval: 0, paused: 0, delivery_uncertain: 1, push_failed: 2, answer: 3 } as const;
   return out.sort((a, b) => rank[a.kind] - rank[b.kind] || Number(b.taskId.slice(1)) - Number(a.taskId.slice(1)));
 }
 

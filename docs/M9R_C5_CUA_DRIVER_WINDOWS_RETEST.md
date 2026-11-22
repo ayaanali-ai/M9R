@@ -1,5 +1,8 @@
 # C5 — Cua Driver Windows re-test
 
+> Historical compatibility record. Any references below to M9R's isolated CDP browser describe the former implementation;
+> that browser path was retired on 2026-11-05. Cua Driver is not part of the active browser-control path.
+
 **Status: DONE — signed off (2026-10-04)**
 
 Reference: [official Cua Driver README](https://github.com/trycua/cua/blob/main/libs/cua-driver/README.md). The report uses the typed SDK surface and keeps the native package isolated from M9R.

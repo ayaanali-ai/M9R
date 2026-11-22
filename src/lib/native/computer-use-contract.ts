@@ -35,6 +35,7 @@ export const computerUseCapabilitySchema = z.enum([
   "input.focus",
   "input.shared-os",
   "browser.navigate",
+  "browser.tabs",
   "window.frame",
   "window.state",
   "menu.invoke",
@@ -128,11 +129,18 @@ export const computerUseIntentSchema = z.object({
   mode: z.enum(["explain", "prepare", "advance", "submit"]),
   allowAdvance: z.boolean(),
   allowSubmit: z.boolean(),
+  // Optional and separate from allowSubmit: granted only for the one Enter
+  // keystroke that commits a URL-bar navigation, never for clicking an actual
+  // submit/send control. Optional so an intent object carried over from
+  // before this field existed still validates.
+  allowNavigationCommit: z.boolean().optional(),
 }).strict();
 
 export const computerUsePostconditionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("url-equals"), url: navigationUrl }).strict(),
-  z.object({ kind: z.literal("visible-text-contains"), text: textValue }).strict(),
+    z.object({ kind: z.literal("visible-text-contains"), text: textValue }).strict(),
+    z.object({ kind: z.literal("accessible-control-selected"), label: z.string().min(1).max(160),
+      role: z.string().min(1).max(80).optional(), selected: z.boolean() }).strict(),
   z.object({
     kind: z.literal("accessible-control-present"),
     role: z.string().min(1).max(80).optional(),
@@ -149,6 +157,8 @@ const actionEnvelope = {
   targetId: opaqueRef,
   /** Binds the request to the exact observation used to plan it. */
   targetRevision: observationRevision,
+  /** Attach pixels to the action response when visual confirmation is useful. */
+  includeScreenshot: z.boolean().optional(),
   /** Optional generic postcondition. Only a fresh observable match can produce a verified result. */
   postcondition: computerUsePostconditionSchema.optional(),
   /** Optional durable intent boundary from m9r_computer_intent. */
@@ -158,6 +168,7 @@ const actionEnvelope = {
 export const computerUseActionSchema = z.discriminatedUnion("kind", [
   z.object({ ...actionEnvelope, kind: z.literal("observe") }).strict(),
   z.object({ ...actionEnvelope, kind: z.literal("focus") }).strict(),
+  z.object({ ...actionEnvelope, kind: z.literal("browser_tab"), operation: z.enum(["select", "close"]) }).strict(),
   z.object({
     ...actionEnvelope,
     kind: z.literal("system_control"),
@@ -186,9 +197,17 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
     // not an automatic retry or standing mode. It requires input.shared-os
     // to be advertised by the exact desktop-window target.
     confirmFocusForeground: z.boolean().optional(),
+    // Targets the exact app's currently owned popup window (a Windows error
+    // dialog, a Save As box -- listed as `ownedPopups` on a prior
+    // observation) instead of the app's own window. Point coordinates are
+    // relative to that popup's own capture, not the app window's.
+    targetPopup: z.boolean().optional(),
   }).strict().superRefine((action, context) => {
     if (action.count === 2 && action.button !== "left") {
       context.addIssue({ code: "custom", path: ["button"], message: "Double-click is defined as two left-button activations." });
+    }
+    if (action.targetPopup && action.locator.kind !== "point") {
+      context.addIssue({ code: "custom", path: ["locator"], message: "A popup-targeted click requires a point locator; popups have no observed element references." });
     }
   }),
   z.object({
@@ -200,18 +219,38 @@ export const computerUseActionSchema = z.discriminatedUnion("kind", [
     /** Browser routes require an explicit fresh field ref; desktop routes may use current caret focus. */
     locator: computerUseLocatorSchema.optional(),
     confirmFocusForeground: z.boolean().optional(),
+    /** Send caret insertion to the selected app's current owned popup, after a popup-targeted click. */
+    targetPopup: z.boolean().optional(),
   }).strict().superRefine((action, context) => {
     if (action.confirmFocusForeground && action.mode !== "insert") {
       context.addIssue({ code: "custom", path: ["confirmFocusForeground"], message: "Foreground delivery is only valid for caret insertion, not whole-field replacement." });
     }
+    if (action.targetPopup && (action.mode !== "insert" || action.locator !== undefined)) {
+      context.addIssue({ code: "custom", path: ["targetPopup"], message: "Popup text insertion uses the caret selected by a preceding popup-targeted click; it does not accept an app-window locator or replace mode." });
+    }
   }),
+  z.object({
+    ...actionEnvelope,
+    kind: z.literal("text_then_enter"),
+    /** A bounded two-step desktop batch: insert into the confirmed caret, then press Enter. */
+    text: z.string().min(1).max(500)
+      .regex(/^[^\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+$/, "Text contains unsupported control characters."),
+    confirmFocusForeground: z.boolean().optional(),
+  }).strict(),
   z.object({
     ...actionEnvelope,
     kind: z.literal("key"),
     key: z.string().min(1).max(32).regex(/^[\w-]+$/),
-    modifiers: z.array(z.enum(["Control", "Alt", "Shift", "Meta"])).max(3)
+    // "Win" is the actual OS modifier key on Windows (Win+E, Win+D, Win+L, ...). It is not
+    // an alias of "Meta" downstream -- task-stage-actions.ts's KEY_NAMES and mcp-server.ts's
+    // press_key schema already treat them as distinct supported key names -- so it must be
+    // offered explicitly rather than asking the agent to guess "Meta" means the Windows key.
+    modifiers: z.array(z.enum(["Control", "Alt", "Shift", "Meta", "Win"])).max(3)
       .refine((values) => new Set(values).size === values.length, "Key modifiers must be unique.").optional(),
     confirmFocusForeground: z.boolean().optional(),
+    // Sends the key/hotkey to the exact app's currently owned popup window
+    // instead of the app's own window. See `targetPopup` on "click".
+    targetPopup: z.boolean().optional(),
   }).strict(),
   z.object({
     ...actionEnvelope,
@@ -273,6 +312,11 @@ export const computerUseResultSchema = z.object({
   routeId: opaqueRef.optional(),
   dispatchStatus: z.enum(["not-dispatched", "dispatched", "unknown"]),
   effectStatus: z.enum(["not-checked", "observed", "verified", "mismatch", "unknown"]),
+  deliveryReceipt: z.object({
+    delivery: z.enum(["delivered", "not-delivered", "uncertain"]),
+    verification: z.enum(["verified", "unverified"]),
+    retry: z.enum(["never", "same-operation-id", "refresh-target", "new-operation-id"]),
+  }).strict().optional(),
   operationReceipt: z.object({
     status: z.enum(["in_progress", "applied", "uncertain"]),
     updatedAt: z.string().datetime().optional(),
@@ -282,11 +326,31 @@ export const computerUseResultSchema = z.object({
     observedAt: timestampMs,
     evidenceRef: opaqueRef,
   }).strict().optional(),
+  /** Requested and actual native outer-window bounds for resize or placement actions. */
+  windowFrame: z.object({
+    requested: z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(1), height: z.number().int().min(1) }).strict(),
+    actual: z.object({ x: z.number().int(), y: z.number().int(), width: z.number().int().min(1), height: z.number().int().min(1) }).strict(),
+    verified: z.boolean(),
+  }).strict().optional(),
   error: z.object({
     code: z.string().min(1).max(128),
     message: z.string().min(1).max(2_000),
     retry: z.enum(["never", "same-operation-id", "refresh-target", "new-operation-id"]),
   }).strict().optional(),
+  batchOutcome: z.object({
+    status: z.enum(["complete", "partial"]),
+    completedSteps: z.number().int().min(0).max(2),
+    totalSteps: z.literal(2),
+    stoppedAt: z.literal("enter").optional(),
+    message: z.string().min(1).max(500).optional(),
+  }).strict().superRefine((outcome, context) => {
+    if (outcome.status === "complete" && (outcome.completedSteps !== 2 || outcome.stoppedAt !== undefined || outcome.message !== undefined)) {
+      context.addIssue({ code: "custom", path: ["completedSteps"], message: "A complete batch must report both steps and no failure details." });
+    }
+    if (outcome.status === "partial" && (outcome.completedSteps !== 1 || outcome.stoppedAt !== "enter" || !outcome.message)) {
+      context.addIssue({ code: "custom", path: ["completedSteps"], message: "A partial text/Enter batch must report text delivered and Enter stopped with a reason." });
+    }
+  }).optional(),
 }).strict().superRefine((result, context) => {
   if (["observed", "verified", "mismatch"].includes(result.effectStatus) && !result.observation) {
     context.addIssue({ code: "custom", path: ["observation"], message: "Observed effect status requires fresh observation evidence." });
@@ -342,6 +406,8 @@ export function computerUseActionRequirements(action: ComputerUseAction): Comput
     }
     case "text": return { capabilities: [action.mode === "insert" ? "input.text.insert" : "input.text.replace",
       ...(action.confirmFocusForeground ? ["input.shared-os" as const] : [])], match: "all" };
+    case "text_then_enter": return { capabilities: ["input.text.insert", "input.key",
+      ...(action.confirmFocusForeground ? ["input.shared-os" as const] : [])], match: "all" };
     case "key": return { capabilities: ["input.key", ...(action.confirmFocusForeground ? ["input.shared-os" as const] : [])], match: "all" };
     case "select_text": return { capabilities: [action.selection.kind === "all" ? "input.select-text.all" : "input.select-text.text"], match: "all" };
     case "scroll": {
@@ -359,15 +425,18 @@ export function computerUseActionRequirements(action: ComputerUseAction): Comput
     case "navigate": return { capabilities: ["browser.navigate"], match: "all" };
     case "window_frame": return { capabilities: ["window.frame"], match: "all" };
     case "window_state": return { capabilities: ["window.state"], match: "all" };
+    case "browser_tab": return { capabilities: ["browser.tabs"], match: "all" };
     case "invoke_menu": return { capabilities: ["menu.invoke"], match: "all" };
     case "clipboard": return { capabilities: [action.mode === "read" ? "clipboard.read" : "clipboard.write"], match: "all" };
   }
 }
 
 /** Caller supplies the route's freshness budget; future observations fail closed. */
-export function isComputerUseTargetFresh(target: ComputerUseTarget, nowMs: number, maxAgeMs: number): boolean {
-  if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(maxAgeMs) || maxAgeMs < 0) return false;
-  return target.observedAt <= nowMs && nowMs - target.observedAt <= maxAgeMs;
+export function isComputerUseTargetFresh(target: ComputerUseTarget, nowMs: number, maxAgeMs?: number): boolean {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(target.observedAt) || target.observedAt > nowMs) return false;
+  if (maxAgeMs === undefined) return true;
+  if (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 0) return false;
+  return nowMs - target.observedAt <= maxAgeMs;
 }
 
 export type ComputerUseActionCheck =

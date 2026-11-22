@@ -142,7 +142,7 @@ blanket “M9R blocked because another agent is using input.”
 
 Every action binds an exact target revision, dispatches at most once for that
 operation ID, and records a receipt. A stale HWND/tab/frame/element, changed
-virtual desktop, or changed page revision triggers refresh/rebase. Postconditions
+surface binding, or changed page revision triggers refresh/rebase. Postconditions
 are checked with a fresh observation. Receipts distinguish claimed, committed,
 aborted, stale, conflicted, and expired work.
 
@@ -595,4 +595,137 @@ create parallel implementations when a current path already exists.
     and accept one candidate, install only after all gates are green, verify the
     process tree and live provider behavior, and keep homepage deployment
     separate from desktop-runtime rollout.
+
+## XV. Final polish execution ledger
+
+The first implementation slice is now concrete and broker-owned:
+
+- `m9r_computer_program` is the single multi-step JavaScript composition entry
+  point. It composes the existing observe/action contracts instead of creating a
+  second input engine.
+- Program code receives only `m9r.observe`, `m9r.act`, and `m9r.sleep`; it has no
+  filesystem, network, process, browser-extension, or native-handle access.
+- Every composed action still passes through M9R identity, target revision,
+  operation receipts, leases, native dispatch, and post-action observation.
+- Program limits are explicit and bounded (64 KiB source, 120 s wall clock,
+  512 broker calls) and are transport safeguards, not app-specific workflows.
+- The TypeScript desktop-structure wrapper now exposes the same 4096-element /
+  64-depth bounds already supported by the native UIA walker; the old 64/10
+  wrapper ceiling was silently dropping desktop controls.
+
+This ledger is not a release claim. Remaining items in XIV must be completed and
+verified before candidate acceptance or installation.
+
+### Verified implementation ledger (2026-11-03)
+
+- `43e28425` adds the broker-owned `m9r_computer_program` composition surface
+  and removes the silent desktop-structure wrapper truncation.
+- `28e8f77` makes the retired Cua action/perception compatibility path opt-in;
+  production native dispatch no longer enables it accidentally, and packaged
+  Windows apps bind the `ApplicationFrameHost` outer window.
+- `faba542c` routes horizontal wheel input through the native host using an
+  explicit `HWHEEL` axis; left/right scroll no longer falls back to a semantic
+  driver refusal.
+- `5fae5471` removes isolated-browser registration and launch modes from the
+  production route. Browser work uses the owner's real profile through the
+  native app-window stage; retired extension targets fail explicitly.
+- `1f2d99ab` adds a bounded durable browser-space ledger keyed by exact
+  owner-profile HWND identity and process/window stage binding. It is a
+  coordination ledger only; it is not a second browser engine or a retargeting
+  heuristic.
+
+These commits are source changes only. Runtime promotion remains gated on the
+full build, candidate provenance, acceptance, install, and live verification
+matrix in XIV.14–15.
+
+### Verified implementation ledger (2026-11-04)
+
+The following source phases were committed on `codex/final-polish-rebirth`:
+
+- `612599e1` binds desktop stages to owner-visible HWNDs and removes the
+  unused Windows virtual-desktop stage implementation and its obsolete proof
+  harness/UI transport.
+- `3539d614` resolves app launches to exact owner windows, including packaged
+  app identity and the `ApplicationFrameHost` window used by packaged apps.
+- `d2df0d13` routes production desktop input through M9R native actions and
+  removes the extension-dependent computer-use tool route. CUA remains only
+  for cursor presentation.
+- `b8a82f54` updates explicit paused-work reuse, reconciles interrupted
+  in-flight stage receipts without replaying input, and corrects task-stage
+  guidance for same-desktop background routing and typed dispatch outcomes.
+
+On the resulting source tree, verification completed with TypeScript typecheck,
+Rust formatting/build/tests, and the expanded JavaScript suite: 2,416 tests
+passed across 200 files, with zero failures. These results establish source
+checks only; no owner-machine task, install, acceptance, or runtime promotion
+has occurred in this phase.
+
+The remaining release gates in XIV.14–15 are still explicit: build a candidate
+from the final committed source, complete owner/Codex review, then run the
+owner-machine acceptance and installation steps only after that review. An
+external Claude review is not a prerequisite per the owner's direction. A
+successful source test suite or candidate build is not live-task verification.
+
+### Demo-readiness checkpoint (2026-11-06)
+
+This is a status record, not a release claim.
+
+- The Nov 6 source work binds M9R-launched provider MCP processes to a private
+  provider/session scope, removes the need for a model-visible session token on
+  that path, keeps explicit revocation authoritative, and adds an owner-only
+  `task-log` export for the task lifecycle and bounded stage evidence actually
+  persisted by M9R. The export does not contain provider transcripts,
+  screenshots, or broker stderr.
+- `npm run typecheck` and `git diff --check` passed during this checkpoint.
+  The retained `native-identity` and `native-store-and-hook` tests still have
+  legacy contract failures and are excluded from the aggregate suite; they must
+  not be described as passing. Other focused suites passed in the preceding
+  verification pass, but that is not a complete release suite.
+- A clean candidate was built from commit `595f3703` at
+  `engine/candidates/2026-11-06T22-14-29-058Z-595f3703`. Its runtime build ID is
+  `fd96a445831ed0073adf0e1dab435bc6afc006d00f0a64ee467003850ee00341`, its
+  package SHA-256 is
+  `1805fcc0c68d20b19797f2a8c2f0d82b27165a5a5b65946ba3f3d0945f4ea922`, and
+  all candidate receipt checks passed. Every one of its 183 artifact hashes
+  matches the binaries installed under `%USERPROFILE%\.m9r\bin` after the
+  candidate update.
+- The candidate was promoted to the local accepted-runtime policy after the
+  installed-artifact comparison and then installed. The installer completed,
+  reported the managed broker as `running-current-build`, verified it from the
+  installed package, and started the pill. A post-install hash comparison found
+  the installed build ID and source commit match the candidate; all 183
+  artifacts match with zero mismatches and `sourceDirty: false`.
+- The previous `npm run test:installer` run reported 5/7 because the generated
+  `engine/dist` was stale (build ID `4cdd5ef3`, source `3ab04a38`). The old
+  `engine/dist` and `cli/dist` were preserved under
+  `diagnostics/demo-acceptance-2026-11-06/previous-build-outputs`, and both
+  generated outputs were aligned to this exact candidate and hash-verified.
+  The post-sync installer-suite run then emitted no test results for about 190
+  seconds and was stopped. Therefore the automated installer suite is still
+  unresolved and must not be called green. The actual candidate installer did
+  complete successfully, and its installed manifest/artifact checks passed.
+- The first post-install single-agent acceptance task passed by owner report:
+  Calculator `(29 × 13) + 7` displayed `384`; a new Notepad document with the
+  requested two lines was saved as
+  `C:\Users\kaina\OneDrive\Desktop\M9R-demo-clean-candidate-20261106.txt` and
+  reopened. The attached screenshots corroborate the result, contents, and
+  Desktop file listing. The task ID has not yet been provided, so its stored
+  task-log export and timing record are still pending. This closes one smoke
+  task, not repeatability or multiplayer acceptance.
+- Before demo sign-off, collect this task's raw task-log export and run a second
+  distinct single-agent task with a checked effect; then retain evidence for:
+  two distinct agents coordinating and returning attributed results; a user
+  continuing to work during the task without focus or pointer theft; and
+  pause/redirect/recovery without duplicate delivery. Run a three-agent demo
+  only after the two-agent path passes. Cross-provider active-session handoff,
+  fresh-install/update recovery, and any broader multiplayer claim remain open
+  until separately demonstrated.
+- Git was refreshed from `origin`; `origin/main` was at `e411a060` (2026-11-01)
+  and the local `codex/final-polish-rebirth` branch had no upstream and was 147
+  commits ahead before this checkpoint commit. Per the owner's earlier
+  instruction, this branch must not be pushed into `main` as a bulk update.
+  Local commits do not make GitHub `main` current.
+
+The demo candidate remains **not release-ready** until the clean build and the
+live acceptance items above have retained, reviewable evidence.
 

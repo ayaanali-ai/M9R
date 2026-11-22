@@ -1,7 +1,8 @@
 // Build the self-contained M9R runtime: one executable for CLI/MCP and one
 // separately supervised broker executable. Provider lifecycle hooks are not
 // packaged; the broker owns provider processes directly.
-// Run `npm run build:cli` first; this bundles cli/dist. Output: engine/dist/m9r-engine.exe (or no extension off Windows).
+// The engine builder always regenerates its selected CLI input before bundling.
+// Output: engine/dist/m9r-engine.exe.
 
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -10,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { publishRuntimeBuild, verifyRuntimeBuildManifest, writeRuntimeBuildManifest } from "./engine-build-transaction.mjs";
+import { CUA_DRIVER_ARCHIVE_ASSETS, CUA_DRIVER_RUNTIME_ASSETS } from "./cua-runtime-assets.mjs";
 
 // Git for Windows ships its own GNU tar earlier on PATH than the real Windows System32 bsdtar.
 // GNU tar misparses a bare "C:\..." path as a remote "host:path" spec and cannot read .zip
@@ -25,39 +27,33 @@ const cliOutput = resolve(process.env.M9R_CLI_OUTPUT_DIR || join(root, "cli", "d
 const buildRoot = join(engineDir, `.m9r-engine-build-${process.pid}-${randomUUID()}`);
 const out = join(buildRoot, "artifacts");
 const work = join(buildRoot, "work");
+// Keep all absolute CLI module paths embedded in the SEA bundle stable across
+// normal and candidate builds. Candidate output itself remains isolated, but
+// the temporary bundle input has one fixed path so equivalent source does not
+// produce staging-directory-specific executable bytes.
+const stableCliOutput = join(engineDir, ".m9r-engine-cli-input");
 // Node SEA records the absolute `main` path in its embedded metadata. Keep
 // that path stable across UUID-named staging directories so identical source
 // produces identical m9r-engine.exe bytes.
 const stableEngineBundle = join(engineDir, ".m9r-engine-bundle.cjs");
-// The accepted-ui artifact is the owner-confirmed live pill. Keep using that
-// exact binary until a new pill is reviewed and promoted with its runtime
-// identity; the mutable Cargo target is not a release input.
+// Flow guard 4A: the pill is built from source on every single build, with
+// no committed static binary and no separate manual "accept" step to forget.
+// (A prior design copied a committed release-assets/accepted-ui/m9r-overlay.exe
+// instead -- that exact gap is what let a real pill source fix sit committed
+// but never actually ship, discovered live on 2026-11-11.)
 if (process.env.M9R_OVERLAY_EXE) {
-  throw new Error("M9R_OVERLAY_EXE is not a supported build input. The runtime builder only uses the owner-accepted live pill.");
+  throw new Error("M9R_OVERLAY_EXE is not a supported build input. The pill is always built from overlay/ source.");
 }
-const acceptedRuntimePath = join(root, "release-assets", "accepted-runtime.json");
-if (!existsSync(acceptedRuntimePath)) {
-  throw new Error("The accepted runtime identity is missing at release-assets/accepted-runtime.json; refusing to select a desktop pill.");
-}
-const acceptedRuntime = JSON.parse(readFileSync(acceptedRuntimePath, "utf8"));
-const acceptedOverlayHash = acceptedRuntime?.artifacts?.["m9r-overlay.exe"];
-if (acceptedRuntime.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(acceptedRuntime.buildId ?? "")
-  || !/^[a-f0-9]{64}$/.test(acceptedOverlayHash ?? "")) {
-  throw new Error("The accepted runtime identity is malformed; review it before building.");
-}
-const overlayExe = join(root, "release-assets", "accepted-ui", "m9r-overlay.exe");
-if (process.platform === "win32" && !existsSync(overlayExe)) {
-  throw new Error("The owner-accepted live pill is missing at release-assets/accepted-ui/m9r-overlay.exe; Cargo output is not an automatic fallback.");
-}
-if (process.platform === "win32"
-  && createHash("sha256").update(readFileSync(overlayExe)).digest("hex") !== acceptedOverlayHash) {
-  throw new Error("The preserved live pill does not match the accepted runtime identity. Refusing to package it.");
-}
+const overlayExe = join(root, "overlay", "src-tauri", "target", "release", "m9r-overlay.exe");
 const exeName = process.platform === "win32" ? "m9r-engine.exe" : "m9r-engine";
 const brokerBundle = join(cliOutput, "m9r-web-broker.cjs");
 const brokerExeName = process.platform === "win32" ? "m9r-web-broker.exe" : "m9r-web-broker";
-const cuaDriverVersion = "0.34.0";
-const cuaDriverArchiveSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888";
+const cuaDriverVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).dependencies?.["@trycua/cua-driver"];
+if (typeof cuaDriverVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(cuaDriverVersion)) {
+  throw new Error("The pinned Cua Driver dependency must be a stable semver release.");
+}
+// Official SHA-256 for cua-driver-rs-v0.37.0-windows-x86_64-binary.zip.
+const cuaDriverArchiveSha256 = "40481b55073f1225b0010235b30217bd640ef1f323e982aec0a5f6131d3e4a99";
 const cuaDriverArchiveUrl = `https://github.com/trycua/cua/releases/download/cua-driver-rs-v${cuaDriverVersion}/cua-driver-rs-${cuaDriverVersion}-windows-x86_64-binary.zip`;
 
 // These are recoverable, owner-reviewed local evidence roots. They are not
@@ -92,6 +88,7 @@ const heldLocalProvenancePatterns = [
   // release source; they must not make a committed runtime fingerprint dirty.
   /^diagnostics(?:\/|$)/i,
   /^\.artifact-scratch(?:\/|$)/i,
+  /^baseline-input-test\.log$/i,
   /^docs\/Convenience_Store_Replacement_Plan\.docx$/i,
   /^public\/reference-innerwebs\/m9r-logo-transparent\.png$/i,
 ];
@@ -101,7 +98,24 @@ function isHeldLocalProvenancePath(path) {
   return heldLocalProvenancePatterns.some((pattern) => pattern.test(normalized));
 }
 
-if (!existsSync(join(cliOutput, "m9r.js")) || !existsSync(brokerBundle)) throw new Error(`CLI build output is missing: ${cliOutput}. Run npm run build:cli first or set M9R_CLI_OUTPUT_DIR to its completed output.`);
+const cliBuild = spawnSync(process.execPath, [join(root, "scripts", "build-cli.mjs")], {
+  cwd: root,
+  env: process.env,
+  stdio: "inherit",
+  windowsHide: true,
+});
+if (cliBuild.error || cliBuild.status !== 0) {
+  throw new Error(`The CLI build failed before engine packaging (exit ${cliBuild.status ?? "unknown"}).`, { cause: cliBuild.error });
+}
+if (!existsSync(join(cliOutput, "m9r.js")) || !existsSync(brokerBundle)) {
+  throw new Error(`The engine builder did not produce complete CLI inputs at ${cliOutput}.`);
+}
+rmSync(stableCliOutput, { recursive: true, force: true });
+cpSync(cliOutput, stableCliOutput, { recursive: true });
+const stableBrokerBundle = join(stableCliOutput, "m9r-web-broker.cjs");
+if (!existsSync(join(stableCliOutput, "m9r.js")) || !existsSync(stableBrokerBundle)) {
+  throw new Error("The stable CLI bundle input is incomplete; refusing to build a SEA runtime.");
+}
 rmSync(work, { recursive: true, force: true });
 for (const name of [exeName, brokerExeName, ...(process.platform === "win32" ? ["m9r-native-input-host.exe", "m9r-overlay.exe"] : [])]) {
   rmSync(join(out, name), { force: true });
@@ -167,9 +181,9 @@ function sourceProvenance() {
 }
 
 // The dispatcher: SEA argv is [exe, exe, ...args]; shift so both programs see the argv they were written for.
-const mcpJs = join(cliOutput, "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
-const devMcpJs = join(cliOutput, "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
-const cliJs = join(cliOutput, "m9r.js").split(String.fromCharCode(92)).join("/");
+const mcpJs = join(stableCliOutput, "m9r-mcp.js").split(String.fromCharCode(92)).join("/");
+const devMcpJs = join(stableCliOutput, "dev-mcp-server.js").split(String.fromCharCode(92)).join("/");
+const cliJs = join(stableCliOutput, "m9r.js").split(String.fromCharCode(92)).join("/");
 const entry = join(work, "entry.mjs");
 try {
 writeFileSync(entry, `
@@ -217,13 +231,21 @@ writeFileSync(stableEngineBundle, bundleResult.outputFiles[0].text);
 const exe = join(out, exeName);
 buildSeaExecutable(stableEngineBundle, exe, "engine");
 const brokerExe = join(out, brokerExeName);
-buildSeaExecutable(brokerBundle, brokerExe, "web-broker");
+buildSeaExecutable(stableBrokerBundle, brokerExe, "web-broker");
 const cargoEnv = { ...process.env, PATH: `${process.env.PATH}${process.platform === "win32" ? ";" : ":"}${join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cargo", "bin")}` };
 // The visible-tab click path must use trusted OS input. Ship its Windows-only Native Messaging host beside the engine.
 if (process.platform === "win32") {
   const r = spawnSync("cargo", ["build", "--release"], { cwd: join(root, "native-input-host"), env: cargoEnv, stdio: "inherit" });
   if (r.error || r.status !== 0) throw new Error("The native input host build failed.", { cause: r.error });
   copyFileSync(join(root, "native-input-host", "target", "release", "m9r-native-input-host.exe"), join(out, "m9r-native-input-host.exe"));
+
+  // Flow guard 4A: build the pill from its own source every time, same as
+  // every other binary in this pipeline -- no committed binary, no separate
+  // acceptance step that can silently fall out of sync with what's committed.
+  rmSync(overlayExe, { force: true });
+  const pillBuild = spawnSync("npm", ["run", "build"], { cwd: join(root, "overlay"), env: cargoEnv, stdio: "inherit", shell: true });
+  if (pillBuild.error || pillBuild.status !== 0) throw new Error("The pill (overlay) build failed.", { cause: pillBuild.error });
+  if (!existsSync(overlayExe)) throw new Error(`Pill build did not produce ${overlayExe}.`);
 
   // Keep the JavaScript SDK and native bindings beside the executable, and include
   // Cua's separately built DPI-aware Windows daemon. M9R must use the daemon path
@@ -270,11 +292,10 @@ if (process.platform === "win32") {
   if (archiveHash !== cuaDriverArchiveSha256) {
     throw new Error(`Cua Driver ${cuaDriverVersion} Windows archive checksum mismatch: ${archiveHash}. Refusing to package an unverified daemon.`);
   }
-  const expectedEntries = ["cua-driver.exe", "cua-cursor-theme.exe", "cua-driver-uia.exe", "cua_driver_sdk.dll", "cua_driver_node_runtime.node", "cua_driver_abi.h"];
   const archiveEntries = spawnSync(systemTarExe, ["-tf", archivePath], { encoding: "utf8", windowsHide: true });
   if (archiveEntries.status !== 0) throw new Error(`Could not list the verified Cua Driver archive: ${archiveEntries.stderr || archiveEntries.stdout}`);
   const entries = archiveEntries.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
-  if (JSON.stringify(entries) !== JSON.stringify([...expectedEntries].sort())) {
+  if (JSON.stringify(entries) !== JSON.stringify([...CUA_DRIVER_ARCHIVE_ASSETS].sort())) {
     throw new Error(`Cua Driver ${cuaDriverVersion} archive contents changed; review before packaging. Found: ${entries.join(", ")}`);
   }
   const extractedRoot = join(work, `cua-driver-${cuaDriverVersion}-windows`);
@@ -284,7 +305,7 @@ if (process.platform === "win32") {
   if (extraction.status !== 0) throw new Error(`Could not extract verified Cua Driver ${cuaDriverVersion} Windows files.`);
   const binaryRoot = join(cuaRuntimeRoot, "bin");
   mkdirSync(binaryRoot, { recursive: true });
-  for (const asset of expectedEntries) {
+  for (const asset of CUA_DRIVER_RUNTIME_ASSETS) {
     const source = join(extractedRoot, asset);
     if (!existsSync(source)) throw new Error(`Verified Cua Driver archive is missing ${asset}.`);
     copyFileSync(source, join(binaryRoot, asset));
@@ -304,8 +325,9 @@ console.log(`Built ${join(output, exeName)} (${Math.round(readFileSync(join(outp
 console.log(`Built ${join(output, brokerExeName)} (${Math.round(readFileSync(join(output, brokerExeName)).length / 1e6)} MB)`);
 console.log(`Runtime build identity ${publishedIdentity.buildId} verified across ${Object.keys(publishedIdentity.artifacts).length} files.`);
 console.log(`Runtime source ${provenance.sourceCommit} (${provenance.sourceDirty ? "dirty" : "clean"}).`);
-if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")} from the owner-accepted live pill artifact (${acceptedOverlayHash}).`);
+if (process.platform === "win32") console.log(`Packaged ${join(output, "m9r-overlay.exe")}, built fresh from overlay/ source this run.`);
 } finally {
   rmSync(buildRoot, { recursive: true, force: true });
-  rmSync(stableEngineBundle, { force: true });
+    rmSync(stableEngineBundle, { force: true });
+    rmSync(stableCliOutput, { recursive: true, force: true });
 }

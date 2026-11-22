@@ -39,6 +39,8 @@ export function cubicBezier(x1: number, y1: number, x2: number, y2: number): Eas
 }
 
 export const closeCurve = cubicBezier(0.45, 0, 0.2, 1);
+/** Duration of the shrink/close curve. */
+export const CLOSE_MS = 340;
 
 /**
  * Damped spring: ω₀ = 2π / response, ζ = damping fraction.
@@ -122,11 +124,15 @@ export class Tracked {
     this.mode = "spring";
   }
 
-  /** Timed curve to `v` (close / shrink), no overshoot. */
-  curveTowards(v: number, durationMs = 340, now = performance.now()) {
+  /** Timed curve to `v` (close / shrink), no overshoot.
+   * With no `now`, the curve's clock starts at the first frame that steps it. It used to
+   * start at the event's performance.now(). The next rAF timestamp is the frame's start,
+   * which is usually *earlier* than that, so the first close frame was clamped to p = 0
+   * and held still, and the second frame then jumped two frames' worth. */
+  curveTowards(v: number, durationMs = CLOSE_MS, now?: number) {
     this.curveFrom = this.spring.value;
     this.curveTo = v;
-    this.curveStart = now;
+    this.curveStart = now ?? Number.NaN;
     this.curveDur = durationMs;
     this.spring.target = v;
     this.spring.velocity = 0;
@@ -142,6 +148,8 @@ export class Tracked {
         this.mode = "idle";
       }
     } else if (this.mode === "curve") {
+      // First frame: count it as one frame in, so the close moves on the very next paint.
+      if (Number.isNaN(this.curveStart)) this.curveStart = now - Math.max(0, dt) * 1000;
       const p = clamp((now - this.curveStart) / this.curveDur, 0, 1);
       this.spring.value = lerp(this.curveFrom, this.curveTo, closeCurve(p));
       if (p >= 1) {

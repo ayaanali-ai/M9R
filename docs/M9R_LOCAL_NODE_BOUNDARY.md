@@ -3,6 +3,12 @@
 **Decision record:** 2026-10-05<br>
 **Status:** specified; implementation changes are intentionally separate
 
+> **Superseded for browser interaction (2026-11-05):** the browser-extension and
+> isolated-browser transports described below are retired. Current browser and
+> app work uses the owner-visible native desktop stage. References to an
+> extension in this historical boundary record are not instructions to install
+> or start one.
+
 This document defines what “M9R Node” means for the local owner machine. It
 prevents a second runtime package from being created before the process,
 credential, and authority boundaries are understood.

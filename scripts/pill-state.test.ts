@@ -35,6 +35,15 @@ test("a broker disconnect clears stale agent activity but preserves the conversa
   assert.deepEqual(State.chatHistory.map((message) => message.content), before);
 });
 
+test("the broker echo acknowledges the existing outgoing message without duplicating it", () => {
+  const outgoing = { id: 50, role: "user" as const, content: "@codex Check the note", delivery: "sending" as const };
+  State.chatHistory.push(outgoing);
+  const update = State.apply(snap({ thread: [{ id: "owner-echo", from: "you", text: outgoing.content }] }));
+  assert.deepEqual(update.newReplies, []);
+  assert.equal(State.chatHistory.filter(message => message.content === outgoing.content).length, 1);
+  assert.equal(State.chatHistory.find(message => message.id === outgoing.id)?.delivery, "accepted");
+});
+
 test("approvals are reported once, queue in order, and mark the asking agent", () => {
   const now = Date.now();
   const a1 = { id: "a1", agent: "codex", title: "Post", detail: "Click Post" };
@@ -57,18 +66,18 @@ test("approvals are reported once, queue in order, and mark the asking agent", (
   assert.equal(State.pendingApproval?.unconfirmed, false);
   State.setDecisionError("a1", "broker unavailable");
   assert.deepEqual(State.decisionError, { approvalId: "a1", message: "broker unavailable" });
-  State.resolveApproval("a1", now + 4);
+  State.resolveApproval("a1", "allow", now + 4);
   assert.equal(State.decisionError, null, "resolving the same approval clears its delivery error");
-  State.resolveApproval("a2", now + 4);
+  State.resolveApproval("a2", "allow", now + 4);
   State.apply(snap({ approvals: [a1, a2] }), now + 5);
   assert.equal(State.approvals.length, 0, "accepted owner decisions suppress stale snapshots from restoring old cards");
   assert.equal(State.defaultView(), "overview");
 });
 
-test("agent run states map to display states, and a finished run earns a finished badge", () => {
+test("agent run states map to display states; idle is availability, not a completion receipt", () => {
   State.apply(snap({ agents: [{ handle: "claude", provider: "claude", state: "working", activity: ["x"] }] }));
   State.apply(snap({ agents: [{ handle: "claude", provider: "claude", state: "idle", activity: ["x", "done"] }] }));
-  assert.equal(State.tasks[0].pillBadge, "finished");
+  assert.equal(State.tasks[0].pillBadge, null, "a provider snapshot's idle state is availability, not a task completion receipt");
   State.apply(snap({ agents: [{ handle: "claude", provider: "claude", state: "failed", activity: [] }] }));
   assert.equal(State.tasks[0].state, "error");
   assert.equal(State.tasks[0].pillBadge, "error");
@@ -80,4 +89,16 @@ test("mention detection finds the @handle being typed at the caret and nothing i
   assert.equal(mentionAt("me@example.com", 14), null);
   assert.equal(mentionAt("hello", 5), null);
   assert.equal(mentionAt("@claude hi", 10), null, "a finished mention followed by text is not being typed");
+});
+
+test("conversation speaker and recipient survive hydration and streamed updates", () => {
+  State.apply(snap({ thread: [{ id: "peer-participants", from: "claude", to: "codex", text: "Let's agree on a plan." }] }));
+  let message = State.chatHistory.find(entry => entry.sourceId === "peer-participants")!;
+  assert.equal(message.from, "claude");
+  assert.equal(message.to, "codex");
+  State.apply(snap({ thread: [{ id: "peer-participants", from: "claude", to: "codex", text: "Let's agree on a plan.\nI'll draft; you verify." }] }));
+  message = State.chatHistory.find(entry => entry.sourceId === "peer-participants")!;
+  assert.equal(State.chatHistory.filter(entry => entry.sourceId === "peer-participants").length, 1);
+  assert.ok(message.content.includes("\n"));
+  assert.equal(message.to, "codex");
 });

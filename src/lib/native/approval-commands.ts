@@ -2,10 +2,11 @@
  * N5 commands: `tasks`, `approve`, `deny`, `allow`, `rules`, `revoke`. Approving, denying and setting rules need a
  * person at a terminal: an agent's shell has none, so an agent can never approve its own or another agent's work.
  */
-import { createLocalStore, handleForProvider } from "./local-store";
+import { createLocalStore, handleForProvider, MAX_LOCAL_EVENT_HISTORY, MAX_STAGE_TIMING_EVENTS_PER_TASK } from "./local-store";
 import { deliverToCodex, realDeps, type DeliveryDeps } from "./codex-delivery";
 import { isHumanContext, lapsedPending, parseDuration, PENDING_TTL_MS } from "./approval-core";
-import type { Task } from "./inbox-core";
+import { summarizeStageTimingEvents, summarizeTaskThinkTime, type Task } from "./inbox-core";
+import { createObservationModalityLedger } from "./observation-modality-ledger";
 
 export interface ApprovalIo {
   env: Record<string, string | undefined>;
@@ -25,7 +26,18 @@ export function stateLabel(t: Task): string {
   if (t.approval === "pending") return "awaiting approval";
   if (t.approval === "denied") return "denied";
   if (t.approval === "expired") return "lapsed";
-  if (t.delivery?.state === "done") return "answered";
+  if (t.retiredAt) return "retired from live delivery; history retained";
+  // The receipt describes execution; delivery only describes transport. A turn
+  // can pause or fail while its earlier transport receipt remains queued.
+  if (t.receipt?.state === "canceled") return "canceled";
+  if (t.receipt?.state === "failed") return "failed";
+  if (t.receipt?.state === "paused") return t.completion?.status === "incomplete" ? "paused; incomplete" : "paused";
+  if (t.receipt?.state === "completed") return "answered";
+  if (t.receipt?.state === "uncertain") return "outcome uncertain; inspect before retrying";
+  if (t.receipt?.state === "retryable") return "retryable; waiting for delivery";
+  if (t.completion?.status === "incomplete") return "paused; incomplete";
+  if (t.completion?.status === "completed" || t.resultSummary !== undefined || t.lifecycle?.state === "completed" || t.delivery?.state === "done") return "answered";
+  if (t.lifecycle?.state === "failed") return "failed";
   if (t.delivery?.state === "queued") return "accepted by the session; waiting for a result";
   if (t.delivery?.state === "sending") return "being sent to the session";
   if (t.delivery?.state === "deferred") return "waiting for the preceding task; resumes automatically";
@@ -65,6 +77,139 @@ export function runTasks(io: ApprovalIo, storeRoot: string): number {
   for (const t of tasks) io.out(`${t.id}  @${t.from} -> @${t.to}  [${stateLabel(t)}]  ${oneLine(t.goal, 70)}`);
   const waiting = tasks.filter((t) => t.approval === "pending");
   if (waiting.length) io.out(`${waiting.length} waiting for you: m9r-cli approve <id>  or  m9r-cli deny <id>`);
+  return 0;
+}
+
+/**
+ * Read-only, owner-terminal view of item 7's observation-modality counter: how many
+ * m9r_computer_observe calls actually resolved tree-only versus fell back to a screenshot
+ * because the tree reported it couldn't answer, versus explicitly asked for pixels. Reading
+ * it never writes -- createObservationModalityLedger() only persists on record().
+ */
+export function runObservationStats(io: ApprovalIo, storeRoot: string): number {
+  if (!isHuman(io)) {
+    io.err("Observation-modality stats are available only to the owner at a terminal.");
+    return 1;
+  }
+  const stats = createObservationModalityLedger(storeRoot).snapshot();
+  if (stats.observations === 0) {
+    io.out("No desktop observations recorded yet in this M9R local store.");
+    return 0;
+  }
+  const percent = (count: number) => `${((count / stats.observations) * 100).toFixed(1)}%`;
+  io.out(`${stats.observations} desktop observation(s) recorded${stats.updatedAt ? ` (last at ${stats.updatedAt})` : ""}:`);
+  io.out(`  tree-only (no screenshot needed):        ${stats.treeOnly} (${percent(stats.treeOnly)})`);
+  io.out(`  tree-incomplete screenshot fallback:      ${stats.treeIncompleteFallback} (${percent(stats.treeIncompleteFallback)})`);
+  io.out(`  explicit representation=visual requested: ${stats.explicitVisual} (${percent(stats.explicitVisual)})`);
+  return 0;
+}
+
+/** Read-only, owner-terminal export of the evidence M9R actually retained for one task. */
+export function runTaskLog(io: ApprovalIo, storeRoot: string, rawId: string | undefined): number {
+  const id = rawId?.trim().toUpperCase();
+  if (!id || !/^T[0-9]{1,12}$/.test(id)) {
+    io.err("Usage: m9r-cli task-log <task id>  (writes a JSON evidence bundle to stdout)");
+    return 1;
+  }
+  if (!isHuman(io)) {
+    io.err("Task evidence is available only to the owner at a terminal; provider agents cannot read local task logs.");
+    return 1;
+  }
+
+  const store = createLocalStore(storeRoot);
+  // recordStageTiming debounces most phases to disk (see its own doc comment);
+  // only "completion"/"stop" flush eagerly. Reading the snapshot straight
+  // away silently missed every other phase recorded moments earlier --
+  // exactly the evidence an owner reaches for task-log to see.
+  store.flushStageTiming();
+  const snapshot = store.snapshot();
+  const task = snapshot.tasks.find((candidate) => candidate.id === id);
+  if (!task) {
+    io.err(`No task ${id} exists in this M9R local store.`);
+    return 1;
+  }
+
+  const stageTiming = task.stageTiming ?? [];
+  const stageTimingSummary = task.stageTimingSummary ?? summarizeStageTimingEvents(stageTiming);
+  const correlatedStoreEvents = snapshot.events.filter((event) => event.taskId === task.id);
+  const report = {
+    schema: "m9r.task-evidence.v1",
+    generatedAt: new Date().toISOString(),
+    task: {
+      id: task.id,
+      createdAt: task.createdAt,
+      deliveredAt: task.deliveredAt,
+      from: task.from,
+      to: task.to,
+      origin: task.origin,
+      instruction: task.goal,
+      instructionTruncated: task.goalTruncated,
+      approval: task.approval,
+      delivery: task.delivery && {
+        transport: task.delivery.transport,
+        state: task.delivery.state,
+        attempts: task.delivery.attempts,
+        claimedAt: task.delivery.claimedAt,
+        queuedAt: task.delivery.queuedAt,
+        uncertainAt: task.delivery.uncertainAt,
+        failedAt: task.delivery.failedAt,
+        error: task.delivery.error,
+        correlation: task.delivery.correlation,
+      },
+      deliveryHistory: task.deliveryHistory?.map((delivery) => ({
+        transport: delivery.transport,
+        state: delivery.state,
+        attempts: delivery.attempts,
+        claimedAt: delivery.claimedAt,
+        queuedAt: delivery.queuedAt,
+        uncertainAt: delivery.uncertainAt,
+        failedAt: delivery.failedAt,
+        error: delivery.error,
+        correlation: delivery.correlation,
+      })),
+      lifecycle: task.lifecycle && {
+        state: task.lifecycle.state,
+        source: task.lifecycle.source,
+        queuedAt: task.lifecycle.queuedAt,
+        presentedAt: task.lifecycle.presentedAt,
+        acknowledgedAt: task.lifecycle.acknowledgedAt,
+        completedAt: task.lifecycle.completedAt,
+        error: task.lifecycle.error,
+      },
+      receipt: task.receipt && {
+        state: task.receipt.state,
+        attempt: task.receipt.attempt,
+        updatedAt: task.receipt.updatedAt,
+        source: task.receipt.source,
+        error: task.receipt.error,
+        history: (task.receipt.history ?? []).map(({ state, at, attempt, source, basis, error }) => ({ state, at, attempt, source, basis, error })),
+      },
+      runtimeBuildIds: task.runtimeBuildIds ?? [],
+      resultSummary: task.resultSummary,
+      completion: task.completion,
+    },
+    stageTiming,
+    stageTimingSummary,
+    stageTimingSummaryStartedAt: task.stageTimingSummaryStartedAt ?? stageTiming[0]?.startedAt ?? null,
+    timingBreakdown: summarizeTaskThinkTime({
+      createdAt: task.createdAt,
+      completedAt: task.lifecycle?.completedAt ?? task.completion?.updatedAt,
+      stageTimingSummary,
+    }),
+    correlatedStoreEvents,
+    retention: {
+      stageTimingEvents: stageTiming.length,
+      perTaskStageTimingLimit: MAX_STAGE_TIMING_EVENTS_PER_TASK,
+      stageTimingMayBeTruncated: stageTiming.length >= MAX_STAGE_TIMING_EVENTS_PER_TASK,
+      stageTimingSummaryMayBeIncomplete: task.stageTimingSummaryMayBeIncomplete ?? stageTiming.length >= MAX_STAGE_TIMING_EVENTS_PER_TASK,
+      stageTimingSummaryEventCount: Object.values(stageTimingSummary).reduce((total, phase) => total + (phase?.count ?? 0), 0),
+      correlatedStoreEvents: correlatedStoreEvents.length,
+      globalEventHistoryLimit: MAX_LOCAL_EVENT_HISTORY,
+      globalEventHistoryMayBeTruncated: snapshot.events.length >= MAX_LOCAL_EVENT_HISTORY,
+      note: "Raw task-stage timing details are bounded; per-phase count, duration sum, maximum, and error totals continue after that detail cap. A summary backfilled from a legacy capped history is marked possibly incomplete. Timing details are redacted and length-bounded when stored. The store does not retain provider conversation transcripts, screenshots, or the broker process stderr stream; this export reports only evidence that was actually persisted.",
+    },
+  };
+  io.out(JSON.stringify(report, null, 2));
   return 0;
 }
 

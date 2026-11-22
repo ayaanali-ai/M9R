@@ -63,8 +63,8 @@ footer{margin-top:72px;padding-top:20px;border-top:1px solid var(--line);color:v
   <section aria-labelledby="proof">
     <h2 id="proof">What works today</h2>
     <div class="grid">
-      <div class="item"><h3>One page, several agents</h3><p>Each agent shows up as a cursor with a name, so you can see who is doing what on the page.</p><span class="tag">Shown with the real extension</span></div>
-      <div class="item"><h3>They don't collide</h3><p>An agent typing in a field holds it. A second agent is refused with a plain message and can work in another field.</p><span class="tag">Shown with the real extension</span></div>
+      <div class="item"><h3>One computer, several agents</h3><p>Agents share the owner's desktop through M9R's native controls, with their work and status visible in the M9R interface.</p><span class="tag">Local native runtime</span></div>
+      <div class="item"><h3>Work stays on the owner's computer</h3><p>M9R acts on the owner's open applications and browser through the native desktop runtime.</p><span class="tag">No browser extension required</span></div>
       <div class="item"><h3>You can step in mid-task</h3><p>Interrupt a working agent with a message. In our runs it was typing your new instruction in about two seconds.</p><span class="tag">Measured with real Claude Code</span></div>
       <div class="item"><h3>Different vendors, same tools</h3><p>Real sessions of Claude Code, Codex and OpenCode have each used the same M9R web tools on the subscriptions they already have.</p><span class="tag">Verified in real runs</span></div>
     </div>
@@ -75,8 +75,8 @@ footer{margin-top:72px;padding-top:20px;border-top:1px solid var(--line);color:v
     <h2 id="try">Try it, then run it with your own agents</h2>
     <ol>
       <li><b style="color:var(--ink)">Play with the sandbox.</b> <a href="/try/">Open it</a>: three scripted bots share a page and you play the owner. No AI is running, and nothing is sent anywhere.</li>
-      <li><b style="color:var(--ink)">Run the real thing.</b> Load the M9R extension unpacked in Chrome or Edge, start the local broker, and connect Claude Code, Codex or OpenCode. Step-by-step notes are landing in the <a href="https://github.com/ayaanali-ai/M9R">repository</a> with this launch.</li>
-      <li><b style="color:var(--ink)">Watch two agents share a page.</b> They work on your machine, on your subscriptions, in your own browser.</li>
+      <li><b style="color:var(--ink)">Run the real thing.</b> Install the M9R desktop runtime and connect Claude Code, Codex or OpenCode using the current <a href="/docs/get-started">setup guide</a>.</li>
+      <li><b style="color:var(--ink)">Watch agents work on your computer.</b> They use the applications and browser already open on your machine.</li>
     </ol>
   </section>
 
@@ -84,12 +84,12 @@ footer{margin-top:72px;padding-top:20px;border-top:1px solid var(--line);color:v
     <h2 id="limits">What isn't done yet</h2>
     <ul class="limits">
       <li>Two people's agents on two different machines. It is designed and not shipped.</li>
-      <li>A Chrome Web Store listing. It is planned; for now the extension loads unpacked.</li>
+      <li>M9R does not ship or require a Chrome or Edge extension.</li>
       <li>Only Claude Code, Codex and OpenCode have been tried, in small tests on a synthetic test site.</li>
     </ul>
   </section>
 
-  <footer>M9R · the multiplayer web for AI agents. The sandbox is a scripted demo. The write-up lists every number and its limits.</footer>
+  <footer>M9R · agents working together on the owner's computer. The sandbox is a scripted demo. The write-up lists every number and its limits.</footer>
 </div>
 <script>
 (function(){var f=document.getElementById('wl-form'),m=document.getElementById('wl-msg'),i=document.getElementById('wl-email');

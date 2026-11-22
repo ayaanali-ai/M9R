@@ -6,13 +6,10 @@ export type IslandMode = "hidden" | "compact" | "expanded";
 export type IslandViewName =
   | "overview"
   | "empty"
-  | "approval"
   | "error"
   | "finished"
   | "prompt"
-  | "models"
   | "note"
-  | "settings"
   | "drop";
 
 export type BotStateName =
@@ -60,15 +57,11 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   // Taller than the other views: the wheel needs room for two rows either side of the centred one.
   overview: { height: 196, botX: 68, botY: 114, botDiameter: 58, agentMode: "pills" },
   empty: { height: 160, botX: 70, botY: null, botDiameter: 62, agentMode: "none" },
-  // Same mark position as the drum so an approval reads as the wheel's centred agent asking, not a new screen.
-  approval: { height: 160, botX: 68, botY: 96, botDiameter: 58, agentMode: "column" },
   error: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   // Grows downward: the band leads with what finished, the steps unfold beneath it.
   finished: { height: 232, botX: 68, botY: 79, botDiameter: 52, agentMode: "column" },
   prompt: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
-  models: { height: 300, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
-  settings: { height: 220, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   drop: { height: 200, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
 };
 
@@ -119,7 +112,8 @@ export function botPosition(
       // Collapsed means solid black, nothing overlaid — no status mark, no provider logo.
       return { cx: 40, cy: 16, diameter: 20, opacity: 0 };
     case "expanded": {
-      if (view === "models" || view === "prompt" || view === "drop") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
+      // Home (overview) draws its own idle mark inside its main pane; the island's mark would sit on the sidebar.
+      if (view === "overview" || view === "prompt" || view === "drop") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
       const layout = VIEW_LAYOUTS[view];
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };
@@ -155,6 +149,13 @@ export function botGlowColor(s: BotStateName): string {
       return "#FFFFFF";
   }
 }
+
+/** Each music app's own signature colour; anything else plays in quiet white. */
+export const MEDIA_TONE: Record<"spotify" | "apple-music" | "other", string> = {
+  spotify: "#1DB954",
+  "apple-music": "#FA2D48",
+  other: "#E5E5EA",
+};
 
 export function botGlowOpacity(s: BotStateName): number {
   switch (s) {

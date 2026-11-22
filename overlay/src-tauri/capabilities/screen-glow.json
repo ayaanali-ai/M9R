@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "screen-glow",
+  "description": "The decorative screen frame receives its appearance state and cannot control the desktop.",
+  "windows": ["screen-glow"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

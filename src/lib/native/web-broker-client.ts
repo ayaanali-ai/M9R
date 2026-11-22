@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
-import type { WebBatchRequest, WebBatchResponse, WebRequest, WebResponse } from "./web-broker-core";
 import type { WebAgentMessage } from "./web-broker-core";
 import { requestOwnerPipe } from "./owner-pipe";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
+import type { TaskCompletionReport } from "./task-completion-contract";
 import type { TaskStageMode } from "./task-desktop-stage";
-import type { MultiplayerA2ASendInput, MultiplayerSendResult } from "./multiplayer-runtime";
+import type { MultiplayerA2ASendInput, MultiplayerDeliveryReceipt, MultiplayerSendResult } from "./multiplayer-runtime";
 import { parseA2AMessage, type A2AMessage } from "./multiplayer-contract";
+import { taskContextSchema, type TaskContext } from "./multiplayer-task-context";
 
 const MAX_STAGE_REQUEST_TIMEOUT_MS = 70_000;
 const CURSOR_PRIME_TIMEOUT_MS = 5_000;
@@ -31,16 +32,27 @@ export interface WebBrokerClient {
   submitAgentTask?(token: string, to: string, goal: string): Promise<{ ok: boolean; taskId?: string; created?: boolean; error?: string }>;
   /** Structured provider-neutral teammate message. Kept separate from legacy task delivery. */
   sendA2A?(token: string, input: MultiplayerA2ASendInput): Promise<MultiplayerSendResult>;
+  /** Shared task state and conflict-safe work ownership for A2A coordination. */
+  getMultiplayerTaskContext?(token: string, taskId: string): Promise<{ ok: boolean; context?: TaskContext; error?: string }>;
+  claimMultiplayerWork?(token: string, input: { taskId: string; assignmentId: string; workKey: string; summary: string }): Promise<{ ok: boolean; duplicate?: boolean; context?: TaskContext; error?: string }>;
+  completeMultiplayerWork?(token: string, taskId: string, assignmentId: string): Promise<{ ok: boolean; duplicate?: boolean; context?: TaskContext; error?: string }>;
+  releaseMultiplayerWork?(token: string, taskId: string, assignmentId: string): Promise<{ ok: boolean; duplicate?: boolean; context?: TaskContext; error?: string }>;
   claimAgentInbox?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; taskIds?: string[]; error?: string }>;
+  /** Acknowledge only completed teammate replies addressed to the authenticated sending session. */
+  markAgentResultsShown?(token: string, taskIds: readonly string[]): Promise<{ ok: boolean; error?: string }>;
   advanceAgentInboxCursor?(token: string, seq: number): Promise<{ ok: boolean; error?: string }>;
-  recordAgentTaskResult?(token: string, taskId: string, summary: string): Promise<{ ok: boolean; error?: string }>;
+  recordAgentTaskResult?(token: string, taskId: string, summary: string, completion?: TaskCompletionReport, handledPeerTaskIds?: readonly string[], replyMessageId?: string): Promise<{
+    ok: boolean;
+    error?: string;
+    alreadyRecorded?: boolean;
+    answerTaskId?: string;
+    answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict";
+  }>;
   taskStageApp?(token: string, taskId: string, appId?: string, mode?: TaskStageMode, operationId?: string): Promise<StageClientResult>;
   taskStageAction?(token: string, taskId: string, action: unknown, mode?: TaskStageMode, operationId?: string, expectedMutationRevision?: number): Promise<StageClientResult>;
   prepareTaskStage?(token: string, taskId: string, mode?: TaskStageMode, timeoutMs?: number, options?: { bindForeground?: boolean }): Promise<{ ok: boolean; stage?: unknown; error?: string }>;
   /** Best-effort delivery-time cursor prime; never blocks the task transport. */
   primeAgentCursor?(token: string, taskId: string): Promise<StageClientResult>;
-  run(request: WebRequest): Promise<WebResponse>;
-  runBatch?(request: WebBatchRequest): Promise<WebBatchResponse>;
   notifyMessage?(message: WebAgentMessage): Promise<boolean>;
   /** Ask the local AWARE ledger before a browser-room agent writes a task into another member's inbox. */
   authorizeRoomMessage?(sender: string, recipient: string): Promise<{ ok: true } | { ok: false; error: string }>;
@@ -64,7 +76,23 @@ type StructuredA2AStoreResponse = {
   duplicate?: boolean;
   message?: unknown;
   recipientAgentIds?: unknown;
+  taskId?: unknown;
+  delivery?: unknown;
 };
+
+type SharedTaskStateResponse = { ok: boolean; context?: unknown; duplicate?: boolean; error?: string };
+
+function parseSharedTaskStateResponse(result: SharedTaskStateResponse, error: string):
+  | { ok: true; context: TaskContext; duplicate?: boolean }
+  | { ok: false; error: string } {
+  if (!result.ok) return { ok: false, error: result.error ?? error };
+  try {
+    const context = taskContextSchema.parse(result.context);
+    return { ok: true, context, ...(result.duplicate === undefined ? {} : { duplicate: result.duplicate }) };
+  } catch {
+    return { ok: false, error: "The owner broker returned invalid shared task state." };
+  }
+}
 
 function stageTransportFailure(error: unknown): string {
   if (error && typeof error === "object") {
@@ -186,21 +214,70 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
       } catch {
         return { ok: false, error: "The owner broker returned an invalid structured teammate message." };
       }
+      const rawDelivery = result.delivery && typeof result.delivery === "object" ? result.delivery as Record<string, unknown> : undefined;
+      const states = ["queued", "already-present", "pending", "uncertain", "completed", "held-no-progress", "not-configured", "failed"] as const;
+      const deliveryState = rawDelivery?.state;
+      const delivery = rawDelivery && states.some((state) => state === deliveryState)
+        ? {
+          state: deliveryState as typeof states[number],
+          ...(typeof rawDelivery.taskId === "string" ? { taskId: rawDelivery.taskId } : {}),
+          ...(typeof rawDelivery.created === "boolean" ? { created: rawDelivery.created } : {}),
+          ...(typeof rawDelivery.error === "string" ? { error: rawDelivery.error } : {}),
+        }
+        : { state: "not-configured" as const, error: "The owner broker did not return a recipient-inbox delivery receipt." };
       return {
         ok: true,
         duplicate: result.duplicate === true,
         message,
         recipientAgentIds: result.recipientAgentIds as string[],
+        delivery,
       };
+    },
+    async getMultiplayerTaskContext(token, taskId) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "task_state", token, taskId },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not read shared task state.");
+    },
+    async claimMultiplayerWork(token, input) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "claim_work", token, ...input },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not claim shared work.");
+    },
+    async completeMultiplayerWork(token, taskId, assignmentId) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "complete_work", token, taskId, assignmentId },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not complete shared work.");
+    },
+    async releaseMultiplayerWork(token, taskId, assignmentId) {
+      const result = await agentStoreRequest<SharedTaskStateResponse>({
+        ownerPipePath: options.ownerPipePath,
+        body: { action: "release_work", token, taskId, assignmentId },
+      });
+      return parseSharedTaskStateResponse(result, "The owner broker could not release shared work.");
     },
     async claimAgentInbox(token, taskIds) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "claim_inbox", token, taskIds } });
     },
+    async markAgentResultsShown(token, taskIds) {
+      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "mark_results_shown", token, taskIds } });
+    },
     async advanceAgentInboxCursor(token, seq) {
       return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "cursor", token, seq } });
     },
-    async recordAgentTaskResult(token, taskId, summary) {
-      return agentStoreRequest({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary } });
+    async recordAgentTaskResult(token, taskId, summary, completion, handledPeerTaskIds, replyMessageId) {
+      return agentStoreRequest<{
+        ok: boolean;
+        error?: string;
+        alreadyRecorded?: boolean;
+        answerTaskId?: string;
+        answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict";
+      }>({ ownerPipePath: options.ownerPipePath, body: { action: "result", token, taskId, summary, ...(completion ? { completion } : {}), ...(handledPeerTaskIds?.length ? { handledPeerTaskIds } : {}), ...(replyMessageId ? { replyMessageId } : {}) } });
     },
     async taskStageApp(token, taskId, appId, mode = "owner-preview", operationId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
@@ -208,61 +285,19 @@ export function createWebBrokerClient(options: WebBrokerClientOptions): WebBroke
         body: { token, taskId, mode, ...(appId === undefined ? {} : { appId }), ...(operationId ? { operationId } : {}) },
         timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
-    async taskStageAction(token, taskId, action, mode = "owner-preview", operationId, expectedMutationRevision) {
+    async taskStageAction(token, taskId, action, mode, operationId, expectedMutationRevision) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/action`,
         body: { token, taskId, action, mode, ...(operationId ? { operationId } : {}),
           ...(expectedMutationRevision === undefined ? {} : { expectedMutationRevision }) },
         timeoutMs: 70_000, ...(operationId ? { operationId } : {}) });
     },
-    async prepareTaskStage(token, taskId, mode = "owner-preview", timeoutMs = 15_000, prepareOptions) {
+    async prepareTaskStage(token, taskId, mode, timeoutMs = 15_000, prepareOptions) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath, url: `${baseUrl}/web/stage/prepare`,
         body: { token, taskId, mode, ...(prepareOptions?.bindForeground ? { bindForeground: true } : {}) }, timeoutMs });
     },
     async primeAgentCursor(token, taskId) {
       return taskStageRequest({ fetchImpl: doFetch, keyPath: options.keyPath, ownerPipePath: options.ownerPipePath,
         url: `${baseUrl}/web/stage/prime-cursor`, body: { token, taskId }, timeoutMs: CURSOR_PRIME_TIMEOUT_MS });
-    },
-    async run(request) {
-      let key: string;
-      try {
-        key = readFileSync(options.keyPath, "utf8").trim();
-      } catch {
-        return { ok: false, error: "the M9R web broker has not been started yet (run m9r-web-broker once)" };
-      }
-      try {
-        const response = await doFetch(`${baseUrl}/cmd`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify(request),
-          // The broker may hold startup calls while Chrome starts the extension worker and it sends READY.
-          signal: AbortSignal.timeout(60_000),
-        });
-        return (await response.json()) as WebResponse;
-      } catch (error) {
-        if (error instanceof Error && error.name === "TimeoutError") return { ok: false, error: "the M9R web broker did not answer within 60s" };
-        const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
-        const code = (cause as { code?: string } | undefined)?.code ?? (cause instanceof Error ? cause.message : String(cause));
-        return { ok: false, error: `the M9R web broker is not reachable (${code}); start it with m9r-web-broker` };
-      }
-    },
-    async runBatch(request) {
-      let key: string;
-      try {
-        key = readFileSync(options.keyPath, "utf8").trim();
-      } catch {
-        return { ok: false, steps: [], failedAt: 0 };
-      }
-      try {
-        const response = await doFetch(`${baseUrl}/batch`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-m9r-key": key },
-          body: JSON.stringify(request),
-          signal: AbortSignal.timeout(60_000),
-        });
-        return (await response.json()) as WebBatchResponse;
-      } catch {
-        return { ok: false, steps: [], failedAt: 0 };
-      }
     },
     async notifyMessage(message) {
       let key: string;

@@ -132,8 +132,11 @@ test("installer contains no Node/npm dependency and changes no saved PowerShell 
     "updates must authenticate and stop the owned broker before engine setup can replace its runtime image");
   assert.match(source, /Invoke-ManagedBrokerUpdate\s+\$installedEngine\s+'start'/,
     "updates must restart and verify the owned broker using the newly installed engine");
-  assert.match(source, /if \(image\.processes\.length > 0\) \{[\s\S]*stopExactManagedBrokerImage\(target\.brokerPath\)[\s\S]*afterExactStop/,
+  const cliShutdownSource = readFileSync(resolve("scripts/m9r-cli.ts"), "utf8");
+  assert.match(cliShutdownSource, /if \(image\.processes\.length > 0\) \{[\s\S]*stopExactManagedBrokerImage\(target\.brokerPath\)[\s\S]*afterExactStop/,
     "a drained-but-still-live broker must use the verified exact-image fallback before replacing locked runtime files");
+  assert.match(source, /function Move-FileWithRetry\([\s\S]*Move-Item[\s\S]*Start-Sleep/,
+    "the installer must retry the authenticated atomic replace after a transient Windows file-lock race");
   assert.match(source, /brokerNeedsResume[\s\S]*Invoke-ManagedBrokerUpdate \$brokerResumeEngine 'start'/,
     "a failed install must attempt to restore the previously managed broker");
   assert.match(source, /Start-Process -FilePath \$installedOverlay/);

@@ -14,7 +14,7 @@ The full engine package is required before reconciling old runtime paths. A hook
 
 `cli/dist` and `engine/dist` are generated outputs, not historical version stores. Each builder writes a complete staged directory, verifies it, then replaces the destination directory as one snapshot. It does not merge the new runtime with leftover files from an older build. If the prior output is not a valid complete output, publication stops and preserves it for audit. If a prior snapshot remains after a verified publication, the build reports the exact path and the next run removes it only after validating the new output and the prior snapshot.
 
-This lifecycle is source-verified in this branch but has not been installed or executed as a user-facing update. The `npm run build:engine` path rebuilds the CLI first; the candidate builder also builds the CLI and engine into the same candidate. Do not build the engine directly against an old `cli/dist` folder.
+The engine builder always rebuilds the CLI into the selected output directory before packaging it. `npm run build:engine` and `npm run build:candidate` use that same orchestrated path; the candidate's CLI and engine outputs stay together under its unique directory. This prevents a direct engine build from accidentally bundling a stale `cli/dist`. The standalone install remains separate from this source/build verification.
 
 ## Build and review a candidate
 

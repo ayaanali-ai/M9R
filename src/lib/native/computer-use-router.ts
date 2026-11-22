@@ -11,7 +11,7 @@ import {
 
 // The action policy is kept separate from adapter selection so callers can
 // decide background/visible/exclusive delivery before choosing a route.
-export { selectActionDelivery } from "./multiplayer-action-policy";
+export { requestedActionDelivery, selectActionDelivery } from "./multiplayer-action-policy";
 export type { ActionDeliveryDecision, ActionDeliveryRequest, RequestedDelivery } from "./multiplayer-action-policy";
 
 const targetKindSchema = z.enum(["desktop", "desktop-window", "browser-chrome", "browser-tab", "browser-frame", "web-element"]);
@@ -52,7 +52,8 @@ export interface ComputerUseRouteRequest {
   action: ComputerUseAction;
   routes: readonly ComputerUseRouteDescriptor[];
   nowMs: number;
-  maxObservationAgeMs: number;
+  /** Optional caller policy. Surface revision, not elapsed time, is the default validity boundary. */
+  maxObservationAgeMs?: number;
   /** The caller persists this per target/task and passes it on later actions. */
   pinnedRouteId?: string;
   /** Trusted owner-UI grant; absent or invalid means no shared OS input. */

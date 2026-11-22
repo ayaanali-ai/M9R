@@ -45,7 +45,8 @@ param(
     [switch]$Uninstall,
     [switch]$Web,
     [switch]$NoAutostart,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    [switch]$Yes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +57,7 @@ $checksumName = "$assetName.sha256"
 $policyName = 'm9r-accepted-runtime.json'
 $releaseTagPrefix = 'm9r-engine-v'
 $script:TrustedRuntimePolicyPath = $null
+$script:ReleaseTag = $null
 $script:CandidateReceipt = $null
 $script:VerifiedCandidateReceiptPath = $null
 $script:PackageSha256 = $null
@@ -131,6 +133,7 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
                 }
                 Invoke-WebRequest -Uri $assets.Policy.browser_download_url -OutFile $policyPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
                 $script:TrustedRuntimePolicyPath = $policyPath
+                $script:ReleaseTag = $assets.Release.tag_name
             } else {
                 $script:TrustedRuntimePolicyPath = $localPolicy
             }
@@ -150,6 +153,7 @@ function Get-VerifiedPackage([string]$LocalPackagePath, [string]$DownloadRoot) {
         Invoke-WebRequest -Uri $assets.Checksum.browser_download_url -OutFile $shaPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
         Invoke-WebRequest -Uri $assets.Policy.browser_download_url -OutFile $policyPath -Headers @{ 'User-Agent' = 'M9R-Windows-Installer' }
         $script:TrustedRuntimePolicyPath = $policyPath
+        $script:ReleaseTag = $assets.Release.tag_name
     }
 
     if (-not (Test-Path -LiteralPath $shaPath -PathType Leaf)) { throw "Checksum sidecar is missing: $shaPath" }
@@ -181,7 +185,7 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt', 'update-public-key.pem', 'VERSION', 'install-m9r.ps1', 'install-m9r.cmd')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }
@@ -211,7 +215,7 @@ function Get-AcceptedRuntimeIdentity {
 function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
     if (-not $AllowLocalCandidate) { return }
     $receipt = $script:CandidateReceipt
-    if (-not $receipt -or $receipt.schemaVersion -ne 1 -or $receipt.buildMode -ne 'accepted-live-overlay' -or
+    if (-not $receipt -or $receipt.schemaVersion -ne 1 -or $receipt.buildMode -ne 'pill-built-from-source' -or
         [string]$receipt.candidateId -notmatch '^\d{4}-\d{2}-\d{2}T.+-[a-fA-F0-9]{8}$') {
         throw 'The external candidate receipt is malformed. Nothing was installed.'
     }
@@ -236,6 +240,20 @@ function Assert-LocalCandidateReceipt($Runtime, [string]$PayloadRoot) {
     foreach ($field in @('runtimeManifest', 'exactRuntimeArtifactSet', 'acceptedPillHash', 'packageChecksum')) {
         if ($receipt.verified.$field -ne $true) { throw "The candidate receipt does not verify $field. Nothing was installed." }
     }
+    # Flow guard 5B: install only from a tagged release -- stricter than "any
+    # ancestor of trunk". A local candidate's source commit must be pointed at
+    # by an annotated or lightweight tag matching the release naming pattern,
+    # in the repo this installer script itself lives in.
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    $sourceCommit = [string]$receipt.sourceCommit
+    if ($sourceCommit -notmatch '^[a-fA-F0-9]{40}$') {
+        throw 'The candidate receipt has no valid source commit. Nothing was installed.'
+    }
+    $tagOutput = & git -C $repoRoot tag --points-at $sourceCommit --list 'release-*' 2>$null
+    $releaseTags = @($tagOutput | Where-Object { $_ -match '^release-' })
+    if ($releaseTags.Count -eq 0) {
+        throw "Refusing to install candidate source commit ${sourceCommit}: it is not pointed at by any 'release-*' tag (flow guard 5B). Tag it first."
+    }
 }
 
 function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
@@ -251,14 +269,13 @@ function Assert-AcceptedRuntimePackage([string]$PayloadRoot) {
         # An explicitly supplied local candidate is the controlled promotion
         # path for development/demo builds. Its external receipt binds the
         # exact ZIP, source commit, runtime manifest, and artifact hashes. The
-        # owner-accepted policy still pins the visual pill so a runtime update
-        # can never silently replace the accepted UI, but engine/broker/helper
-        # binaries are allowed to advance as one verified candidate set.
-        $acceptedPill = [string]$accepted.artifacts.'m9r-overlay.exe'
+        # Flow guard 4A: the pill is built from source on every candidate build
+        # (see build-engine.mjs), so there is no separate "accepted" pill value
+        # to compare against anymore -- its hash is verified below as just
+        # another runtime artifact, against the candidate's own manifest.
         $candidatePill = [string]$runtime.artifacts.'m9r-overlay.exe'
-        if (($acceptedPill -notmatch '^[a-fA-F0-9]{64}$' -or $candidatePill -notmatch '^[a-fA-F0-9]{64}$') -or
-            (-not [string]::Equals($candidatePill, $acceptedPill, [StringComparison]::OrdinalIgnoreCase))) {
-            throw 'The local candidate pill does not match the owner-accepted live pill. Nothing was installed.'
+        if ($candidatePill -notmatch '^[a-fA-F0-9]{64}$') {
+            throw 'The local candidate runtime has no valid pill hash. Nothing was installed.'
         }
         $runtimeEntries = @($runtime.artifacts.PSObject.Properties)
         if ($runtimeEntries.Count -eq 0) { throw 'The local candidate runtime has no artifact inventory. Nothing was installed.' }
@@ -412,9 +429,27 @@ function Write-ManagedWebBrokerManifest($Paths, [string]$Hash) {
     try {
         $json = ConvertTo-Json -InputObject $document
         [IO.File]::WriteAllText($temporary, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
-        Move-Item -LiteralPath $temporary -Destination $Paths.Manifest -Force
+        Move-FileWithRetry $temporary $Paths.Manifest
     } finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
+function Move-FileWithRetry([string]$Source, [string]$Destination) {
+    # Windows Defender, the broker shutdown boundary, and Task Scheduler can
+    # all hold a just-written executable for a short interval.  The installer
+    # already disables M9R's task before this point; this bounded retry closes
+    # the remaining antivirus/handle race without ever overwriting an unknown
+    # path or falling back to a non-atomic copy.
+    $delays = @(25, 50, 100, 200, 400, 800, 1200, 1600)
+    for ($attempt = 0; $attempt -le $delays.Count; $attempt++) {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -ge $delays.Count) { throw }
+            Start-Sleep -Milliseconds $delays[$attempt]
+        }
     }
 }
 
@@ -438,7 +473,9 @@ function Install-ManagedWebBroker([string]$SourcePath) {
         Copy-Item -LiteralPath $SourcePath -Destination $temporary
         $stagedHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($stagedHash -ne $sourceHash) { throw 'The staged standalone web broker failed its SHA-256 check.' }
-        Move-Item -LiteralPath $temporary -Destination $paths.Target -Force
+        Move-FileWithRetry $temporary $paths.Target
+        $installedHash = (Get-FileHash -LiteralPath $paths.Target -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($installedHash -ne $sourceHash) { throw 'The installed standalone web broker failed its post-replace SHA-256 check.' }
         Write-ManagedWebBrokerManifest $paths $sourceHash
     } finally {
         if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force }
@@ -466,6 +503,11 @@ function Remove-ManagedWebBroker {
 }
 
 function Read-Consent([string]$Prompt) {
+    # -Yes is for the pill's own in-app "Update now" button: the click itself is
+    # the consent, already shown an exact plan on an earlier check_for_update
+    # screen. It does nothing for a human running this script by hand, who
+    # still sees and must answer every prompt below.
+    if ($Yes) { Write-Host "$Prompt [auto-approved via -Yes]"; return $true }
     # Read-Host only reads an interactive console. Release tests and scripted
     # maintenance use redirected stdin, so consume one line directly there
     # instead of hanging after printing the consent plan.
@@ -513,6 +555,30 @@ function Stop-InstalledM9rPill {
     $stillRunning = @(Get-Process -Name 'm9r-overlay' -ErrorAction SilentlyContinue | Where-Object { & $matchesInstalledPill $_ })
     if ($stillRunning.Count -gt 0) {
         throw 'The installed M9R pill is still running. No installed files were replaced.'
+    }
+}
+
+function Assert-NoStaleM9rProcesses {
+    # Stop-InstalledM9rPill stops the pill and, per its own comment, "the engine child it
+    # owns" -- one lineage. Invoke-ManagedBrokerUpdate 'stop' stops the Web Broker -- a second
+    # lineage. Anything still named m9r-engine.exe or m9r-native-input-host.exe and running
+    # from this install's own bin path after both of those have already run is neither: the
+    # only other way either binary gets launched is a coding tool's own MCP bridge connecting
+    # to M9R independently (confirmed live, repeatedly: a Claude Code/Codex session that has
+    # m9r-engine configured as an MCP server starts its own long-lived instance, outside the
+    # pill's and the broker's lifecycle entirely, and neither of the stops above can see or
+    # touch it). NTFS lets this installer rename the file out from under a process that still
+    # has it open, so the copy below would otherwise "succeed" while that stale process keeps
+    # running the OLD binary in memory -- a real fix that was genuinely installed, silently not
+    # actually running. Hard-refuse instead of risking a Force-kill against a process some other
+    # tool may be mid-conversation with.
+    $binDir = [IO.Path]::GetFullPath((Join-Path (Get-M9rHome) 'bin'))
+    $stale = @(Get-Process -Name 'm9r-engine', 'm9r-native-input-host' -ErrorAction SilentlyContinue | Where-Object {
+        try { ([IO.Path]::GetFullPath($_.Path)).StartsWith($binDir, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+    })
+    if ($stale.Count -gt 0) {
+        $names = ($stale | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
+        throw "M9R found still-running process(es) this installer does not own: $names. These are almost always a coding tool's own MCP bridge to M9R (e.g. an open Claude Code or Codex session with m9r-engine configured as an MCP server) -- close that session, or otherwise stop these processes yourself, then retry. No installed files were replaced."
     }
 }
 
@@ -731,6 +797,7 @@ try {
     $brokerStop = Invoke-ManagedBrokerUpdate $engine 'stop'
     $brokerNeedsResume = $brokerStop.managedTask
     Stop-InstalledM9rPill
+    Assert-NoStaleM9rProcesses
     # Native setup registers the owned broker task; this installer starts it
     # only after the new broker image and its ownership record are installed.
     $previousBrokerDefer = $env:M9R_DEFER_BROKER_START
@@ -757,6 +824,28 @@ try {
     $brokerResumeEngine = $installedEngine
     Install-ManagedWebBroker $packageBroker
     Restore-ManagedBrokerAutoStart $brokerTaskState
+    if (-not $AllowLocalCandidate -and $script:ReleaseTag) {
+        $installedVersion = (Get-Content -LiteralPath (Join-Path $payload 'VERSION') -Raw).Trim()
+        $updatePublicKeyPem = Get-Content -LiteralPath (Join-Path $payload 'update-public-key.pem') -Raw
+        $updateManifestBase = "https://github.com/$repo/releases/download/$($script:ReleaseTag)/m9r-update-manifest.json"
+        $updateConfig = [ordered]@{
+            schemaVersion  = 1
+            currentVersion = $installedVersion
+            source         = [ordered]@{
+                manifestUrl  = $updateManifestBase
+                signatureUrl = "$updateManifestBase.sig"
+                publicKeyPem = $updatePublicKeyPem
+            }
+        }
+        ($updateConfig | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $env:M9R_HOME 'update-config.json') -Encoding UTF8
+        # Persist a copy of this exact verified installer (it was itself hashed as part of
+        # this ZIP) so the pill's in-app "Update now" button has something local and trusted
+        # to re-run later, without needing to fetch and unpack a fresh release just for that.
+        $toolsDir = Join-Path $env:M9R_HOME 'tools'
+        if (-not (Test-Path -LiteralPath $toolsDir -PathType Container)) { [void](New-Item -ItemType Directory -Path $toolsDir) }
+        Copy-Item -LiteralPath (Join-Path $payload 'install-m9r.ps1') -Destination (Join-Path $toolsDir 'install-m9r.ps1') -Force
+        Copy-Item -LiteralPath (Join-Path $payload 'install-m9r.cmd') -Destination (Join-Path $toolsDir 'install-m9r.cmd') -Force
+    }
     Write-Host ''
     Write-Host 'M9R setup finished. The broker-owned provider processes are ready.' -ForegroundColor Green
     Write-Host "To undo the managed setup later: `"$installedEngine`" uninstall"

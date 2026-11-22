@@ -9,7 +9,7 @@ test("stream-json lines become events: init, tool calls with a short summary, te
   assert.deepEqual(parseStreamLine(line({ type: "system", subtype: "init", session_id: "sess-1" })), [{ kind: "init", sessionId: "sess-1" }]);
   const assistant = parseStreamLine(line({ type: "assistant", message: { content: [{ type: "text", text: " on it " }, { type: "tool_use", name: "Bash", input: { command: "sleep 6 && echo step1" } }] } }));
   assert.deepEqual(assistant, [{ kind: "text", text: "on it" }, { kind: "tool", name: "Bash", summary: "Bash: sleep 6 && echo step1" }]);
-  assert.deepEqual(parseStreamLine(line({ type: "result", result: "BANANA", num_turns: 3, total_cost_usd: 0.08, is_error: false, session_id: "sess-1" })), [{ kind: "result", text: "BANANA", turns: 3, costUsd: 0.08, isError: false, sessionId: "sess-1" }]);
+  assert.deepEqual(parseStreamLine(line({ type: "result", result: "BANANA", num_turns: 3, total_cost_usd: 0.08, is_error: false, session_id: "sess-1" })), [{ kind: "result", text: "BANANA", turns: 3, costUsd: 0.08, reportedCostUsd: 0.08, isError: false, sessionId: "sess-1" }]);
   assert.deepEqual(parseStreamLine("not json"), []);
   assert.deepEqual(parseStreamLine(line({ type: "stream_event" })), []);
 });

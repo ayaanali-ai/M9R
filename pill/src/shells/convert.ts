@@ -12,16 +12,22 @@ export function providerOf(value: unknown): Provider {
 }
 
 const clip = (text: unknown, n: number) => (typeof text === "string" ? text.replace(/\s+/g, " ").trim().slice(0, n) : "");
+// Conversation text is not activity copy. Do not flatten or apply the small
+// 600-character activity cap to replies: that made long answers appear to be
+// randomly cut off in the pill. Keep one explicit UI-memory bound so a broken
+// provider cannot grow the in-memory thread without limit.
+const MAX_THREAD_TEXT = 32_768;
+const threadText = (text: unknown) => typeof text === "string" ? text.slice(0, MAX_THREAD_TEXT) : "";
 
 // ── Browser shell: the broker's `ui-state` as the extension delivers it ──────────────────────────────
 
 interface UiAgent { id: string; provider?: string; state?: string; doing?: string }
-interface UiThread { id: string; kind: string; agent?: string; text: string; phase?: string }
+interface UiThread { id: string; kind: string; agent?: string; to?: string; text: string; phase?: string }
 interface UiApproval { id: string; agent?: string; provider?: string; text: string; site?: string; url?: string; action?: string }
 interface UiModelEffort { id?: unknown; label?: unknown }
 interface UiModelOption { id?: unknown; label?: unknown; efforts?: unknown; description?: unknown }
 interface UiModelAgent { handle?: unknown; provider?: unknown; availability?: unknown; models?: unknown; currentModel?: unknown; currentEffort?: unknown; selectedModel?: unknown; selectedEffort?: unknown; status?: unknown }
-export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; models?: unknown; desktopPill?: boolean }
+export interface UiState { agents?: UiAgent[]; thread?: UiThread[]; approvals?: UiApproval[]; collaboration?: unknown; models?: unknown; desktopPill?: boolean; ownerWorkMode?: unknown }
 
 const RUN_STATES = new Set<AgentRunState>(["idle", "starting", "working", "waiting", "blocked", "stopped", "failed", "seen", "unknown", "not_connected"]);
 
@@ -91,10 +97,11 @@ export function fromUiState(message: UiState): PillSnapshot {
   const replies = thread
     .filter((t) => t.kind === "say" || t.kind === "system" || t.kind === "block")
     .slice(-30)
-    .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: clip(t.text, 600) }));
+    .map((t) => ({ id: String(t.id), from: String(t.agent ?? "").replace(/^@/, "") || "m9r", text: threadText(t.text),
+      ...(t.to && t.to !== "you" ? { to: String(t.to).replace(/^@/, "") } : {}) }));
   const collaboration = sanitizePillCollaboration(message.collaboration) ?? collaborationFromAgents(agents);
   const models = modelState(message.models);
-  return { agents, collaboration, approvals, thread: replies, ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
+  return { agents, collaboration, approvals, thread: replies, ...(message.ownerWorkMode === "working" || message.ownerWorkMode === "agents-free" ? { ownerWorkMode: message.ownerWorkMode } : {}), ...(models ? { models } : {}), ...(message.desktopPill === true ? { desktopPill: true } : {}) };
 }
 
 // ── Desktop shell: the engine's feed.json merged with web-activity.json ────────────────────────────
@@ -155,7 +162,7 @@ export function fromFeed(feed: Feed): PillSnapshot {
   // user-facing thread bubbles; approvals stay in `approvals` and delivery
   // diagnostics remain in task history where they can be inspected/dismissed.
   const thread = needs.flatMap((n) => n.kind === "answer"
-    ? [{ id: `answer-${n.taskId}`, from: n.from, text: clip(n.summary, 600) }]
+    ? [{ id: `answer-${n.taskId}`, from: n.from, text: threadText(n.summary) }]
     : []);
   return { agents, collaboration: collaborationFromAgents(agents), approvals, thread };
 }

@@ -67,6 +67,34 @@ test("needs-you lists approvals first, then failed pushes, then answers; lapsed,
   assert.equal(failed.kind === "push_failed" && /m9r-cli sessions/.test(failed.fix), true);
 });
 
+test("a provider-paused task with no approval-core flag still surfaces as needing the owner (T231 regression)", () => {
+  // T231: a background route failed, the provider paused itself and asked
+  // for foreground approval through completion.remainingWork/summary -- not
+  // through approval:"pending" -- and the task silently never reached the
+  // owner because needsYouFrom unconditionally skipped every paused task.
+  const tasks: Task[] = [
+    task({
+      id: "T231", approval: "not_needed",
+      receipt: { state: "paused", attempt: 1, updatedAt: "2026-09-20T11:59:00Z", source: "provider-session", history: [] },
+      completion: {
+        status: "incomplete",
+        remainingWork: ["Owner approval to complete the Notepad entry and verification in foreground, then restore Edge."],
+        summary: "T231 is blocked at the background Notepad edit: the background route supports observation but native text replacement was not dispatched after two fresh-target attempts.",
+        updatedAt: "2026-09-20T11:59:00Z",
+      },
+    }),
+  ];
+  const feed = buildFeed(input({ tasks }), null);
+  assert.deepEqual(feed.needsYou.map((n) => `${n.kind}:${n.taskId}`), ["paused:T231"]);
+  const paused = feed.needsYou[0];
+  assert.equal(paused.kind === "paused" && /background Notepad edit/.test(paused.reason), true);
+  // A paused task with nothing incomplete to report (no completion, or
+  // completion already marked done) still must not surface -- only the
+  // "stuck and needs you" shape should.
+  const notYetDescribed = buildFeed(input({ tasks: [task({ id: "T232", receipt: { state: "paused", attempt: 1, updatedAt: "2026-09-20T11:59:00Z", source: "provider-session", history: [] } })] }), null);
+  assert.deepEqual(notYetDescribed.needsYou, []);
+});
+
 test("secrets and long text never reach the feed", () => {
   const secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
   const feed = buildFeed(input({
@@ -187,8 +215,10 @@ test("dismiss hides an item from the feed and changes nothing else about the tas
   const root = mkdtempSync(join(tmpdir(), "m9r-feed-dismiss-"));
   const store = createLocalStore(root, { now: () => NOW });
   const { task: t } = store.addTask({ from: "claude", to: "codex", goal: "Review", origin: "human_typed", idempotencyKey: "d" });
+  const identity = store.issueIdentity("codex", "codex", S1);
   store.setDelivery(t.id, { state: "queued", threadId: S1 });
-  store.setResult(t.id, "Reviewed: fine.");
+  store.markDelivered([t.id], S1);
+  assert.equal(store.recordTaskResult(identity.token, t.id, "Reviewed: fine.", { status: "completed", remainingWork: [] }).ok, true);
   await feedPass(root, { now: () => NOW }, {});
   assert.equal((JSON.parse(readFileSync(join(root, "feed.json"), "utf8")) as Feed).needsYou.length, 1);
   assert.equal(store.dismiss([t.id]), 1);

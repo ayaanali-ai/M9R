@@ -3,6 +3,7 @@
 
 import type { DroppedFile, LinkOffer, PillSnapshot, Settings } from "./state";
 import type { SpeechEnv } from "./speech";
+import { agentAck } from "./humanize";
 
 export type Decision = "allow" | "deny" | "allow_day";
 
@@ -10,73 +11,6 @@ export interface SessionRow {
   sessionId: string;
   cwd?: string;
   lastSeenAt: string;
-}
-
-export interface DesktopStage {
-  name: string;
-  desktopId: string;
-  returnToDesktopId: string | null;
-  hasAnchor?: boolean;
-  isCurrent: boolean;
-  status: "current" | "background" | "unavailable";
-  /** Local-only identity for the agent session mapped to this Windows stage. */
-  agentAssignment?: { handle: string; sessionTag: string };
-  error?: string;
-}
-
-export interface DesktopStageCapture {
-  dataUrl: string;
-  width: number;
-  height: number;
-  capturedAt: string;
-}
-
-export interface DesktopStageCursor {
-  x: number;
-  y: number;
-  enabled: true;
-}
-
-export interface DesktopStageCursorMove {
-  capture: DesktopStageCapture;
-  cursor: DesktopStageCursor;
-}
-
-export interface DesktopStageWindowOption {
-  pid: number;
-  windowId: string;
-  appName: string;
-  title: string;
-  width: number;
-  height: number;
-}
-
-export interface DesktopStageActionOutcome {
-  status: "confirmed" | "partial" | "unverifiable" | "suspected-noop" | "unverified";
-  route?: number;
-  summary?: string;
-}
-
-export interface DesktopStageActionProof {
-  capture: DesktopStageCapture;
-  outcome: DesktopStageActionOutcome;
-}
-
-/** Local Windows virtual-desktop controls. Only the native desktop shell supplies this capability. */
-export interface DesktopStageTransport {
-  setAgentPermission?(handle: string, enabled: boolean, control?: boolean): Promise<void>;
-  list(): Promise<DesktopStage[]>;
-  create(name: string): Promise<void>;
-  activate(name: string): Promise<void>;
-  returnToOwner(name: string): Promise<void>;
-  capture(name: string): Promise<DesktopStageCapture>;
-  moveCursor(name: string, x: number, y: number): Promise<DesktopStageCursorMove>;
-  windows(name: string): Promise<DesktopStageWindowOption[]>;
-  attachWindow(name: string, pid: number, windowId: string): Promise<void>;
-  click(name: string, x: number, y: number): Promise<DesktopStageActionProof>;
-  typeText(name: string, text: string): Promise<DesktopStageActionProof>;
-  scroll(name: string, x: number, y: number, direction: "up" | "down"): Promise<DesktopStageActionProof>;
-  drag(name: string, fromX: number, fromY: number, toX: number, toY: number): Promise<DesktopStageActionProof>;
 }
 
 /** Points are CSS pixels relative to the pill's window. */
@@ -87,10 +21,9 @@ export interface FileDropHandlers {
 }
 
 export interface PillTransport {
+  setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
-  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean; dismissTask?: boolean };
-  /** Present only in the Windows desktop pill; the browser pill cannot control this machine's desktops. */
-  desktopStages?: DesktopStageTransport;
+  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean; dismissTask?: boolean; update?: boolean };
   /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */
   openMicSetup?(): void;
   /** Creates a shell-specific speech environment when browser permission behavior differs by host. */
@@ -116,12 +49,19 @@ export interface PillTransport {
   /** Window-level hooks; no-ops in the browser shell. */
   setIslandRect?(x: number, y: number, width: number, height: number): void;
   setCollapsed?(collapsed: boolean): void;
+  /** Mirrors the pill's current edge-light state onto the desktop's click-through screen frame. */
+  setScreenGlow?(glow: { visible: boolean; style: "status" | "rainbow"; color: string; live: boolean }): void;
   /** The other pill is showing; hide this one (browser shell). Called only when the answer changes. */
   setSuppressed?(suppressed: boolean): void;
   focusWindow?(focused: boolean): void;
   saveSettings?(settings: Settings): void;
   /** Reads back the last saved settings, if the host can persist them. Called once at boot. */
   loadSettings?(): Promise<Partial<Settings> | void>;
+  /** Asks whether a newer, signed release exists. Resolves to the new version, or null when
+   * there isn't one, not configured, or the host can't check. Only with `capabilities.update`. */
+  checkForUpdate?(): Promise<string | null>;
+  /** Applies a version `checkForUpdate` already offered. The host restarts itself when done. */
+  applyUpdate?(version: string): Promise<void>;
 }
 
 declare global {
@@ -170,6 +110,15 @@ export function createMockTransport(): PillTransport {
     const codex = snap.agents.find((a) => a.handle === "codex");
     if (codex) { codex.state = "failed"; codex.activity.push("codex: initialize: no response within 180000ms"); }
   }
+  // Sample provider limits and a playing track, to see the widgets. Real hosts send these only when providers/the OS report them.
+  if (params.has("widgets")) {
+    snap.usage = [
+      { handle: "claude", fiveHour: { usedPercent: 38, resetsAt: new Date(Date.now() + 2.4 * 3600_000).toISOString() }, weekly: { usedPercent: 71, resetsAt: new Date(Date.now() + 3.2 * 86400_000).toISOString() } },
+      { handle: "codex", fiveHour: { usedPercent: 88, resetsAt: new Date(Date.now() + 0.7 * 3600_000).toISOString() }, weekly: { usedPercent: 46 } },
+    ];
+    const source = params.get("widgets") === "apple" ? "apple-music" : "spotify";
+    snap.media = { title: "Pink + White", artist: "Frank Ocean", source, playing: true };
+  }
   // Claude Code finishes its task a moment after load, to show the task card.
   if (params.has("finish")) {
     setTimeout(() => {
@@ -187,11 +136,13 @@ export function createMockTransport(): PillTransport {
     }, 9000);
   }
   return {
-    capabilities: { allowForADay: true },
+    capabilities: { allowForADay: true, update: params.has("update") },
+    async checkForUpdate() { return params.has("update") ? "9.9.9" : null; },
+    async applyUpdate() { /* dev mock: nothing to actually apply */ },
     subscribe(l) { listener = l; setTimeout(push, 0); },
     async send(text) {
       const target = /@(\w+)/.exec(text)?.[1] ?? "claude";
-      snap.thread.push({ id: `t${snap.thread.length + 1}`, from: target, text: `Got it: “${text.replace(/\n\nAttached:[\s\S]*$/, "").replace(/@\w+\s*/g, "").slice(0, 80)}”` });
+      snap.thread.push({ id: `t${snap.thread.length + 1}`, from: target, text: agentAck() });
       const agent = snap.agents.find((a) => a.handle === target);
       if (agent) { agent.state = "working"; agent.activity.push("Working on your message"); }
       push();

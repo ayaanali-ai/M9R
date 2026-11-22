@@ -92,3 +92,30 @@ test("restarts a dead provider runtime once without replaying provider continuat
   assert.equal(starts, 2);
   assert.equal(supervisor.snapshots()[0]?.generation, 2);
 });
+
+test("normal turns reuse the M9R-owned connection and only a failed process starts cold", async () => {
+  let creates = 0;
+  let starts = 0;
+  let generation = 0;
+  let state: ManagedProviderConnectionSnapshot["status"] = "stopped";
+  const connection = fakeConnection(async (continuation) => {
+    starts += 1;
+    assert.equal(continuation, undefined);
+    generation += 1;
+    state = "ready";
+    return { connectionId: profile.connectionId, generation };
+  }, () => ({ healthy: state === "ready" }), () => ({ ...profile, status: state, generation }));
+  const supervisor = createManagedProviderSupervisor({ createConnection: () => { creates += 1; return connection; }, allowProviderContinuation: false });
+
+  const first = await supervisor.ensureConnection(profile);
+  const second = await supervisor.ensureConnection(profile);
+  assert.strictEqual(first, second, "normal messages stay on one broker-owned connection");
+  assert.equal(creates, 1);
+  assert.equal(starts, 1);
+
+  state = "failed";
+  const restarted = await supervisor.ensureConnection(profile);
+  assert.strictEqual(restarted, connection);
+  assert.equal(creates, 1, "a process restart does not create a second logical connection");
+  assert.equal(starts, 2);
+});

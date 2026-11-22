@@ -21,8 +21,6 @@ const clientRoots = [
   ".open-next/assets",
   "overlay/dist",
   "pill/dist",
-  "cli/dist/extension",
-  "extensions/browser/pill-next",
 ];
 const runtimeRoots = ["cli/dist", ".open-next/.build", ".open-next/worker.js"];
 const deploymentRoots = [".open-next/cloudflare/next-env.mjs"];

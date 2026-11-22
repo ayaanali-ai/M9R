@@ -10,22 +10,22 @@ session without an explicit `--approved` flag.
 
 ## Quick start
 
-No install required — run it straight from npm with `npx`. The supported browser
-setup is two commands:
+No install required — run it straight from npm with `npx`. Connect the agents
+and verify the native desktop route:
 
 **First-time setup** (no agent profile in `.m9r/agents/` yet):
 
 ```bash
 npx m9r-cli connect                               # discover installed agents; approve in browser
-npx m9r-cli web setup                             # install the browser extension when needed
+npx m9r-cli web setup --broker-only               # optional: start the local broker at login
 npx m9r-cli doctor                                # verify the connection
 ```
 
 Run these from any terminal. `connect` detects Claude Code, Codex, and OpenCode
-and creates one approved connection for each provider it finds. `web setup`
-installs the managed browser extension and local broker. Load the one copied
-extension folder in Chrome or Edge; do not start the development broker or load
-another extension copy.
+and creates one approved connection for each provider it finds. Browser and app
+work use M9R's native desktop controls; no browser extension is installed.
+`web setup --broker-only` is optional and registers the local broker for Windows
+login startup.
 
 Normal terminals automatically select a single connected agent profile. With
 multiple profiles, use `--agent-kind codex` (or `claude-code`, `opencode`, or
@@ -74,10 +74,10 @@ state:
 npx --yes m9r-cli@latest disconnect
 ```
 
-On Windows, `m9r-cli connect` can register the loopback broker for the current
-user when you approve that optional prompt. Browser actions still require
-`npx m9r-cli web setup`; the extension reports ready only after the broker
-handshake. The broker listens only on `127.0.0.1`.
+On Windows, `m9r-cli connect` can register the local broker for the current user
+when you approve that optional prompt. If you skip it, use
+`npx m9r-cli web setup --broker-only` later to register login startup. The
+broker listens only on `127.0.0.1`.
 
 Requires Node.js >= 18.
 

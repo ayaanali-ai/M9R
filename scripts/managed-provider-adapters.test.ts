@@ -52,7 +52,7 @@ test("Claude reports its own live model catalog and switches models on the runni
     spawn: () => fake.child as never,
   });
   await connection.start();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  for (let attempt = 0; attempt < 100 && !connection.capabilities().models; attempt++) await new Promise(resolve => setImmediate(resolve));
   const capabilities = connection.capabilities();
   assert.deepEqual(capabilities.models?.map((model) => model.id), ["default", "opus", "sonnet"]);
   assert.equal(capabilities.currentModel, "default");
@@ -98,6 +98,34 @@ test("Claude keeps its owned process alive after completed messages", async () =
 function profile() {
   return { connectionId: "m9r:codex:test", handle: "codex", provider: "codex", cwd: "C:/RunLeak/runleak" } as const;
 }
+
+test("Claude managed results retain reported usage and distinguish explicit zero cost from missing cost", async () => {
+  const fake = fakeClaude(["default"]);
+  const write = fake.child.stdin.write.bind(fake.child.stdin);
+  let turn = 0;
+  fake.child.stdin.write = (chunk: string) => {
+    write(chunk);
+    if (chunk.includes('"type":"user"')) {
+      turn++;
+      setImmediate(() => fake.child.stdout.emit("data", `${JSON.stringify({ type: "result", result: "ok", is_error: false,
+        usage: { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 100 }, ...(turn === 1 ? { total_cost_usd: 0 } : {}) })}\n`));
+    }
+    return true;
+  };
+  const connection = createClaudeManagedProviderConnection({ profile: { ...profile(), provider: "claude-code", handle: "claude" },
+    mcpConfigPath: "fixture", environment: {}, spawn: () => fake.child as never });
+  try {
+    await connection.start();
+    for (const index of [1, 2]) {
+      const events = [];
+      for await (const event of connection.send({ ...connection.profile, generation: connection.status().generation, taskId: `T${index}`, prompt: "test" })) events.push(event);
+      const result = events.find(event => event.kind === "result");
+      assert.ok(result?.kind === "result");
+      assert.equal(result.usage?.cachedInputTokens, 100);
+      assert.equal(result.providerReportedCostUsd, index === 1 ? 0 : null);
+    }
+  } finally { await connection.stop(); }
+});
 
 test("Codex worker failure retains bounded redacted stderr in the provider error", async () => {
   const workers: Array<EventEmitter & CodexWorkerProcess> = [];
@@ -146,13 +174,14 @@ test("the managed Codex app-server preserves its live connection across turns", 
   let launches = 0;
   let sessions = 0;
   let prompts = 0;
+  const promptTexts: string[] = [];
   const fake = {
     async launchServer() { launches += 1; return { serverId: "server-1", adapterId: "codex-app-server" }; },
     getServerHealth() { return { state: "alive" as const, detail: "alive" }; },
     async initialize() { return { protocolVersion: "codex-app-server", agentName: "codex", capabilities: {} }; },
     async createSession() { sessions += 1; return { sessionId: "session-1", providerSessionRef: "thread-1" }; },
     async resumeSession() { sessions += 1; return { sessionId: "session-1", providerSessionRef: "thread-1" }; },
-    async *prompt() { prompts += 1; yield { type: "provider.reply_text", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { text: "ok" } }; yield { type: "provider.completed", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { stopReason: "end_turn" } }; },
+    async *prompt(input: { text: string }) { prompts += 1; promptTexts.push(input.text); yield { type: "provider.reply_text", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { text: "ok" } }; yield { type: "provider.completed", sessionId: "session-1", occurredAt: new Date().toISOString(), payload: { stopReason: "end_turn" } }; },
     async cancelTurn() {},
     async shutdown() {},
   };
@@ -168,6 +197,8 @@ test("the managed Codex app-server preserves its live connection across turns", 
   assert.equal(launches, 1);
   assert.equal(sessions, 1);
   assert.equal(prompts, 2);
+  assert.match(promptTexts[0], /^M9R\n\nThe owner says:/);
+  assert.doesNotMatch(promptTexts[1], /^M9R\n\n/);
   await managed.stop();
 });
 
@@ -247,6 +278,29 @@ test("OpenCode retains one runtime through messages and interruption", async () 
   assert.equal(managed.readiness().healthy, true);
   await managed.stop();
   assert.equal(closes, 1);
+});
+
+test("OpenCode exposes quota and model failures without relabeling them as transport errors", async () => {
+  const managed = createOpenCodeManagedProviderConnection({
+    profile: { connectionId: "m9r:opencode:health", handle: "opencode", provider: "opencode", cwd: "C:/RunLeak/runleak" },
+    exe: "opencode", environment: {}, missionId: "room-health",
+    runtimeFactory: () => ({
+      async ready() { return { sessionId: "session-health" }; },
+      alive() { return true; },
+      async *prompt() {
+        yield { type: "provider.failed", sessionId: "session-health", occurredAt: new Date().toISOString(), payload: { reason: "Free usage limit reached" } };
+      },
+      async cancelTurn() {},
+      close() {},
+    } as never),
+  });
+  await managed.start();
+  const events = [];
+  for await (const event of managed.send({ taskId: "T-health", connectionId: managed.profile.connectionId, handle: managed.profile.handle, provider: managed.profile.provider, cwd: managed.profile.cwd, generation: managed.status().generation, prompt: "health" })) events.push(event);
+  const failure = events.find((event) => event.kind === "error");
+  assert.equal(failure?.retryable, false);
+  assert.match(failure?.error ?? "", /OpenCode usage-limit: Free usage limit reached/);
+  await managed.stop();
 });
 
 test("the managed Codex app-server restarts cold without resuming a provider thread", async () => {

@@ -34,11 +34,13 @@ if (basename(candidatePath).toLowerCase() !== "m9r-overlay.exe") {
   process.exit(1);
 }
 
-// Must match engine-build-transaction.mjs's private buildIdFor() exactly, or build-engine.mjs's
-// consumers of this manifest's buildId would disagree with that system's own notion of identity.
-function buildIdFor(artifacts) {
+// Must match engine-build-transaction.mjs's buildIdFor() exactly, or the
+// runtime consumers of this manifest's buildId would disagree with the
+// release builder's identity.
+function buildIdFor(artifacts, source = { sourceCommit: "unknown", sourceDirty: true }) {
   const sorted = Object.fromEntries(Object.entries(artifacts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-  return createHash("sha256").update(JSON.stringify(Object.entries(sorted))).digest("hex");
+  const stable = Object.entries(sorted).filter(([path]) => path !== "m9r-engine.exe" && path !== "m9r-web-broker.exe");
+  return createHash("sha256").update(JSON.stringify({ source, artifacts: stable })).digest("hex");
 }
 
 function sha256(path) {
@@ -72,7 +74,7 @@ if (sha256(acceptedExePath) !== newHash) throw new Error("Copied exe does not ma
 const updatedArtifacts = { ...manifest.artifacts, "m9r-overlay.exe": newHash };
 const updatedManifest = {
   ...manifest,
-  buildId: buildIdFor(updatedArtifacts),
+  buildId: buildIdFor(updatedArtifacts, manifest.source),
   builtAt: new Date().toISOString(),
   artifacts: updatedArtifacts,
 };

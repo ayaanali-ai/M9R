@@ -1,5 +1,8 @@
 # Pine Computer concept — scope for M9R
 
+> Historical planning draft. Its browser-CDP premise (`agent-chrome.ts`) was retired on 2026-11-05. Reassess any future
+> browser-structure proposal against the current owner-visible native desktop stage before implementation.
+
 Status: draft scope for implementation planning. For Codex. Read-only research behind this — no code written yet.
 
 ## 1. What Pine Computer actually is (verified, not assumed)

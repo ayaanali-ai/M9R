@@ -1,5 +1,8 @@
 # C2 — quiet typing and drag
 
+> Historical acceptance record for the retired isolated Agent Chrome channel. Its dedicated profile and setup/start
+> command were retired on 2026-11-05; browser control now uses the owner's visible window through native desktop.
+
 Status: complete for the agent-owned Chrome channel, verified live on 2026-10-03.
 
 ## Implemented

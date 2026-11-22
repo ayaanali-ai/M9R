@@ -2,11 +2,18 @@
  * Starts the local M9R owner broker. The desktop runtime uses the authenticated
  * owner pipe and native desktop/browser routes; the legacy browser-extension
  * transport is intentionally not enabled by this production entry point.
+ *
+ * No isolated browser daemon or extension transport is part of this entry
+ * point. Browser automation goes through the native desktop/UIA route
+ * (nativeDesktopRoute) against the owner's own signed-in window.
  */
+import { createWriteStream } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createLocalStore, defaultStoreRoot } from "@/lib/native/local-store";
 import { createTaskDesktopStageService } from "@/lib/native/task-desktop-stage";
+import { killStaleAgentCursorOverlayHosts } from "@/lib/native/agent-cursor-overlay-host";
+import { readOwnerWorkMode, setOwnerWorkMode } from "@/lib/native/owner-work-mode";
 import { writeWebActivity } from "@/lib/native/feed-writer";
 import { apiKeyLaunchBlock } from "@/lib/native/vendor-launch-core";
 import { loadAgentsConfig, projectRoomId } from "@/lib/native/web-live-sessions";
@@ -21,8 +28,12 @@ import type { StageApprovalRequest } from "@/lib/native/web-broker-core";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { createWebAuthorityStore } from "@/lib/native/web-authority-store";
 import { createMultiplayerDispatchFence } from "@/lib/native/multiplayer-dispatch-fence";
-import { createMultiplayerRuntime } from "@/lib/native/multiplayer-runtime";
+import { createMultiplayerInboxDelivery } from "@/lib/native/multiplayer-inbox-delivery";
+import { createMultiplayerRuntime, sharedBroadcastRoot } from "@/lib/native/multiplayer-runtime";
+import { subscribeA2ACursorChatter } from "@/lib/native/multiplayer-cursor-chatter";
+import type { MultiplayerRoster } from "@/lib/native/multiplayer-contract";
 import { clearDesktopPillState, writeDesktopPillState } from "@/lib/native/desktop-pill-state";
+import { readRuntimeBuildIdentity } from "@/lib/native/runtime-build-identity";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -38,8 +49,31 @@ async function main(): Promise<void> {
   if (projectRootIndex >= 0 && args[projectRootIndex + 1]) process.env.M9R_PROJECT_ROOT = args[projectRootIndex + 1];
   const projectRoot = resolve(process.env.M9R_PROJECT_ROOT?.trim() || process.cwd());
   process.env.M9R_PROJECT_ROOT = projectRoot;
+  const runtimeIdentity = readRuntimeBuildIdentity(process.execPath);
+  const verifiedRuntimeBuildId = runtimeIdentity.status === "verified" ? runtimeIdentity.buildId : undefined;
+  const runtimeBuildFingerprint = verifiedRuntimeBuildId;
   const managedEnvironment: Record<string, string | undefined> = { ...process.env };
   const root = defaultStoreRoot(homedir(), process.env);
+  // The broker is normally started by its own hidden Scheduled Task
+  // (conhost --headless), which has no stdout/stderr redirection of its
+  // own -- every console.log/console.error line, including this process's
+  // own uncaughtException/unhandledRejection handlers below and every
+  // diagnostic log anywhere in the broker's dependency tree, previously
+  // went nowhere durable and was unrecoverable after the fact (confirmed
+  // live: a manual ad-hoc relaunch was the only way anyone had ever
+  // actually captured this process's own output to a file). Tee both
+  // streams to a durable, append-only log here, independent of how this
+  // process was launched, so that is never true again.
+  try {
+    const logStream = createWriteStream(join(root, "broker.log"), { flags: "a" });
+    for (const stream of [process.stdout, process.stderr] as const) {
+      const originalWrite = stream.write.bind(stream);
+      stream.write = ((chunk: unknown, ...rest: unknown[]) => {
+        try { logStream.write(chunk as never); } catch { /* the console output itself is unaffected */ }
+        return (originalWrite as (...args: unknown[]) => boolean)(chunk, ...rest);
+      }) as typeof stream.write;
+    }
+  } catch { /* logging to a file is best-effort; the broker must still start without it */ }
   const colorStore = createLocalStore(root);
   const key = loadOrCreateBrokerKey(brokerKeyPath(root));
   const ownerId = process.env.M9R_OWNER_ID?.trim() || "local-machine";
@@ -52,6 +86,8 @@ async function main(): Promise<void> {
   // A note saved from the pill lands in the same project-room memory agents read at session start.
   const sessionOwner: { current?: ReturnType<typeof createManagedProviderOwner> } = {};
   const ui = createWebUiBridge({
+    ownerWorkMode: () => { try { return readOwnerWorkMode(root); } catch { return "working"; } },
+    setOwnerWorkMode: (mode) => setOwnerWorkMode(root, mode),
     colorFor: (handle) => colorStore.colorFor(handle),
     modelState: () => sessionOwner.current?.modelState(),
     selectModel: (handle, selection) => sessionOwner.current
@@ -78,9 +114,12 @@ async function main(): Promise<void> {
   // One owner-owned store instance is shared by the broker, stage service, and M9R-owned provider supervisor.
   // Restricted MCP child processes use the broker's narrow token-checked write endpoint instead of taking the
   // state.lock directory themselves; the owner-only store ACL stays intact.
-  const store = createLocalStore(root);
+  // The broker answers every connected agent's /health and every other request from this one thread, so it
+  // cannot afford the generous default lock wait a one-shot hook or CLI call can: a single contested write
+  // would otherwise stall the whole broker (and everyone's "is M9R alive" check) for up to LOCK_WAIT_MS.
+  const store = createLocalStore(root, { lockWaitMs: 400 });
   const config = loadAgentsConfig(root, { cwd: projectRoot });
-  const multiplayerRoster = {
+  const multiplayerRoster: MultiplayerRoster = {
     runId: "m9r-owner",
     agents: config.agents.map((agent) => ({
       agentId: `agent-${agent.handle}`,
@@ -89,30 +128,51 @@ async function main(): Promise<void> {
       handle: agent.handle,
     })),
   } as const;
-  const multiplayer = createMultiplayerRuntime({ roster: multiplayerRoster });
-  multiplayer.setDelivery(async (message) => {
-    const recipient = config.agents.find((agent) => `agent-${agent.handle}` === (message.recipient.kind === "agent" ? message.recipient.agentId : ""));
-    if (!recipient) return { ok: false, error: "The structured teammate recipient is not configured." };
-    const sender = config.agents.find((agent) => `agent-${agent.handle}` === message.agentId);
-    const detail = message.details ? `\nStructured details: ${JSON.stringify(message.details)}` : "";
-    const goal = `[M9R team room ${message.taskId ?? "run"}] @${sender?.handle ?? message.agentId}: ${message.summary}${detail}`.slice(0, 4_000);
-    const result = store.addTask({
-      to: recipient.handle,
-      from: sender?.handle ?? message.agentId,
-      goal,
-      origin: "agent_initiated",
-      idempotencyKey: `a2a:${message.messageId}`,
-      replyDepth: message.replyDepth,
-      ...(sender && sessionOwner.current?.sessionIdOf(sender.handle) ? { fromSession: sessionOwner.current.sessionIdOf(sender.handle) } : {}),
-    });
-    if (result.created) store.setDelivery(result.task.id, { state: "deferred" });
-    return { ok: true, taskId: result.task.id };
+  const priorA2AMessages = store.snapshot().tasks.flatMap((task) => task.a2a ? [{
+    messageId: task.a2a.messageId,
+    taskId: task.a2a.taskId,
+    conversationId: task.a2a.conversationId,
+    progressFingerprint: task.a2a.progressFingerprint,
+    progressKind: task.a2a.progressKind,
+    summary: task.a2a.summary,
+    createdAt: Date.parse(task.createdAt),
+  }] : []);
+  const multiplayer = createMultiplayerRuntime({
+    roster: multiplayerRoster,
+    resolveSharedBroadcastRoot: (taskId, identity, recipient) => sharedBroadcastRoot(store.snapshot().tasks, taskId, identity, recipient),
+    knownMessages: store.snapshot().tasks.flatMap((task) => task.a2a?.wireMessage ? [task.a2a.wireMessage] : []),
+    initialTaskContexts: store.listMultiplayerTaskContexts(),
+    persistTaskContext: (context) => { store.setMultiplayerTaskContext(context); },
+    knownMessageReferences: store.snapshot().tasks.flatMap((task) => task.a2a ? [{
+      messageId: task.a2a.messageId,
+      agentId: task.a2a.senderAgentId,
+      recipientAgentIds: [task.a2a.recipientAgentId],
+      taskId: task.a2a.taskId,
+      conversationId: task.a2a.conversationId,
+      replyDepth: task.a2a.replyDepth,
+    }] : []),
+    priorMessages: priorA2AMessages,
   });
+  multiplayer.setDelivery(createMultiplayerInboxDelivery({
+    store,
+    agents: config.agents.map((agent) => ({ handle: agent.handle, agentId: `agent-${agent.handle}` })),
+    sessionIdOf: (handle) => sessionOwner.current?.sessionIdOf(handle),
+  }));
   // One broker-owned mutation fence is shared by the browser route and the
   // desktop stage service. Both dispatch real input from this process, so this
   // is the only place a shared lease can arbitrate same-target contention.
   const mutationFence = createMultiplayerDispatchFence({ store });
+  // The broker is a singleton; anything still running under this image name at this exact moment,
+  // before any session of THIS broker has created its own overlay host, is necessarily an orphan
+  // left by a previous broker that exited ungracefully (crash/SIGKILL) rather than through stop()'s
+  // own cleanup. See killStaleAgentCursorOverlayHosts's own comment for why this is safe here only.
+  killStaleAgentCursorOverlayHosts();
   const taskStages = createTaskDesktopStageService({ store, mutationFence, approvals: () => stageApprovals.requestApproval ? { requestApproval: stageApprovals.requestApproval } : undefined });
+  const stopCursorChatter = subscribeA2ACursorChatter({
+    multiplayer,
+    roster: multiplayerRoster,
+    sayAgentCursor: (fromHandle, toHandle, summary, taskId) => taskStages.sayAgentCursor(fromHandle, toHandle, summary, taskId),
+  });
   const broker = await startWebBroker({ key, port, taskStages, nativeDesktopRoute: true, agentMcpStore: store, mutationFence, multiplayerRuntime: multiplayer,
     onAgentTaskCreated: (token, taskId) => { void taskStages.primeCursor(token, taskId); },
     deliverOwnerTask: (taskId) => sessionOwner.current
@@ -125,7 +185,7 @@ async function main(): Promise<void> {
   const stopPillStartup = startDesktopOverlay(root);
   const providerSessions = createManagedProviderOwner({
     agents: config.agents, storeRoot: root, repoRoot: projectRoot, brokerPort: broker.port,
-    store, env: managedEnvironment, onEvent: (event) => ui.onSessionEvent(event),
+    store, env: managedEnvironment, runtimeBuildFingerprint, verifiedRuntimeBuildId, onEvent: (event) => ui.onSessionEvent(event),
     onOwnerTaskCreated: (taskId) => { void taskStages.primeCursorForOwner(taskId); },
   });
   sessionOwner.current = providerSessions;
@@ -168,15 +228,37 @@ async function main(): Promise<void> {
   }, 1000);
   // One pill at a time: the desktop pill beats a heartbeat file; while it is running the in-page pill steps aside.
   const presenceTimer = setInterval(() => ui.setDesktopPill(readDesktopPillRunning(root)), 2000);
+  // No execution-progress watchdog existed anywhere on the managed-provider path before this --
+  // only receipt-transition history, which says a task entered a state, never whether it has
+  // stalled since. Log-only for now (repair priority per the 2026-11-14 audit put result binding
+  // first): flag, never kill, any still-open task whose receipt has not advanced in a while, so a
+  // real stall is visible in broker.log instead of indistinguishable from a long legitimate turn.
+  const PROGRESS_STALL_MS = 10 * 60_000;
+  const progressWatchdog = setInterval(() => {
+    try {
+      const now = Date.now();
+      for (const task of store.snapshot().tasks) {
+        if (task.resultSummary || !task.receipt) continue;
+        if (task.lifecycle?.state === "completed" || task.lifecycle?.state === "failed") continue;
+        if (task.receipt.state === "completed" || task.receipt.state === "canceled" || task.receipt.state === "failed" || task.receipt.state === "paused") continue;
+        const ageMs = now - Date.parse(task.receipt.updatedAt);
+        if (Number.isFinite(ageMs) && ageMs >= PROGRESS_STALL_MS) {
+          process.stderr.write(`[progress-watchdog] task=${task.id} receiptState=${task.receipt.state} staleMs=${ageMs}\n`);
+        }
+      }
+    } catch { /* diagnostic only; must never affect broker uptime */ }
+  }, 60_000);
+  progressWatchdog.unref();
   let stopPromise: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     if (stopPromise) return stopPromise;
     stopPillStartup();
-    clearInterval(webTimer); clearInterval(presenceTimer); clearInterval(pillStateTimer); ui.close(); clearDesktopPillState(root);
+    clearInterval(webTimer); clearInterval(presenceTimer); clearInterval(pillStateTimer); clearInterval(progressWatchdog); ui.close(); clearDesktopPillState(root);
     // Keep the broker listener alive until stage/runtime cleanup finishes. The authenticated
     // shutdown caller uses listener closure as its signal that owned resources have drained.
     stopPromise = (async () => {
       await providerSessions.shutdown();
+      stopCursorChatter();
       await taskStages.close();
       await broker.close();
     })().catch((error: unknown) => {

@@ -135,8 +135,12 @@ async function probe(store: ReturnType<typeof createLocalStore>, deps: FeedDeps)
 /** One build-and-maybe-write pass. Returns the feed written, or null when nothing changed. */
 export async function feedPass(root: string, deps: FeedDeps, probes: Record<string, SessionProbe>): Promise<Feed | null> {
   const path = join(root, FEED_FILE);
-  const store = createLocalStore(root);
   const now = (deps.now ?? (() => new Date()))();
+  // Keep the store's timestamp source aligned with the feed pass. Apart from
+  // making deterministic replays possible, this prevents a test or restored
+  // state snapshot from being evaluated against the wall clock halfway through
+  // an answer/dismissal window.
+  const store = createLocalStore(root, { now: () => now });
   store.sweepExpired(PENDING_TTL_MS);
   const snap = store.snapshot();
   const previous = readPrevious(path);

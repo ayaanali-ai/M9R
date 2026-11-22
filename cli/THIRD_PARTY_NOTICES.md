@@ -4,9 +4,9 @@ M9R's Windows desktop-stage runtime bundles the following Cua Driver components.
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
-| `@trycua/cua-driver` | 0.33.4 | MIT | <https://github.com/trycua/cua> |
-| `@trycua/cua-driver-win32-x64-msvc` | 0.33.4 | MIT AND MPL-2.0 | <https://github.com/trycua/cua> |
-| Cua Driver Windows standalone host, UI helper, and cursor-theme helper | 0.33.4 | MIT | <https://github.com/trycua/cua> |
+| `@trycua/cua-driver` | 0.37.0 | MIT | <https://github.com/trycua/cua> |
+| `@trycua/cua-driver-win32-x64-msvc` | 0.37.0 | MIT AND MPL-2.0 | <https://github.com/trycua/cua> |
+| Cua Driver Windows standalone host, UI helper, and cursor-theme helper | 0.37.0 | MIT | <https://github.com/trycua/cua> |
 | `@ubjs/core` | 0.31.0-3 | MPL-2.0 | <https://github.com/jhugman/uniffi-bindgen-react-native/tree/v0.31.0-3> |
 | `@ubjs/node` | 0.31.0-3 | MPL-2.0 | <https://github.com/jhugman/uniffi-bindgen-react-native/tree/v0.31.0-3> |
 | `@ubjs/node-win32-x64-msvc` | 0.31.0-3 | MPL-2.0 | <https://github.com/jhugman/uniffi-bindgen-react-native/tree/v0.31.0-3> |

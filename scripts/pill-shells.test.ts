@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fromFeed, fromUiState, providerOf } from "../pill/src/shells/convert";
-import { createExtensionTransport } from "../pill/src/shells/extension";
 import { createDesktopTransport } from "../pill/src/shells/desktop";
-import { createFrameHost } from "../pill/src/shells/frame-host";
-import { State } from "../pill/src/core/state";
+import { DEFAULT_SETTINGS, State } from "../pill/src/core/state";
 
 test("provider detection covers handles, provider ids and unknown agents", () => {
   assert.equal(providerOf("claude"), "claude");
@@ -121,57 +119,6 @@ test("the desktop feed keeps provider activity separate from queued asks, approv
   assert.deepEqual(snap.thread.map((m) => m.id), ["answer-T7"], "delivery failures stay in task history, not live chat");
 });
 
-test("extension transport sends the exact commands the service worker validates, and surfaces refusals", async () => {
-  const sent: unknown[] = [];
-  let reply: { ok?: boolean; error?: string } | undefined = { ok: true };
-  const transport = createExtensionTransport({
-    id: "ext",
-    connect: () => ({ onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }),
-    sendMessage: async (m) => { sent.push(m); return reply; },
-  });
-  await transport.send("@claude hello");
-  await transport.decide("p1", "allow");
-  await transport.decide("p2", "deny");
-  await transport.decide("p3", "allow_day");
-  assert.deepEqual(sent, [
-    { type: "m9r-pill-cmd", command: { type: "ui-command", text: "@claude hello" } },
-    { type: "m9r-pill-cmd", command: { type: "ui-approve", id: "p1" } },
-    { type: "m9r-pill-cmd", command: { type: "ui-deny", id: "p2" } },
-    { type: "m9r-pill-cmd", command: { type: "ui-approve", id: "p3" } },
-  ]);
-  assert.equal(transport.capabilities?.allowForADay, false, "the in-page bridge cannot honour 'allow for a day', so the button is hidden");
-  reply = { ok: false, error: "the local M9R broker is not connected" };
-  await assert.rejects(transport.send("x"), /broker is not connected/);
-  reply = undefined;
-  await assert.rejects(transport.send("x"), /not connected/);
-});
-
-test("extension transport reports broker state and ignores stale snapshots while offline", () => {
-  const got: unknown[] = [];
-  let onMessage: (m: unknown) => void = () => {};
-  let onDisconnect: () => void = () => {};
-  const transport = createExtensionTransport({
-    id: "ext",
-    connect: () => ({ onMessage: { addListener: (fn) => { onMessage = fn; } }, onDisconnect: { addListener: (fn) => { onDisconnect = fn; } } }),
-    sendMessage: async () => ({ ok: true }),
-  });
-  const stop = transport.subscribe((s) => got.push(s));
-  assert.equal((got.at(-1) as { connection?: string }).connection, "connecting");
-  onMessage({ type: "m9r-broker", connected: true });
-  assert.equal((got.at(-1) as { connection?: string }).connection, "connecting");
-  onMessage(null);
-  onMessage({ type: "ui-state", agents: [{ id: "claude", provider: "claude", state: "idle" }], thread: [], approvals: [] });
-  assert.equal((got.at(-1) as { connection?: string }).connection, "connected");
-  assert.equal((got.at(-1) as { agents: unknown[] }).agents.length, 1);
-  onMessage({ type: "m9r-broker", connected: false });
-  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected");
-  onMessage({ type: "ui-state", agents: [{ id: "claude", provider: "claude", state: "working" }], thread: [], approvals: [] });
-  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected", "late state cannot restore stale working status");
-  onDisconnect();
-  assert.equal((got.at(-1) as { connection?: string }).connection, "disconnected");
-  stop?.();
-});
-
 test("desktop transport maps decisions and typed messages onto the overlay's commands", async () => {
   const calls: Array<[string, Record<string, unknown> | undefined]> = [];
   const uiState = JSON.stringify({ agents: [], thread: [], approvals: [{ id: "T6", agent: "codex", text: "g" }] });
@@ -222,43 +169,6 @@ test("undeliverable messages stay out of the live thread", () => {
   assert.deepEqual(snap.thread, [], "delivery diagnostics must not become composer bubbles");
 });
 
-test("the page frame answers the host's hello, then reports exactly the island's size and folds to the wake strip", () => {
-  const nonce = "a".repeat(32);
-  const sent: unknown[] = [];
-  const handlers: Array<(e: unknown) => void> = [];
-  const parent = { postMessage: (m: unknown) => sent.push(m) };
-  const win = { location: { href: `chrome-extension://x/pill-next/index.html?n=${nonce}` }, parent, addEventListener: (_t: string, fn: (e: unknown) => void) => handlers.push(fn) } as unknown as Window;
-  const frame = createFrameHost({ subscribe() {}, async send() {}, async decide() {} }, win);
-  const commands: string[] = [];
-  frame.onHostCommand((k) => commands.push(k));
-  const deliver = (data: unknown, source: unknown = parent, ports: unknown[] = []) => handlers.forEach((fn) => fn({ data, source, ports }));
-
-  deliver({ m9r: "host-hello", nonce: "b".repeat(32) });
-  assert.deepEqual(sent, [], "a hello with the wrong nonce is ignored");
-  deliver({ m9r: "host-hello", nonce }, {});
-  assert.deepEqual(sent, [], "a hello from another window is ignored");
-  deliver({ m9r: "host-hello", nonce });
-  assert.deepEqual(sent.map((m) => (m as { kind: string }).kind), ["ready", "size"]);
-
-  sent.length = 0;
-  frame.transport.setIslandRect!(0, 0, 288, 32);
-  frame.transport.setIslandRect!(0, 0, 288, 32);
-  assert.deepEqual(sent, [{ m9r: "frame", nonce, kind: "size", w: 288 + 32, h: 32 + 16 }], "unchanged sizes are not re-sent");
-  sent.length = 0;
-  frame.transport.setCollapsed!(true);
-  assert.deepEqual(sent, [{ m9r: "frame", nonce, kind: "size", w: 240, h: 6 }]);
-
-  let onmessage: ((m: unknown) => void) | null = null;
-  const replies: unknown[] = [];
-  const port = { start() {}, close() {}, postMessage(message: unknown) { replies.push(message); }, set onmessage(fn: (m: unknown) => void) { onmessage = fn; } };
-  deliver({ m9r: "host-port", nonce }, parent, [port]);
-  onmessage!({ data: { m9r: "host", nonce, kind: "open-message" } });
-  onmessage!({ data: { m9r: "host", nonce: "c".repeat(32), kind: "open-message" } });
-  onmessage!({ data: { m9r: "host", nonce, kind: "health-ping", probeId: "probe-1" } });
-  assert.deepEqual(commands, ["open-message"], "only commands carrying this frame's nonce are honoured");
-  assert.deepEqual(replies, [{ m9r: "frame", nonce, kind: "health-pong", probeId: "probe-1" }], "a live frame acknowledges its private-port health probe");
-});
-
 test("the desktop transport forwards the island's window hooks to the overlay commands", async () => {
   const calls: Array<[string, Record<string, unknown> | undefined]> = [];
   const transport = createDesktopTransport(async (command, args) => { calls.push([command, args]); if (command === "pill_set_rect") throw new Error("rejected"); return ""; });
@@ -270,6 +180,7 @@ test("the desktop transport forwards the island's window hooks to the overlay co
     ["pill_set_rect", { x: 216, y: 0, width: 288, height: 32 }],
     ["pill_set_collapsed", { collapsed: true }],
     ["pill_set_focus", { focused: true }],
+    ["log_debug", { msg: "Pill hit area rejected: Error: rejected" }],
   ], "a rejected rectangle does not throw into the UI");
 });
 
@@ -282,9 +193,10 @@ test("the desktop transport persists settings through the overlay commands and r
     if (command === "load_settings") return { soundEnabled: stored.soundEnabled ?? null, soundVolume: stored.soundVolume ?? null, autoCloseInterval: stored.autoCloseInterval ?? null };
     return "";
   });
-  transport.saveSettings!({ soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 });
+  transport.saveSettings!({ ...DEFAULT_SETTINGS, soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 });
   await new Promise((r) => setTimeout(r, 5));
-  assert.deepEqual(calls, [["save_settings", { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 }]]);
+  assert.deepEqual(calls, [["save_settings", { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30,
+    glowStyle: DEFAULT_SETTINGS.glowStyle, glowColor: DEFAULT_SETTINGS.glowColor }]]);
   const loaded = await transport.loadSettings!();
   assert.deepEqual(loaded, { soundEnabled: true, soundVolume: 0.5, autoCloseInterval: 30 }, "a fresh pill process reads back exactly what the last one saved");
 });
@@ -315,15 +227,9 @@ test("desktop dictation uses the native Ctrl+Alt speech path and keeps settings 
   }
 });
 
-test("the browser shell carries the desktop-pill flag, and the frame asks its page to step aside only when it changes", () => {
+test("the desktop shell carries the desktop-pill flag", () => {
   assert.equal(fromUiState({ agents: [], desktopPill: true }).desktopPill, true);
   assert.equal("desktopPill" in fromUiState({ agents: [] }), false);
-  const sent: unknown[] = [];
-  const parent = { postMessage: (m: unknown) => sent.push(m) };
-  const win = { location: { href: "chrome-extension://x/pill-next/index.html?n=" + "a".repeat(32) }, parent, addEventListener() {} } as unknown as Window;
-  const frame = createFrameHost({ subscribe() {}, async send() {}, async decide() {} }, win);
-  frame.transport.setSuppressed!(true);
-  assert.deepEqual(sent, [{ m9r: "frame", nonce: "a".repeat(32), kind: "suppress", on: true }]);
 });
 
 test("the desktop pill shows what a working terminal agent is doing, and never an empty ticker while it works", () => {
@@ -333,4 +239,15 @@ test("the desktop pill shows what a working terminal agent is doing, and never a
   assert.deepEqual(snap.agents.find((a) => a.handle === "claude")?.activity, ["Reading feed-core.ts"]);
   assert.deepEqual(snap.agents.find((a) => a.handle === "codex")?.activity, ["Working on a turn"]);
   assert.deepEqual(snap.agents.find((a) => a.handle === "opencode")?.activity, []);
+});
+
+test("teammate conversation preserves participants and line breaks through pill state", () => {
+  const snap = fromUiState({ agents: [], thread: [
+    { id: "peer-1", kind: "say", agent: "claude", to: "codex", text: "Let's make a checklist.\nI'll write it; please verify the saved file." },
+    { id: "peer-2", kind: "say", agent: "codex", to: "claude", text: "Agreed. I'll check it after you save." },
+  ] });
+  assert.equal(snap.thread[0].from, "claude");
+  assert.equal(snap.thread[0].to, "codex");
+  assert.ok(snap.thread[0].text.includes("\n"));
+  assert.equal(snap.thread[1].to, "claude");
 });

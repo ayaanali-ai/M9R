@@ -19,7 +19,7 @@ export type LiveEvent =
   | { kind: "init"; sessionId: string }
   | { kind: "tool"; name: string; summary: string }
   | { kind: "text"; text: string }
-  | { kind: "result"; text: string; turns: number; costUsd: number; isError: boolean; usage?:ReportedTurnUsage|null; sessionId?: string };
+  | { kind: "result"; text: string; turns: number; costUsd: number; reportedCostUsd?: number; isError: boolean; usage?:ReportedTurnUsage|null; sessionId?: string };
 
 export type LiveStatus = "starting" | "idle" | "working" | "exited";
 
@@ -100,6 +100,7 @@ export function parseStreamLine(line: string): LiveEvent[] {
       text: typeof event.result === "string" ? event.result : "",
       turns: typeof event.num_turns === "number" ? event.num_turns : 0,
       costUsd: typeof event.total_cost_usd === "number" ? event.total_cost_usd : 0,
+      ...(typeof event.total_cost_usd === "number" && Number.isFinite(event.total_cost_usd) && event.total_cost_usd >= 0 ? { reportedCostUsd: event.total_cost_usd } : {}),
       isError: event.is_error === true,
       ...(reportedTurnUsage(event.usage) ? {usage:reportedTurnUsage(event.usage)} : {}),
       sessionId: typeof event.session_id === "string" ? event.session_id : undefined,

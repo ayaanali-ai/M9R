@@ -14,10 +14,11 @@ const env = { ...process.env, TEMP: tempRoot, TMP: tempRoot, M9R_CLI_OUTPUT_DIR:
 // catalogs even when the implementation is correct.
 const nodeArgs = ["--test-concurrency=1", "--disable-warning=ExperimentalWarning", "--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--import", "./scripts/register-alias.mjs"];
 const checks = [
-  ["CUA driver (44 tests)", ["--test", "./scripts/cua-stage-driver.test.ts"]],
+  ["native desktop dispatch contract", ["--test", "./scripts/native-dispatch-contract.test.ts"]],
   ["desktop stage and task lifecycle", ["--test", "./scripts/task-desktop-stage.test.ts", "./scripts/windows-desktop-stage.test.ts"]],
   ["web lifecycle and redirectable pause", ["--test", "./scripts/web-live-sessions.test.ts"]],
-  ["browser mutation fixtures", ["--test", "./scripts/web-press-page-change.test.ts"]],
+  ["retired browser MCP tools", ["--test", "./scripts/web-powers-mcp.test.ts"]],
+  ["retired browser route migration hint", ["--test-name-pattern=retired /cmd and /batch routes identify", "--test", "./scripts/web-broker-server.test.ts"]],
   ["universal intent and bounded workflow memory", ["--test", "./scripts/universal-intent.test.ts", "./scripts/workflow-preferences.test.ts"]],
   ["task controls, progress, and delivery policy", ["--test", "./scripts/multiplayer-task-context.test.ts", "./scripts/multiplayer-action-policy.test.ts"]],
   ["persistent provider lifecycle, owner queue, multiplayer, and stale-feed retirement", ["--test", "./scripts/managed-provider-adapters.test.ts", "./scripts/managed-provider-supervisor.test.ts", "./scripts/managed-provider-owner-queue.test.ts", "./scripts/multiplayer-dispatch-fence.test.ts", "./scripts/multiplayer-target-identity.test.ts", "./scripts/multiplayer-mutation-scheduler.test.ts", "./scripts/multiplayer-runtime.test.ts", "./scripts/multiplayer-a2a.test.ts", "./scripts/multiplayer-contract.test.ts", "./scripts/multiplayer-run-coordinator.test.ts", "./scripts/native-feed.test.ts", "./scripts/stale-task-retirement.test.ts"]],

@@ -1,22 +1,32 @@
-// Island views: overview (focused agent's activity plus the others), approval, error, finished, message composer, settings.
+// Island views: overview (agents sidebar plus the selected agent's activity), error, finished, message composer (approvals
+// render inline there, not as a separate screen), settings.
 
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
-import { Ticker } from "./ticker";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
-import { State, type AgentTask, type LinkOffer, type PillModelAgent } from "../core/state";
+import { buddy } from "./buddy";
+import { State, PROVIDER_COLORS, type AgentTask, type ChatMessage, type LinkOffer, type Settings } from "../core/state";
 import type { SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
-import { plainStep, displayName } from "../core/humanize";
-import { buildDrum } from "./drum";
+import { plainStep, plainStatus, displayName, approvalSentence } from "../core/humanize";
+import { buildSettingsDrum } from "./settings-drum";
+import { dotSlider } from "./dot-slider";
 
 export interface ViewActions {
+  setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
   setView(v: IslandViewName): void;
   collapse(): void;
+  focusWindow?(focused: boolean): void;
   setFocus(id: string): void;
-  decide(d: "allow" | "deny" | "allow_day"): void;
+  /** Open Muse's avatar panel (Activity / Approvals / Identity / Inbox) for this agent, or the
+   * focused one. Idempotent: it never toggles closed, so every avatar click reliably shows it. */
+  openIdentity(id?: string): void;
+  closeIdentity(): void;
+  /** approvalId defaults to the oldest pending approval; pass it explicitly when more than one
+   * card can be on screen at once (the chat log can show several at a time). */
+  decide(d: "allow" | "deny" | "allow_day", approvalId?: string): void;
   send(text: string): Promise<string | void>;
   /** Present only when the host can save to shared memory (the in-page pill). */
   saveMemory?(text: string): Promise<void>;
@@ -31,8 +41,17 @@ export interface ViewActions {
     link(offer: LinkOffer, toSession: string): Promise<void>;
   };
   toggleSound(): void;
+  toggleSettings(): void;
+  updateSettings(patch: Partial<Settings>): void;
   setAutoClose(seconds: number): void;
   blip(): void;
+  /** Fill the pill window, or restore the size from before. */
+  toggleMaximize?(): void;
+  isMaximized?(): boolean;
+  /** The version a background check already found, or null. Present only when the host can check. */
+  updateAvailable?(): string | null;
+  /** Applies the version updateAvailable() is currently offering; the host restarts itself. */
+  applyUpdate?(): void;
 }
 
 export interface ViewHost {
@@ -88,10 +107,21 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 // ── Header ───────────────────────────────────────────────────────
 
 export function buildHeader(actions: ViewActions): ViewHost {
+  let changingMode = false;
+  const workMode = h("button", { title: "Choose whether agents may use foreground input", onclick: async () => {
+    if (!actions.setOwnerWorkMode || changingMode) return;
+    changingMode = true; workMode.disabled = true;
+    try { await actions.setOwnerWorkMode(State.ownerWorkMode === "working" ? "agents-free" : "working"); }
+    catch { workMode.title = "Work mode could not be changed. Try again when M9R is connected."; }
+    finally { changingMode = false; workMode.disabled = false; }
+  } });
+  const msgBtn = h("button", { class: "tab", title: "Messages", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
   const tabHome = h("button", { class: "tab", title: "Agents", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const tabChat = h("button", { class: "tab", title: "Message", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
+  // Minimizes the pill, from whichever view is open. A plain click target, not a visual
+  // control -- Messages/Settings each have their own icon now, so this never needs to show
+  // or do anything else.
+  const toggle = h("button", { class: "pill-toggle", type: "button", onclick: () => actions.collapse() });
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
-  const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
 
   function go(v: IslandViewName) {
@@ -102,17 +132,28 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, tabHome, tabChat),
-    h("div", { class: "header-actions" }, brokerStatus, gearBtn, soundBtn),
+    // One interface: every page (chats, agents, apps, settings) and the sound toggle live on the
+    // rail now. The header keeps only the minimize target and the broker's offline status.
+    toggle,
+    h("div", { class: "header-actions" }, brokerStatus, workMode),
   );
+  void msgBtn; void tabHome;
 
   return {
     el,
     sync() {
+      // Hidden for now: not wired into actual foreground-approval gating the
+      // way the UI implies, and the real "agents-free" state is set directly
+      // in ~/.m9r/owner-work-mode.json for now, not through this toggle.
+      workMode.hidden = true;
+      workMode.textContent = State.ownerWorkMode === "working" ? "I'm Working" : "Agents Free";
+      workMode.setAttribute("aria-pressed", String(State.ownerWorkMode === "agents-free"));
+      workMode.title = State.ownerWorkMode === "working" ? "Background work continues. Foreground turns need your approval." : "Agents may use foreground input. Click to protect your current work.";
       const v = State.view;
+      msgBtn.classList.toggle("on", v === "prompt");
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
-      tabChat.classList.toggle("on", v === "prompt");
-      gearBtn.classList.toggle("on", v === "settings");
+      toggle.title = "Minimize pill";
+      toggle.setAttribute("aria-label", "Minimize pill");
       const connection = State.brokerConnection;
       brokerStatus.textContent = connection === "connecting" ? "Connecting" : connection === "disconnected" ? "Offline" : "";
       brokerStatus.dataset.state = connection;
@@ -124,26 +165,300 @@ export function buildHeader(actions: ViewActions): ViewHost {
   };
 }
 
-// ── Overview ─────────────────────────────────────────────────────
+// ── Overview (home) ──────────────────────────────────────────────
+// Two panes, HeyClicky's home structure: a sidebar of agents as conversations on the left, and on the right either an
+// idle greeting or the selected agent's own activity. Everything shown comes from State; nothing is sampled or invented.
+
+/** Messages in the shared thread that this agent sent or was sent, oldest first. */
+function agentMessages(task: AgentTask): ChatMessage[] {
+  return State.chatHistory.filter((m) => m.from === task.name || m.to === task.name);
+}
+
+/** A thread message as plain text: the store prefixes agent replies with "handle: ", which the row already names. */
+function messageText(m: ChatMessage): string {
+  const prefix = m.from && m.role === "assistant" ? `${m.from}: ` : "";
+  const text = prefix && m.content.startsWith(prefix) ? m.content.slice(prefix.length) : m.content;
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** The row's one-line preview: the last message involving the agent, else its latest plain-language step. */
+function agentPreview(task: AgentTask): string {
+  const last = agentMessages(task).at(-1);
+  if (last) return (last.role === "user" ? "You: " : "") + messageText(last);
+  return plainStep(task, task.steps.at(-1));
+}
+
+function shortTime(at: number, now = Date.now()): string {
+  const mins = Math.floor((now - at) / 60_000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const d = new Date(at);
+  if (d.toDateString() === new Date(now).toDateString()) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toLocaleDateString([], { weekday: "short" });
+}
+
+function greeting(now = new Date()): string {
+  const hour = now.getHours();
+  if (hour >= 5 && hour < 12) return "Good morning.";
+  if (hour >= 12 && hour < 17) return "Good afternoon.";
+  if (hour >= 17 && hour < 22) return "Good evening.";
+  return "Up late.";
+}
+
+/** The desktop shell's hold-to-talk hotkey is Ctrl+Alt held on its own (overlay/src-tauri/src/ctrl_alt_hold.rs). */
+const HOLD_HINT = "Hold Ctrl + Alt and tell me what to take off your plate.";
+
+const CONNECTION_LABEL: Record<typeof State.brokerConnection, string> = {
+  connected: "Connected", connecting: "Connecting", disconnected: "Offline", unknown: "Local",
+};
+
+/** "2 working · 1 needs you", from the live agent states. */
+function teamSummary(): string {
+  const tasks = State.tasks;
+  if (!tasks.length) return "No agents connected yet. Send a message to get one started.";
+  const needs = tasks.filter((t) => t.state === "approval").length;
+  const busy = tasks.filter((t) => t.runState === "working" || t.runState === "starting" || t.runState === "waiting").length;
+  const parts = [`${tasks.length} agent${tasks.length === 1 ? "" : "s"} connected`];
+  if (busy) parts.push(`${busy} working`);
+  if (needs) parts.push(`${needs} need${needs === 1 ? "s" : ""} you`);
+  return `${parts.join(" · ")}. Pick one to see what it's doing.`;
+}
+
+const HOME_RANK: Record<AgentTask["runState"], number> = {
+  blocked: 0, failed: 1, working: 2, starting: 3, waiting: 3, idle: 4, seen: 4, stopped: 5, unknown: 6, not_connected: 7,
+};
 
 function buildOverview(actions: ViewActions): ViewHost {
-  const ticker = new Ticker();
-  // Focus changes come from the wheel itself, so they skip the setFocus action's own blip; the detent tick is the sound.
-  const drum = buildDrum(ticker.el, (id) => State.setFocus(id), () => actions.blip());
-  const el = h("div", { class: "view overview" }, drum.el);
+  // Sidebar, top to bottom as in HeyClicky's home: home button, search + new, agent faces, conversations, apps, account.
+  const homeBtn = h("button", { class: "home-home", type: "button", title: "Home", "aria-label": "Home", onclick: () => { actions.blip(); select(null); } }, svg(ICONS.house, 13));
+  const search = h("input", { class: "home-search-input", type: "text", placeholder: "Search", "aria-label": "Search agents" }) as HTMLInputElement;
+  const searchGroup = h("label", { class: "home-search" }, svg(ICONS.search, 11, { stroke: 2.2 }), search);
+  const newBtn = h("button", { class: "home-new", type: "button", title: "New message", "aria-label": "New message", onclick: () => {
+    actions.blip(); State.composeTo = null; actions.setView("prompt");
+  } }, svg(ICONS.plus, 12));
+  const avatars = h("div", { class: "home-avatars", role: "group", "aria-label": "Active agents" });
+  const rows = h("div", { class: "home-rows", role: "listbox", "aria-label": "Conversations" });
+  const acctAvatar = h("span", { class: "home-acct-avatar", text: "M" });
+  const acctStatus = h("span", { class: "home-acct-status" });
+  const account = h("div", { class: "home-acct" },
+    acctAvatar,
+    h("span", { class: "home-acct-text" }, h("span", { class: "home-acct-name", text: "M9R on this computer" }), acctStatus),
+    h("button", { class: "home-acct-gear", type: "button", title: "Settings", "aria-label": "Settings", onclick: () => { actions.blip(); actions.toggleSettings(); } }, svg(ICONS.gearFill, 14)),
+  );
+  const side = h("aside", { class: "home-side" },
+    h("div", { class: "home-side-top" }, homeBtn),
+    h("div", { class: "home-search-row" }, searchGroup, newBtn),
+    avatars, rows,
+    account,
+  );
+
+  // Main pane: the buddy peeking over the input pill, then the greeting and the hold-to-talk hint.
+  const closeBtn = h("button", { class: "home-close", type: "button", title: "Minimize", "aria-label": "Minimize pill", onclick: () => actions.collapse() }, svg(ICONS.xmark, 13));
+  const hello = h("div", { class: "home-hello" });
+  const summary = h("div", { class: "home-summary", text: HOLD_HINT });
+  const hero = h("div", { class: "home-hero", "aria-hidden": "true" }, buddy(PROVIDER_COLORS.codex, 138, { hero: true, seed: "m9r" }));
+  const inputPill = h("button", { class: "home-input-pill", type: "button", onclick: () => { actions.blip(); actions.setView("prompt"); } },
+    svg(ICONS.mic, 13), h("span", { text: "Hi, how can I help ^_^?" }));
+  const idle = h("div", { class: "home-idle" }, h("div", { class: "home-stage" }, hero, inputPill), hello, summary);
+
+  // Main pane: the selected agent's activity.
+  const dName = h("span", { class: "home-d-name" });
+  const dDot = h("span", { class: "home-d-dot" });
+  const dStatus = h("span", { class: "home-d-status" });
+  const dActions = h("div", { class: "home-d-actions" });
+  const dTask = h("div", { class: "home-d-task" });
+  const dFeed = h("div", { class: "home-d-feed" });
+  const detail = h("div", { class: "home-detail" },
+    h("div", { class: "home-d-head" }, dDot, dName, dStatus, h("div", { class: "grow" }), dActions),
+    dTask,
+    dFeed,
+  );
+  // One interface: the rail + Chats panel is the only nav now, so the old second sidebar is not
+  // mounted. Its agent faces move into the main pane as a status strip; picking one shows its feed.
+  void side; void closeBtn;
+  const main = h("section", { class: "home-main" }, avatars, idle, detail);
+  const el = h("div", { class: "view overview home home-single" }, main);
+
+  let selectedId: string | null = null;
+  // When the pill last saw each agent's preview change: the thread carries no timestamps, so this is observation time.
+  const seen = new Map<string, { text: string; at: number }>();
+  let rowsKey = "";
+  let detailKey = "";
+
+  function lastSeen(task: AgentTask, text: string): number {
+    const prev = seen.get(task.id);
+    if (prev && prev.text === text) return prev.at;
+    const at = Date.now();
+    seen.set(task.id, { text, at });
+    return at;
+  }
+
+  function select(id: string | null) {
+    selectedId = id;
+    if (id) actions.setFocus(id);
+    else { rowsKey = ""; detailKey = ""; sync(); }
+  }
+
+  function renderSidebar() {
+    const needle = search.value.trim().toLowerCase();
+    const items = State.tasks.map((task) => {
+      const preview = agentPreview(task);
+      return { task, preview, at: lastSeen(task, preview), pending: State.approvals.filter((a) => a.agent === task.id).length };
+    });
+    items.sort((a, b) => (a.task.state === "approval" ? -1 : 0) - (b.task.state === "approval" ? -1 : 0)
+      || b.at - a.at || (HOME_RANK[a.task.runState] ?? 6) - (HOME_RANK[b.task.runState] ?? 6));
+    const shown = needle
+      ? items.filter((i) => `${displayName(i.task)} ${i.task.name} ${i.preview}`.toLowerCase().includes(needle))
+      : items;
+    const conn = State.brokerConnection;
+    const firstApproval = State.approvals[0];
+    const key = JSON.stringify([selectedId, needle, items.map((i) => [i.task.id, i.task.color, i.task.state, i.preview, shortTime(i.at), i.pending]),
+      conn, State.approvals.length, firstApproval?.id]);
+    if (key === rowsKey) return;
+    rowsKey = key;
+
+    avatars.replaceChildren(...items.map(({ task }) => {
+      const b = h("button", {
+        class: "home-avatar" + (task.id === selectedId ? " on" : ""), type: "button",
+        title: `${displayName(task)} · ${plainStatus(task).label}`, "aria-label": displayName(task),
+        onclick: () => select(task.id === selectedId ? null : task.id),
+      }, h("span", { class: "home-avatar-circle", style: `--tint:${task.color}` }, buddy(task.color, 40, { seed: task.id })),
+        h("span", { class: "home-avatar-label", text: displayName(task) }));
+      b.classList.toggle("live", plainStatus(task).live);
+      return b;
+    }));
+    avatars.hidden = items.length === 0;
+
+    // Pinned first row, HeyClicky's "Suggestions" slot: what is waiting on the owner, with its count.
+    const waiting = State.approvals.length;
+    const requests = needle ? null : h("button", {
+      class: "home-row home-row-requests", type: "button", role: "option", "aria-selected": "false",
+      "aria-label": waiting ? `Requests: ${waiting} waiting on you` : "Requests: nothing waiting",
+      // Approvals are folded into the one main chat as inline cards, not a separate screen.
+      onclick: () => { if (!waiting) return; actions.blip(); actions.setView("prompt"); },
+    },
+      h("span", { class: "home-row-thumb home-row-spark" }, svg(ICONS.star, 13)),
+      h("span", { class: "home-row-body" },
+        h("span", { class: "home-row-head" },
+          h("span", { class: "home-row-name", text: "Requests" }),
+          waiting ? h("span", { class: "home-row-badge", text: String(waiting) }) : null,
+          h("span", { class: "home-row-time", text: waiting ? "now" : "" }),
+        ),
+        h("span", { class: "home-row-preview", text: firstApproval
+          ? approvalSentence(displayName(State.tasks.find((t) => t.id === firstApproval.agent) ?? { provider: "agent", name: firstApproval.agent }), firstApproval.title)
+          : "Nothing needs you right now." }),
+      ),
+    );
+
+    const agentRows = shown.map(({ task, preview, at, pending }) => {
+      const on = task.id === selectedId;
+      return h("button", {
+        class: "home-row" + (on ? " on" : ""), type: "button", role: "option", "aria-selected": on ? "true" : "false",
+        "aria-label": `${displayName(task)}: ${preview}`,
+        onclick: () => select(on ? null : task.id),
+      },
+        h("span", { class: "home-row-thumb", style: `--tint:${task.color}` }, buddy(task.color, 30, { seed: task.id })),
+        h("span", { class: "home-row-body" },
+          h("span", { class: "home-row-head" },
+            h("span", { class: "home-row-name", text: displayName(task) }),
+            pending ? h("span", { class: "home-row-badge", text: String(pending), title: `${pending} waiting on you` }) : null,
+            h("span", { class: "home-row-time", text: shortTime(at) }),
+          ),
+          h("span", { class: "home-row-preview", text: preview }),
+        ),
+      );
+    });
+    const empty = shown.length ? null : h("div", { class: "mp-empty" }, items.length
+      ? h("div", { class: "mp-empty-title", text: "No matches" })
+      : h("div", { class: "mp-empty-title", text: "No agents yet" }), items.length ? "Try a different name." : "Connected agents show up here.");
+    rows.replaceChildren(...([requests, ...agentRows, empty] as (HTMLElement | null)[]).filter((x): x is HTMLElement => !!x));
+
+    acctStatus.replaceChildren(h("span", { text: CONNECTION_LABEL[conn] }), h("i", { class: "home-acct-ring" }));
+    acctStatus.dataset.state = conn;
+  }
+
+  function renderDetail() {
+    const task = selectedId ? State.tasks.find((t) => t.id === selectedId) ?? null : null;
+    idle.hidden = !!task;
+    detail.hidden = !task;
+    if (!task) {
+      hello.textContent = greeting();
+      summary.textContent = State.tasks.length ? HOLD_HINT : teamSummary();
+      summary.title = teamSummary();
+      detailKey = "";
+      return;
+    }
+    const status = plainStatus(task);
+    const steps = task.steps.map((s) => plainStep(task, s)).filter((s, i, all) => s && all.indexOf(s) === i);
+    const messages = agentMessages(task);
+    const pending = State.approvals.filter((a) => a.agent === task.id);
+    const key = JSON.stringify([task.id, task.color, task.task, status, steps, messages.map((m) => [m.id, m.role, m.content]), pending.map((a) => a.id)]);
+    if (key === detailKey) return;
+    detailKey = key;
+
+    dDot.replaceChildren(dot(task.color, 9));
+    dName.textContent = displayName(task);
+    dStatus.textContent = status.label;
+    dStatus.style.setProperty("--tone", status.color);
+    dStatus.classList.toggle("live", status.live);
+    dTask.textContent = task.task ? plainStep(task, task.task) : "";
+    dTask.hidden = !task.task;
+
+    dActions.replaceChildren(...[
+      pending.length ? btn("Review", "primary", () => { actions.setFocus(task.id); actions.setView("prompt"); }) : null,
+      btn("Message", pending.length ? "secondary" : "primary", () => {
+        actions.setFocus(task.id);
+        State.composeTo = [task.id];
+        actions.setView("prompt");
+      }),
+    ].filter((x): x is HTMLElement => !!x));
+
+    const feed: HTMLElement[] = [];
+    feed.push(h("div", { class: "home-d-kicker", text: "Activity" }));
+    if (steps.length) {
+      feed.push(h("ol", { class: "home-d-steps" }, ...steps.slice(-8).map((s, i, all) =>
+        h("li", { class: "home-d-step" + (i === all.length - 1 ? " now" : ""), text: s }))));
+    } else {
+      feed.push(h("div", { class: "home-d-empty", text: plainStep(task, "") }));
+    }
+    if (messages.length) {
+      feed.push(h("div", { class: "home-d-kicker", text: "Messages" }));
+      for (const m of messages.slice(-6)) {
+        const mine = m.role === "user";
+        feed.push(h("div", { class: "home-d-msg" + (mine ? " mine" : "") },
+          h("span", { class: "home-d-from", text: mine ? "You" : displayName(State.tasks.find((t) => t.name === m.from) ?? { provider: "agent", name: m.from ?? task.name }) }),
+          h("span", { class: "home-d-text", text: messageText(m) }),
+        ));
+      }
+    }
+    dFeed.replaceChildren(...feed);
+    dFeed.scrollTop = dFeed.scrollHeight;
+  }
+
+  function sync() {
+    if (selectedId && !State.tasks.some((t) => t.id === selectedId)) selectedId = null;
+    renderSidebar();
+    renderDetail();
+  }
+
+  search.addEventListener("input", () => { rowsKey = ""; renderSidebar(); });
+  search.addEventListener("pointerdown", () => actions.focusWindow?.(true));
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && search.value) { e.stopPropagation(); search.value = ""; rowsKey = ""; renderSidebar(); }
+  });
 
   return {
     el,
-    tick(nowMs: number) {
-      ticker.tick(nowMs);
+    sync,
+    activate() {
+      // Home always opens on the greeting; picking an agent is the owner's move.
+      selectedId = null;
+      search.value = "";
+      rowsKey = "";
+      detailKey = "";
     },
-    get animating() {
-      return ticker.animating;
-    },
-    sync() {
-      const task = State.focusTask;
-      ticker.sync(task ? { ...task, steps: task.steps.length ? task.steps.map((s) => plainStep(task, s)) : [plainStep(task, "")] } : null);
-      drum.sync();
+    deactivate() {
+      if (document.activeElement === search) { search.blur(); actions.focusWindow?.(false); }
     },
   };
 }
@@ -154,87 +469,11 @@ function buildEmpty(actions: ViewActions): ViewHost {
   const body = h(
     "div",
     { class: "stack", style: "padding:0 18px 0 118px;flex-direction:row;align-items:center;gap:16px" },
-    h(
-      "div",
-      { style: "display:flex;flex-direction:column;gap:5px" },
-      h("div", { class: "title", text: "No active agent work yet." }),
-      h("div", { class: "sub", text: "M9R manages your provider processes on this device. Their work appears here when they start acting." }),
-    ),
+    h("div", { class: "title", text: "No active agent work yet." }),
     h("div", { class: "grow" }),
     btn("Send a message", "primary", () => actions.setView("prompt")),
   );
   return { el: h("div", { class: "view" }, card(null, body)), sync() {} };
-}
-
-// ── Approval ─────────────────────────────────────────────────────
-
-/** "Post to the page" → "Codex wants to post to the page." */
-function approvalSentence(name: string, title: string | undefined): string {
-  const t = (title ?? "").trim().replace(/[.!]+$/, "");
-  if (!t) return `${name} needs your OK.`;
-  return `${name} wants to ${t.charAt(0).toLowerCase()}${t.slice(1)}.`;
-}
-
-/** The drum's band, holding a decision: same mark, same place, so the wheel itself is what asks. */
-function buildApproval(actions: ViewActions): ViewHost {
-  const name = h("span", { class: "ask-name" });
-  const count = h("span", { class: "ask-count" });
-  const sentence = h("div", { class: "ask-sentence" });
-  // The line being authorised: the action, path or address, never just the name of the tool asking.
-  const exact = h("div", { class: "ask-exact" });
-  const status = h("div", { class: "ask-status", role: "status", "aria-live": "polite" });
-  const buttons = h("div", { class: "ask-buttons" });
-  const later = h("div", { class: "ask-later" });
-  const band = h("div", { class: "ask-band" },
-    h("div", { class: "ask-text" },
-      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag ask-tag", text: "Needs you" }), count),
-      sentence,
-      exact,
-    ),
-    h("div", { class: "ask-side" }, buttons, later, status),
-  );
-  const el = h("div", { class: "view approval-view" }, band);
-  let built = false;
-  let shownId = "";
-  return {
-    el,
-    sync() {
-      const req = State.pendingApproval;
-      const agent = State.tasks.find((t) => t.id === req?.agent) ?? State.focusTask;
-      const label = agent ? displayName(agent) : "An agent";
-      name.textContent = label;
-      count.textContent = State.approvals.length > 1 ? `1 of ${State.approvals.length}` : "";
-      sentence.textContent = approvalSentence(label, req?.title);
-      exact.textContent = req?.detail || "";
-      exact.hidden = !req?.detail;
-      const decisionError = req && State.decisionError?.approvalId === req.id ? State.decisionError.message : null;
-      status.textContent = decisionError
-        ? "That didn't go through. Try again."
-        : req?.unconfirmed
-          ? "M9R will double-check this before it runs."
-          : "";
-      status.title = decisionError ?? "";
-      status.dataset.state = decisionError ? "error" : req?.unconfirmed ? "unconfirmed" : "";
-      status.hidden = !decisionError && !req?.unconfirmed;
-      // A new request replays the arrival so a queued second approval doesn't slip in unnoticed.
-      if (req && req.id !== shownId) {
-        shownId = req.id;
-        band.classList.remove("arrive");
-        void band.offsetWidth;
-        band.classList.add("arrive");
-      }
-      // Built once: rebuilding buttons between a mouse-down and a mouse-up would swallow the click.
-      if (built) return;
-      built = true;
-      buttons.append(
-        btn("Deny", "secondary", () => actions.decide("deny"), "N"),
-        btn("Allow", "primary", () => actions.decide("allow"), "Y"),
-      );
-      if (actions.canAllowForADay()) {
-        later.append(h("button", { class: "link-btn ask-day", text: "Allow for a day", onclick: () => actions.decide("allow_day") }));
-      }
-    },
-  };
 }
 
 // ── Error ────────────────────────────────────────────────────────
@@ -258,28 +497,30 @@ function buildError(actions: ViewActions): ViewHost {
 
 // ── Finished ─────────────────────────────────────────────────────
 
-/** The task card: the drum's band turns green and says what finished, then the island grows downward with how it got there. */
+/** The handback leads with the task and keeps recent activity available on demand. */
 function buildFinished(actions: ViewActions): ViewHost {
   const name = h("span", { class: "ask-name" });
   const headline = h("div", { class: "ask-sentence" });
   const band = h("div", { class: "done-band" },
     h("div", { class: "ask-text" },
-      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag done-tag", text: "Done" }), h("span", { class: "ask-count", text: "Just now" })),
+      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag done-tag", text: "Done" })),
       headline,
     ),
   );
   const steps = h("ol", { class: "done-steps" });
+  const activity = h("details", { class: "done-activity" }, h("summary", { text: "Recent activity" }), steps);
   const foot = h("div", { class: "done-foot" },
     btn("Reply", "secondary", () => actions.setView("prompt")),
-    btn("Done", "primary", () => actions.collapse()),
+    btn("Close", "primary", () => actions.collapse()),
   );
-  const el = h("div", { class: "view finished-view" }, band, steps, foot);
+  const el = h("div", { class: "view finished-view" }, band, activity, foot);
   let key = "";
   return {
     el,
     activate() {
       State.stateOverride = "finished";
       key = "";
+      activity.open = false;
     },
     deactivate() {
       State.stateOverride = null;
@@ -295,12 +536,8 @@ function buildFinished(actions: ViewActions): ViewHost {
       key = next;
       name.textContent = displayName(task);
       headline.textContent = title;
-      steps.replaceChildren(...trail.map((text, i) => {
-        const li = h("li", { class: "done-step" }, h("span", { class: "done-check" }, svg(ICONS.check, 9, { stroke: 2.4 })), h("span", { text }));
-        li.style.animationDelay = `${180 + i * 70}ms`;
-        return li;
-      }));
-      steps.hidden = trail.length === 0;
+      steps.replaceChildren(...trail.map((text) => h("li", { class: "done-step", text })));
+      activity.hidden = trail.length === 0;
     },
   };
 }
@@ -366,39 +603,93 @@ function buildNote(): ViewHost {
 
 // ── Settings ─────────────────────────────────────────────────────
 
-function buildSettings(actions: ViewActions): ViewHost {
-  const soundSwitch = h("button", { class: "switch", onclick: () => actions.toggleSound() });
-  const autoLabel = h("span", {});
-  const segButtons = [10, 15, 30].map((s) => h("button", { onclick: () => actions.setAutoClose(s) }, `${s}s`));
+/** One Settings card: the plain setting name, then its control. */
+function settingsCard(title: string, control: HTMLElement): HTMLElement {
+  return h("div", { class: "settings-card" }, h("div", { class: "settings-card-title", text: title }), control);
+}
 
-  const rows = h(
-    "div",
-    { class: "settings-rows" },
-    h("div", { class: "settings-row" }, soundSwitch, h("span", { text: "Sound" })),
-    h("div", { class: "settings-row" }, svg(ICONS.timer, 12), autoLabel, h("div", { class: "seg" }, ...segButtons)),
-  );
+/** Settings, Muse's own way: a modal over whatever chat is open, not a page that replaces it. */
+export function buildSettings(actions: ViewActions, onClose: () => void): ViewHost {
+  const ONOFF = ["Off", "On"];
+  const sound = dotSlider(ONOFF, "Sound", (i) => { if (State.settings.soundEnabled !== (i === 1)) actions.toggleSound(); });
+  const voice = dotSlider(ONOFF, "Spoken updates", (i) => actions.updateSettings({ voiceEnabled: i === 1 }));
+  const RATES = [{ label: "Slower", rate: 0.85 }, { label: "Normal", rate: 1 }, { label: "Faster", rate: 1.2 }];
+  const rate = dotSlider(RATES.map((r) => r.label), "Speed", (i) => actions.updateSettings({ voiceRate: RATES[i].rate }));
+  const CLOSES = [10, 15, 30];
+  const autoClose = dotSlider(CLOSES.map((s) => `${s}s`), "Auto-close", (i) => actions.setAutoClose(CLOSES[i]));
+  const GLOWS = [{ label: "Status", style: "status" }, { label: "Rainbow", style: "rainbow" }, { label: "Off", style: "off" }] as const;
+  const glow = dotSlider(GLOWS.map((g) => g.label), "Edge glow", (i) => actions.updateSettings({ glowStyle: GLOWS[i].style }));
 
-  const el = h("div", { class: "view" }, card(null, h("div", { class: "stack", style: "padding:14px 16px 14px 84px" }, rows)));
+  const glowColorInput = h("input", { class: "glow-color-input", type: "color", tabindex: -1, "aria-hidden": true }) as HTMLInputElement;
+  glowColorInput.addEventListener("change", () => actions.updateSettings({ glowColor: glowColorInput.value }));
+  const glowColorButton = h("button", { class: "settings-swatch", type: "button", title: "Choose a custom edge-glow color",
+    "aria-label": "Choose a custom edge-glow color", onclick: () => glowColorInput.click() });
+  const glowColorReset = h("button", { class: "settings-btn", type: "button", text: "Auto", title: "Use the current status colors again",
+    onclick: () => actions.updateSettings({ glowColor: null }) });
+
+  // Muse's Settings layout: a category list on the left, the active category's cards on the right.
+  // "Sound and voice" is hidden for now: core/sound.ts is a no-op, so its Sound toggle did nothing.
+  // The controls stay built (and synced) so the category returns by re-adding this one line:
+  //   { id: "sound", label: "Sound and voice", icon: ICONS.railSoundOn, cards: [settingsCard("Sound", sound.el), settingsCard("Spoken updates", voice.el), settingsCard("Speed", rate.el)] },
+  const CATEGORIES: { id: string; label: string; icon: string; cards: HTMLElement[] }[] = [
+    { id: "general", label: "General", icon: ICONS.gear, cards: [settingsCard("Auto-close", autoClose.el)] },
+    { id: "appearance", label: "Appearance", icon: ICONS.display, cards: [
+      settingsCard("Edge glow", glow.el),
+      settingsCard("Custom color", h("div", { class: "settings-color" }, glowColorButton, glowColorReset, glowColorInput))] },
+  ];
+  let activeCat = "general";
+  const paneTitle = h("div", { class: "set-pane-title" });
+  const paneBody = h("div", { class: "set-pane-body" });
+  const catButtons = CATEGORIES.map((c) => {
+    const icon = c.icon.startsWith("M4 9.5") ? svg(c.icon, 15, { stroke: 1.7 }) : svg(c.icon, 15);
+    const b = h("button", { class: "set-cat", type: "button", onclick: () => { actions.blip(); showCat(c.id); } }, icon, h("span", { text: c.label }));
+    b.dataset.cat = c.id;
+    return b;
+  });
+  function showCat(id: string) {
+    activeCat = id;
+    const c = CATEGORIES.find((x) => x.id === id) ?? CATEGORIES[0];
+    paneTitle.textContent = c.label;
+    paneBody.replaceChildren(...c.cards);
+    for (const b of catButtons) b.classList.toggle("on", b.dataset.cat === activeCat);
+  }
+  showCat(activeCat);
+  void buildSettingsDrum;
+
+  const closeBtn = h("button", { class: "settings-close", type: "button", title: "Close Settings", "aria-label": "Close Settings", onclick: () => { actions.blip(); onClose(); } }, svg(ICONS.xmark, 13));
+  const el = h("div", { class: "settings-page" },
+    h("aside", { class: "set-side" }, h("div", { class: "set-side-title", text: "Settings" }), ...catButtons),
+    h("section", { class: "set-pane" }, h("div", { class: "set-pane-head" }, paneTitle, closeBtn), paneBody));
+
+  /** Index of the stop nearest `value`, so an off-list saved value still lands on a stop. */
+  const nearest = (list: readonly number[], value: number) =>
+    list.reduce((best, v, i) => (Math.abs(v - value) < Math.abs(list[best] - value) ? i : best), 0);
 
   return {
     el,
     sync() {
       const s = State.settings;
-      soundSwitch.classList.toggle("on", s.soundEnabled);
-      autoLabel.textContent = `Auto-close · ${Math.round(s.autoCloseInterval)}s`;
-      segButtons.forEach((b, i) => b.classList.toggle("on", s.autoCloseInterval === [10, 15, 30][i]));
+      sound.sync(s.soundEnabled ? 1 : 0);
+      voice.sync(s.voiceEnabled ? 1 : 0);
+      rate.sync(nearest(RATES.map((r) => r.rate), s.voiceRate));
+      autoClose.sync(nearest(CLOSES, s.autoCloseInterval));
+      glow.sync(Math.max(0, GLOWS.findIndex((g) => g.style === s.glowStyle)));
+      glowColorButton.style.setProperty("--glow-picked", s.glowColor ?? "transparent");
+      glowColorButton.classList.toggle("custom", s.glowColor !== null);
+      glowColorReset.hidden = s.glowColor === null;
+      glowColorInput.value = s.glowColor ?? "#FFFFFF";
     },
   };
 }
 
-// ── Models ───────────────────────────────────────────────────────
-// Modeled on the owner's ModelSelectorPrompt: a searchable list with provider
-// labels and configuration badges, and a preview panel with the Reasoning
-// configuration. Only provider-reported data is shown; nothing is invented.
+// ── Model/effort helpers ─────────────────────────────────────────
+// Shared by the composer's model chip (./model-chip.ts); the owner's full model-picker
+// page was retired once the chip could show and change the focused agent's model/effort
+// on its own -- a dedicated page for that one job was redundant with it.
 
-type PickerProvider = "claude" | "codex" | "opencode" | "agent";
+export type PickerProvider = "claude" | "codex" | "opencode" | "agent";
 
-function pickerProvider(provider: string): PickerProvider {
+export function pickerProvider(provider: string): PickerProvider {
   const value = provider.toLowerCase();
   if (value.startsWith("claude")) return "claude";
   if (value.startsWith("codex")) return "codex";
@@ -406,222 +697,12 @@ function pickerProvider(provider: string): PickerProvider {
   return "agent";
 }
 
-const PROVIDER_NAMES: Record<PickerProvider, string> = { claude: "Anthropic", codex: "OpenAI", opencode: "OpenCode", agent: "Agent" };
+export const PROVIDER_NAMES: Record<PickerProvider, string> = { claude: "Anthropic", codex: "OpenAI", opencode: "OpenCode", agent: "Agent" };
 
 /** Providers report effort ids like "low" or "xhigh" as labels; show them as words. */
-function effortLabel(label: string): string {
+export function effortLabel(label: string): string {
   if (label.toLowerCase() === "xhigh") return "Extra high";
   return label === label.toLowerCase() ? label.charAt(0).toUpperCase() + label.slice(1) : label;
-}
-
-export function buildModelPicker(actions: ViewActions): ViewHost {
-  const tabs = h("div", { class: "mp-agents", role: "tablist", "aria-label": "Agent" });
-  const search = h("input", { class: "mp-search-input", type: "text", placeholder: "Search models...", "aria-label": "Search models" }) as HTMLInputElement;
-  const searchGroup = h("label", { class: "mp-search" }, search, svg(ICONS.search, 12, { stroke: 2 }));
-  const rows = h("div", { class: "mp-rows", role: "listbox", "aria-label": "Models" });
-  const fade = h("div", { class: "mp-fade", "aria-hidden": "true" });
-  const listWrap = h("div", { class: "mp-list" }, rows, fade);
-  const left = h("div", { class: "mp-left" }, tabs, searchGroup, listWrap);
-  const preview = h("div", { class: "mp-preview", "aria-live": "polite" });
-  const body = h("div", { class: "mp-body" }, left, preview);
-  const el = h("div", { class: "view model-picker-view" }, card(null, body));
-
-  let key = "";
-  let activeHandle = "";
-  let previewId = "";
-  let pending: { handle: string; model: string; effort: string | null; applying: boolean } | null = null;
-  let failure: { handle: string; text: string } | null = null;
-
-  const agents = (): PillModelAgent[] => State.models?.agents ?? [];
-  const activeAgent = (): PillModelAgent | undefined => agents().find((agent) => agent.handle === activeHandle);
-  const effectiveModel = (agent: PillModelAgent): string =>
-    (pending?.handle === agent.handle ? pending.model : null) ?? agent.selectedModel ?? agent.currentModel ?? "";
-  const effectiveEffort = (agent: PillModelAgent): string =>
-    (pending?.handle === agent.handle ? pending.effort : null) ?? agent.selectedEffort ?? agent.currentEffort ?? "";
-
-  function updateFade() {
-    fade.classList.toggle("on", rows.scrollHeight - rows.scrollTop - rows.clientHeight > 4);
-  }
-  rows.addEventListener("scroll", updateFade, { passive: true });
-
-  async function pick(agent: PillModelAgent, model: string, effort: string | null) {
-    if (!actions.selectModel) return;
-    const request = { handle: agent.handle, model, effort, applying: true };
-    pending = request;
-    failure = null;
-    renderRows();
-    renderPreview();
-    try {
-      await actions.selectModel(agent.handle, model || null, effort);
-      if (pending !== request) return;
-      request.applying = false;
-      renderRows();
-      // Keep the choice shown until the provider's own state confirms it, but never indefinitely.
-      setTimeout(() => { if (pending === request) { pending = null; key = ""; sync(); } }, 10_000);
-    } catch {
-      if (pending !== request) return;
-      pending = null;
-      failure = { handle: agent.handle, text: `Could not change @${agent.handle}; the previous model is still active.` };
-      renderRows();
-      renderPreview();
-    }
-  }
-
-  function badge(agent: PillModelAgent, modelId: string): HTMLElement | null {
-    if (modelId !== effectiveModel(agent)) return null;
-    const effortId = effectiveEffort(agent);
-    const label = agent.models.find((model) => model.id === modelId)?.efforts?.find((effort) => effort.id === effortId)?.label;
-    return label ? h("span", { class: "mp-badge" }, svg(ICONS.brain, 10), effortLabel(label)) : null;
-  }
-
-  function renderTabs() {
-    tabs.replaceChildren();
-    for (const agent of agents()) {
-      const on = agent.handle === activeHandle;
-      tabs.append(h("button", {
-        class: "mp-agent" + (on ? " on" : ""), role: "tab", "aria-selected": on ? "true" : "false",
-        onclick: () => {
-          if (activeHandle === agent.handle) return;
-          activeHandle = agent.handle;
-          previewId = "";
-          search.value = "";
-          renderAll();
-        },
-      }, providerLogo(pickerProvider(agent.provider), 13), h("span", { text: "@" + agent.handle })));
-    }
-  }
-
-  function renderRows() {
-    rows.replaceChildren();
-    const agent = activeAgent();
-    searchGroup.hidden = !agent || agent.availability !== "available" || agent.models.length === 0;
-    if (!agent) {
-      rows.append(h("div", { class: "mp-empty", text: "No connected agents yet." }));
-      updateFade();
-      return;
-    }
-    if (agent.availability === "not_connected") {
-      rows.append(h("div", { class: "mp-empty", text: `@${agent.handle} is not connected.` }));
-      updateFade();
-      return;
-    }
-    if (agent.availability !== "available" || agent.models.length === 0) {
-      rows.append(h("div", { class: "mp-empty", text: `@${agent.handle} has not reported a live model catalog yet.` }));
-      updateFade();
-      return;
-    }
-    const needle = search.value.trim().toLowerCase();
-    const options = needle
-      ? agent.models.filter((model) => model.label.toLowerCase().includes(needle) || model.id.toLowerCase().includes(needle))
-      : agent.models;
-    if (!options.length) {
-      rows.append(h("div", { class: "mp-empty" }, h("div", { class: "mp-empty-title", text: "No models found" }), "Maybe try a different search."));
-      updateFade();
-      return;
-    }
-    const providerName = PROVIDER_NAMES[pickerProvider(agent.provider)];
-    const current = effectiveModel(agent);
-    for (const model of options) {
-      const on = model.id === current;
-      const applying = pending?.handle === agent.handle && pending.model === model.id && pending.applying;
-      const row = h("button", {
-        class: "mp-row" + (on ? " on" : "") + (model.id === previewId ? " preview" : ""),
-        role: "option", "aria-selected": on ? "true" : "false",
-        onclick: () => { if (model.id !== current) void pick(agent, model.id, null); },
-        onmouseenter: () => { previewId = model.id; renderPreview(); markPreview(); },
-        onfocus: () => { previewId = model.id; renderPreview(); markPreview(); },
-      },
-        h("span", { class: "mp-row-text" },
-          h("span", { class: "mp-row-label", text: model.label }),
-          h("span", { class: "mp-row-provider" }, providerLogo(pickerProvider(agent.provider), 10), providerName)),
-        badge(agent, model.id),
-        applying ? h("span", { class: "mp-spin", "aria-label": "Applying" }) : on ? svg(ICONS.check, 12) : null,
-      );
-      row.dataset.id = model.id;
-      rows.append(row);
-    }
-    requestAnimationFrame(updateFade);
-  }
-
-  function markPreview() {
-    for (const row of rows.querySelectorAll<HTMLElement>(".mp-row")) row.classList.toggle("preview", row.dataset.id === previewId);
-  }
-
-  function renderPreview() {
-    preview.replaceChildren();
-    const agent = activeAgent();
-    if (!agent || agent.availability !== "available" || !agent.models.length) {
-      preview.hidden = true;
-      return;
-    }
-    preview.hidden = false;
-    const model = agent.models.find((option) => option.id === (previewId || effectiveModel(agent))) ?? agent.models[0];
-    const provider = pickerProvider(agent.provider);
-    const isCurrent = model.id === effectiveModel(agent);
-    const head = h("div", { class: "mp-p-head" },
-      h("div", { class: "mp-p-title", text: model.label }),
-      h("div", { class: "mp-p-provider" }, providerLogo(provider, 11), PROVIDER_NAMES[provider], isCurrent ? h("span", { class: "mp-p-current", text: "In use" }) : null),
-      model.description ? h("p", { class: "mp-p-desc", text: model.description }) : null,
-    );
-    const config = h("div", { class: "mp-p-config" }, h("div", { class: "mp-p-kicker", text: "Configuration" }));
-    if (model.efforts?.length) {
-      const chosen = isCurrent ? effectiveEffort(agent) : "";
-      const group = h("div", { class: "mp-radio", role: "radiogroup", "aria-label": "Reasoning level" });
-      for (const effort of model.efforts) {
-        const on = effort.id === chosen;
-        group.append(h("button", {
-          class: "mp-radio-item" + (on ? " on" : ""), role: "radio", "aria-checked": on ? "true" : "false",
-          onclick: () => void pick(agent, model.id, effort.id),
-        }, effortLabel(effort.label)));
-      }
-      config.append(h("div", { class: "mp-p-label", text: "Reasoning" }), group);
-    } else {
-      config.append(h("div", { class: "mp-p-none", text: "This model has no reasoning levels to configure." }));
-    }
-    preview.append(head, config);
-    if (failure?.handle === agent.handle) preview.append(h("div", { class: "mp-p-error", role: "alert", text: failure.text }));
-  }
-
-  function renderAll() {
-    const list = agents();
-    if (!list.some((agent) => agent.handle === activeHandle)) {
-      activeHandle = (list.find((agent) => agent.availability === "available" && agent.models.length) ?? list[0])?.handle ?? "";
-    }
-    renderTabs();
-    renderRows();
-    renderPreview();
-    requestAnimationFrame(() => {
-      rows.querySelector<HTMLElement>(".mp-row.on")?.scrollIntoView({ block: "nearest" });
-      updateFade();
-    });
-  }
-
-  search.addEventListener("input", renderRows);
-
-  function sync() {
-    const list = agents();
-    // A confirmed selection from the provider replaces the optimistic one.
-    if (pending && !pending.applying) {
-      const agent = list.find((item) => item.handle === pending!.handle);
-      if (agent && (agent.selectedModel ?? agent.currentModel) === pending.model
-        && (!pending.effort || (agent.selectedEffort ?? agent.currentEffort) === pending.effort)) pending = null;
-    }
-    const nextKey = JSON.stringify([pending, list.map((agent) => [agent.handle, agent.provider, agent.availability, agent.currentModel, agent.currentEffort,
-      agent.selectedModel, agent.selectedEffort, agent.models])]);
-    if (nextKey === key && rows.childElementCount > 0) return;
-    key = nextKey;
-    renderAll();
-  }
-
-  sync();
-  return { el, sync, activate() {
-    const focused = State.focusTask?.name;
-    if (focused && agents().some((agent) => agent.handle === focused)) activeHandle = focused;
-    previewId = "";
-    search.value = "";
-    key = "";
-    sync();
-  } };
 }
 
 // ── Registry ─────────────────────────────────────────────────────
@@ -630,13 +711,12 @@ export function buildViews(actions: ViewActions, onChatHeightChange: () => void)
   const map = new Map<IslandViewName, ViewHost>();
   map.set("overview", buildOverview(actions));
   map.set("empty", buildEmpty(actions));
-  map.set("approval", buildApproval(actions));
   map.set("error", buildError(actions));
   map.set("finished", buildFinished(actions));
   map.set("drop", buildDrop());
   map.set("note", buildNote());
-  map.set("settings", buildSettings(actions));
   map.set("prompt", buildPrompt(actions, onChatHeightChange));
-  map.set("models", buildModelPicker(actions));
+  // Identity is not a view any more: it is Muse's right-hand avatar panel, built by the island
+  // (see buildIdentity in ./identity) and shown beside whatever view is open.
   return map;
 }

@@ -1,0 +1,91 @@
+:root {
+  color-scheme: light;
+  background: transparent;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+}
+
+#chatter-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The jelly pill: same glossy-blue reserve-button treatment as the live site
+   (https://m9r.dev's "Join waitlist"), pulled from its computed style so the
+   bubble reads as the same brand, not a generic chat balloon. Anchored at
+   (--bx, --by) -- the agent's own cursor point this call was given -- and
+   nudged up/centered so it sits just above that point, never covering it. */
+.chatter-bubble {
+  /* Default (unknown/"agent") tint -- same family as the site's reserve
+     button, kept as the fallback when no per-provider color applies. */
+  --tint-1: #edf4ff;
+  --tint-2: #d6e7ff;
+  --tint-3: #a2c7ff;
+  --tint-4: #99cbf8;
+  --tint-5: #a2d2f7;
+  --tint-border: #221898;
+
+  position: absolute;
+  left: var(--bx, 50%);
+  top: var(--by, 50%);
+  transform: translate(-50%, calc(-100% - 14px)) scale(0.92);
+  display: flex;
+  align-items: center;
+  max-width: 280px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--tint-1) 0%, var(--tint-2) 18%, var(--tint-3) 50%, var(--tint-4) 80%, var(--tint-5) 100%);
+  border: 0.8px solid var(--tint-border);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22), inset 0 1px 1px rgba(255, 255, 255, 0.8);
+  opacity: 0;
+  transition: opacity 220ms ease, transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  will-change: opacity, transform;
+}
+
+.chatter-bubble.visible {
+  opacity: 1;
+  transform: translate(-50%, calc(-100% - 14px)) scale(1);
+}
+
+/* Per-agent tint -- matches the locked cursor colors (see
+   project_agent_cursor_chatter_design memory) so the bubble reads as
+   "that same agent talking," not a uniform system notification. */
+.chatter-bubble[data-provider="claude"] {
+  --tint-1: #fff3e8;
+  --tint-2: #ffdfc2;
+  --tint-3: #ffb870;
+  --tint-4: #ff9f4d;
+  --tint-5: #ffa85c;
+  --tint-border: #7a3a00;
+}
+.chatter-bubble[data-provider="opencode"] {
+  --tint-1: #eafbf0;
+  --tint-2: #cff3db;
+  --tint-3: #9fe3b9;
+  --tint-4: #7ad89e;
+  --tint-5: #8fdeac;
+  --tint-border: #0b5b33;
+}
+
+.chatter-bubble .line {
+  color: #0d0d12;
+  font: 600 15px/1.25 "Fredoka", system-ui, "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  letter-spacing: -0.1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chatter-bubble { transition: none; }
+}

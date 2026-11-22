@@ -1,16 +1,18 @@
 /**
- * Local transport for the web broker (spike). Three doors:
- * - POST /cmd from the M9R MCP tools, allowed only with the owner-scoped key in ~/.m9r/web-broker.key. Requests that
- *   carry an Origin header are refused, so a web page cannot drive the browser through this port.
+ * Local transport for the owner broker:
+ * - authenticated native desktop stage/action routes; browser-extension command routes are not registered.
  * - a local named pipe/Unix socket for read-only status plus narrowly scoped, session-token-authorized agent task
- *   mutations; owner approvals, authority changes, and arbitrary store writes are never accepted on this pipe.
- * - a WebSocket at /ext for the browser extension, allowed only from a chrome-extension:// origin and either a
- *   listed extension id or an explicit development-only opt-in when no ids are configured. One extension at a time:
- *   an authorized new connection replaces the old one.
+ *   mutations; owner approvals and authority changes require the protected owner credential.
+ *   Arbitrary store writes are never accepted on this pipe.
+ * - the broker-owned desktop/owner-pipe routes. The former browser-extension
+ *   websocket and isolated-browser transports are retired and are not started
+ *   by production code.
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { DesktopInputNotDispatchedError } from "./desktop-input-errors";
+import { taskCompletionReportSchema } from "./task-completion-contract";
+import { StageInputNotDispatchedError, serializeStageFailure } from "./stage-errors";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { VerifiedIdentity } from "./identity-core";
@@ -18,22 +20,21 @@ import type { LocalStore } from "./local-store";
 import { readManagedWebBrokerIdentity, type RuntimeBuildIdentity } from "./runtime-build-identity";
 import { dirname } from "node:path";
 import { platform } from "node:os";
-import { WebSocket, WebSocketServer } from "ws";
-import { findChrome, type BrowserTransport } from "./agent-chrome";
 import { verifyAudit, type WebAuthority, type WebAuthoritySnapshot } from "./web-authority-core";
-import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction, type WebBatchRequest, type WebRequest } from "./web-broker-core";
+import { createWebBroker, ROOM_MODES, type RoomMode, type StageApprovalRequest, type WebAction } from "./web-broker-core";
 import type { MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 import { DEFAULT_BROKER_PORT } from "./web-broker-paths";
 import { isStageAppReference } from "./task-stage-apps";
 import { startOwnerPipe, type OwnerPipeRequest } from "./owner-pipe";
-import { isUiMessage, type UiState, type WebUiBridge } from "./web-ui-bridge";
+import type { WebUiBridge } from "./web-ui-bridge";
 import { canQueue } from "./codex-delivery-core";
-import { MAX_AGENT_REPLY_DEPTH } from "./inbox-core";
+import { MAX_AGENT_REPLY_DEPTH, normalizeHandle } from "./inbox-core";
 import { createProtocolLedger, MAX_AWARE_PROTOCOL_FRAMES, type ProtocolMessage, type ProtocolMessageType } from "../../../packages/web-protocol-placeholder/src/index";
 import type { MultiplayerA2ASendInput, MultiplayerRuntime } from "./multiplayer-runtime";
+import type { TaskContext } from "./multiplayer-task-context";
+import { computerUseLatencySummary } from "./computer-use-latency";
 
 const MAX_BODY_BYTES = 16 * 1024;
-const MAX_EXTENSION_MESSAGE_BYTES = 256 * 1024;
 const LOCAL_AWARE_ROOM_ID = "room-local";
 
 // Capture at process start. Re-reading process.execPath on each health request
@@ -116,6 +117,15 @@ function stageFailure(error: unknown, fallback: string): Record<string, unknown>
     dispatchState: "not-dispatched",
     error: error.message,
   };
+  if (error instanceof StageInputNotDispatchedError) {
+    // Preserve the typed, non-dispatched recovery payload (especially a fresh
+    // desktop capture) instead of collapsing it into the generic uncertain
+    // error that made providers abandon the remainder of a task.
+    return {
+      ...serializeStageFailure(error, fallback),
+      code: "desktop-input-not-dispatched",
+    };
+  }
   if (typeof error === "object" && error !== null && "inner" in error) {
     const inner = (error as { inner?: unknown }).inner;
     if (typeof inner === "object" && inner !== null) {
@@ -169,19 +179,13 @@ export interface WebBrokerServerOptions {
     primeCursor?(token: string, taskId: string): Promise<unknown>;
     primeCursorForOwner?(taskId: string): Promise<unknown> };
   /** The owner process applies narrowly scoped MCP mutations after verifying the per-session token. */
-  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">;
-  /** Dedicated browser transport. Extension connections are disabled on this broker. */
-  browserTransport?: BrowserTransport;
-  /** Production owner broker has a native desktop/browser route; no extension handshake is required. */
+  agentMcpStore?: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult" | "markResultShown">;
+  /** Production owner broker has a native desktop route; no extension handshake is required. */
   nativeDesktopRoute?: boolean;
   key: string;
   port?: number;
   host?: string;
-  allowedExtensionIds?: string[];
-  allowAnyExtension?: boolean;
   timeoutMs?: number;
-  /** Maximum wait for the extension's ready handshake when a browser command arrives during startup. */
-  extensionConnectTimeoutMs?: number;
   claimTtlMs?: number;
   loopGuard?: { repeat: number; budget: number; windowMs: number };
   approvalTimeoutMs?: number;
@@ -193,7 +197,7 @@ export interface WebBrokerServerOptions {
     loadProtocolFrames?(): unknown[];
     saveProtocolFrames?(frames: readonly unknown[]): void;
   };
-  /** The in-page pill bridge (web-ui-bridge.ts). Its frames are accepted only on the ready extension socket. */
+  /** The broker-owned desktop pill bridge (web-ui-bridge.ts). */
   ui?: WebUiBridge;
   /** Where the room mode (watch / ask / hands-off) is kept between runs. Defaults to watch. */
   modeFile?: string;
@@ -229,11 +233,16 @@ type AgentMcpStoreResult = {
     created?: boolean;
     taskIds?: string[];
     alreadyRecorded?: boolean;
+    /** Durable provider-to-provider result reply, if one was eligible and queued. */
+    answerTaskId?: string;
+    answerDelivery?: "queued" | "explicit-reply-queued" | "depth-limit" | "missing-sender-session" | "capacity" | "not-applicable" | "conflict";
     /** Structured A2A response fields are returned intact to the provider MCP client. */
     messageId?: string;
     duplicate?: boolean;
     message?: unknown;
     recipientAgentIds?: string[];
+    delivery?: { state: "queued" | "already-present" | "pending" | "uncertain" | "completed" | "held-no-progress" | "not-configured" | "failed"; taskId?: string; created?: boolean; error?: string };
+    context?: TaskContext;
   };
 };
 
@@ -244,7 +253,7 @@ type AgentMcpStoreResult = {
  * own user ACL. This is intentionally not a generic store/RPC endpoint.
  */
 export function applyAgentMcpStoreMutation(
-  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult">,
+  store: Pick<LocalStore, "verifyIdentity" | "addTask" | "delegationParentFor" | "setCursor" | "getTask" | "setResult" | "setDelivery" | "claimInboxTasks" | "recordTaskResult" | "markResultShown">,
   input: unknown,
   multiplayerRuntime?: MultiplayerRuntime,
 ): AgentMcpStoreResult {
@@ -261,13 +270,17 @@ export function applyAgentMcpStoreMutation(
 
   try {
     if (value.action === "a2a") {
-      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "to", "summary", "kind", "priority", "taskId", "conversationId", "details", "idempotencyKey", "replyToMessageId", "supersedesMessageId", "progressFingerprint", "progressKind", "replyDepth"].includes(key))
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "to", "summary", "kind", "priority", "taskId", "conversationId", "details", "idempotencyKey", "replyToMessageId", "supersedesMessageId", "progressFingerprint", "progressKind"].includes(key))
         || typeof value.to !== "string" || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 280
         || (value.taskId !== undefined && (typeof value.taskId !== "string" || value.taskId.length > 128))
         || (value.conversationId !== undefined && (typeof value.conversationId !== "string" || value.conversationId.length > 128))
-        || (value.kind !== undefined && typeof value.kind !== "string") || (value.priority !== undefined && typeof value.priority !== "string")
-        || (value.replyDepth !== undefined && (!Number.isSafeInteger(value.replyDepth) || (value.replyDepth as number) < 0 || (value.replyDepth as number) > MAX_AGENT_REPLY_DEPTH))) {
+        || (value.kind !== undefined && typeof value.kind !== "string") || (value.priority !== undefined && typeof value.priority !== "string")) {
         return { status: 400, body: { ok: false, error: "Invalid structured M9R teammate message." } };
+      }
+      const actionableKinds = new Set(["update", "help-request", "help-result", "delegate", "blocker", "surface-handoff", "edit-confirmation", "verification-request"]);
+      if (typeof value.taskId === "string" && actionableKinds.has(String(value.kind ?? "delegate"))
+        && (typeof value.progressFingerprint !== "string" || typeof value.progressKind !== "string")) {
+        return { status: 400, body: { ok: false, error: "A task-bound teammate message needs a progressFingerprint and progressKind. Use a stable fingerprint of the current task state so M9R can stop repeated no-progress handoffs." } };
       }
       const result = multiplayerRuntime.send(identity, {
         to: value.to,
@@ -282,21 +295,62 @@ export function applyAgentMcpStoreMutation(
         ...(typeof value.supersedesMessageId === "string" ? { supersedesMessageId: value.supersedesMessageId } : {}),
         ...(typeof value.progressFingerprint === "string" ? { progressFingerprint: value.progressFingerprint } : {}),
         ...(typeof value.progressKind === "string" ? { progressKind: value.progressKind as MultiplayerA2ASendInput["progressKind"] } : {}),
-        ...(value.replyDepth === undefined ? {} : { replyDepth: value.replyDepth as number }),
       });
       if (!result.ok) return { status: 409, body: { ok: false, error: result.error } };
       return {
         status: 200,
         body: {
           ok: true,
-          taskId: result.message.messageId,
+          ...(result.delivery.taskId ? { taskId: result.delivery.taskId } : {}),
           created: !result.duplicate,
           messageId: result.message.messageId,
           duplicate: result.duplicate,
           message: result.message,
           recipientAgentIds: [...result.recipientAgentIds],
+          delivery: result.delivery,
         },
       };
+    }
+    if (value.action === "task_state") {
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "taskId"].includes(key))
+        || typeof value.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.taskId)) {
+        return { status: 400, body: { ok: false, error: "Invalid shared task-state request." } };
+      }
+      const result = multiplayerRuntime.readTaskContext(identity, value.taskId);
+      return result.ok
+        ? { status: 200, body: { ok: true, context: result.context } }
+        : { status: 404, body: { ok: false, error: result.error ?? "Shared task state is unavailable." } };
+    }
+    if (value.action === "claim_work") {
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "taskId", "assignmentId", "workKey", "summary"].includes(key))
+        || typeof value.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.taskId)
+        || typeof value.assignmentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.assignmentId)
+        || typeof value.workKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.workKey)
+        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 280) {
+        return { status: 400, body: { ok: false, error: "Invalid shared-work claim." } };
+      }
+      const result = multiplayerRuntime.claimWork(identity, {
+        taskId: value.taskId,
+        assignmentId: value.assignmentId,
+        workKey: value.workKey,
+        summary: value.summary,
+      });
+      return result.ok
+        ? { status: 200, body: { ok: true, duplicate: result.duplicate === true, context: result.context } }
+        : { status: 409, body: { ok: false, error: result.error ?? "Shared-work claim was refused.", context: result.context } };
+    }
+    if (value.action === "complete_work" || value.action === "release_work") {
+      if (!multiplayerRuntime || Object.keys(value).some((key) => !["action", "token", "taskId", "assignmentId"].includes(key))
+        || typeof value.taskId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.taskId)
+        || typeof value.assignmentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.assignmentId)) {
+        return { status: 400, body: { ok: false, error: "Invalid shared-work assignment update." } };
+      }
+      const result = value.action === "complete_work"
+        ? multiplayerRuntime.completeWork(identity, value.taskId, value.assignmentId)
+        : multiplayerRuntime.releaseWork(identity, value.taskId, value.assignmentId);
+      return result.ok
+        ? { status: 200, body: { ok: true, duplicate: result.duplicate === true, context: result.context } }
+        : { status: 409, body: { ok: false, error: result.error ?? "Shared-work assignment update was refused.", context: result.context } };
     }
     if (value.action === "send") {
       if (Object.keys(value).some((key) => !["action", "token", "to", "goal"].includes(key))
@@ -345,20 +399,50 @@ export function applyAgentMcpStoreMutation(
       return { status: 200, body: { ok: true, taskIds: tasks.map((task) => task.id) } };
     }
 
+    if (value.action === "mark_results_shown") {
+      if (inRoom || Object.keys(value).some((key) => !["action", "token", "taskIds"].includes(key))
+        || !Array.isArray(value.taskIds) || value.taskIds.length > 10
+        || value.taskIds.some((id) => typeof id !== "string" || !/^T[0-9]{1,12}$/.test(id))) {
+        return { status: 400, body: { ok: false, error: "Invalid native M9R teammate-result acknowledgement." } };
+      }
+      const taskIds = value.taskIds as string[];
+      const valid = taskIds.every((id) => {
+        const task = store.getTask(id);
+        return task !== undefined
+          && task.origin === "agent_initiated"
+          && normalizeHandle(task.from) === ownHandle
+          && task.fromSession === identity!.sessionId
+          && Boolean(task.resultSummary || (task.completion?.status === "incomplete" && task.completion.summary));
+      });
+      if (!valid) return { status: 403, body: { ok: false, error: "A teammate result is not addressed to this provider session." } };
+      store.markResultShown(taskIds);
+      return { status: 200, body: { ok: true, taskIds } };
+    }
+
     if (value.action === "result") {
-      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary"].includes(key))
+      if (Object.keys(value).some((key) => !["action", "token", "taskId", "summary", "completion", "handledPeerTaskIds", "replyMessageId"].includes(key))
         || typeof value.taskId !== "string" || !/^T[0-9]{1,12}$/.test(value.taskId)
-        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 4_000) {
+        || typeof value.summary !== "string" || value.summary.trim().length < 1 || value.summary.length > 20_000
+        || (value.completion !== undefined && !taskCompletionReportSchema.safeParse(value.completion).success)
+        || (value.replyMessageId !== undefined && (typeof value.replyMessageId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:%-]{0,127}$/.test(value.replyMessageId)))
+        || (value.handledPeerTaskIds !== undefined && (!Array.isArray(value.handledPeerTaskIds) || value.handledPeerTaskIds.length > 20
+          || value.handledPeerTaskIds.some(id => typeof id !== "string" || !/^T[0-9]{1,12}$/.test(id))))) {
         return { status: 400, body: { ok: false, error: "Invalid M9R task result." } };
       }
-      const recorded = store.recordTaskResult(value.token, value.taskId, value.summary);
+      const recorded = store.recordTaskResult(value.token, value.taskId, value.summary,
+        value.completion === undefined ? undefined : taskCompletionReportSchema.parse(value.completion), value.handledPeerTaskIds as string[] | undefined, value.replyMessageId as string | undefined);
       if (!recorded.ok) {
         const status = /No task/.test(recorded.error ?? "") ? 404
           : /belongs to another session|not sent to you|not been delivered/.test(recorded.error ?? "") ? 403
           : /identity is not active/.test(recorded.error ?? "") ? 403 : 400;
         return { status, body: { ok: false, error: recorded.error } };
       }
-      return { status: 200, body: { ok: true, alreadyRecorded: recorded.alreadyRecorded } };
+      return { status: 200, body: {
+        ok: true,
+        alreadyRecorded: recorded.alreadyRecorded,
+        ...(recorded.answerTaskId ? { answerTaskId: recorded.answerTaskId } : {}),
+        ...(recorded.answerDelivery ? { answerDelivery: recorded.answerDelivery } : {}),
+      } };
     }
     return { status: 400, body: { ok: false, error: "Unknown M9R agent-store action." } };
   } catch {
@@ -368,17 +452,12 @@ export function applyAgentMcpStoreMutation(
 
 export async function startWebBroker(options: WebBrokerServerOptions): Promise<{ port: number; close: () => Promise<void>; requestStageApproval: (request: StageApprovalRequest) => Promise<boolean> }> {
   const host = options.host ?? "127.0.0.1";
-  const allowed = (options.allowedExtensionIds ?? []).filter(Boolean);
-  const allowAnyExtension = allowed.length === 0 && (options.allowAnyExtension === true || process.env.M9R_ALLOW_ANY_EXTENSION === "1");
   const authority = options.authority;
   if (authority && options.authorityStore) authority.restore(options.authorityStore.load());
   const persistAuthority = () => {
     if (authority && options.authorityStore) options.authorityStore.save(authority.snapshot());
   };
-  let extension: WebSocket | null = null;
-  let readyExtension: WebSocket | null = null;
   let closeServer: () => Promise<void> = async () => undefined;
-  const readyWaiters = new Set<(ready: boolean) => void>();
   const ownerId = options.ownerId ?? "local-machine";
   // Bind semantic protocol decisions to the same owner identity used by the
   // authenticated local transport. Without this, the ledger only validated
@@ -421,96 +500,16 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (!persistProtocolLedger()) return { ok: false, error: "could not persist AWARE policy state; browser action is refused" };
     return accepted;
   }
-  function principalForAction(value: unknown): string | null {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-    const request = value as Record<string, unknown>;
-    if (typeof request.agent !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(request.agent)) return null;
-    const memberOwner = request.owner === undefined ? ownerId : request.owner;
-    if (typeof memberOwner !== "string" || !/^[A-Za-z0-9_.-]{1,80}$/.test(memberOwner)) return null;
-    const principalId = `agent:${memberOwner}/${request.agent}`;
-    return principalId.length <= 128 ? principalId : null;
-  }
-  function settleReadyWaiters(ready: boolean): void {
-    for (const settle of [...readyWaiters]) settle(ready);
-  }
-
-  // No open-tab/site-specific knowledge here -- this only notices "nothing is answering as
-  // the browser extension yet" and starts the one browser that extension lives in, the same
-  // way a person would double-click its icon. One attempt per cooldown window regardless of
-  // how many requests pile up waiting on it, so a burst of calls never opens several windows.
-  //
-  // Launching chrome.exe with no arguments while Chrome is ALREADY running does not open a
-  // fresh, quiet window -- a running Chrome forwards that launch to its existing instance,
-  // which (depending on the owner's own "on startup" setting) can restore their entire last
-  // session, including whatever stale/broken tabs were sitting open. That would repeat on
-  // every single call that finds the extension not ready, hijacking the owner's browser over
-  // and over with no way for them to get ahead of it. Launching is only ever safe, and only
-  // ever useful, when Chrome has no running process at all -- if it is already running and the
-  // extension still is not connecting, another launch cannot fix that (the extension itself is
-  // the problem, not whether the browser is open), so skip it rather than risk harm for nothing.
-  let lastBrowserLaunchAttemptAt = 0;
-  const browserLaunchCooldownMs = 10_000;
-  function chromeAlreadyRunning(): boolean {
-    try {
-      if (process.platform === "win32") {
-        const out = execFileSync("tasklist", ["/FI", "IMAGENAME eq chrome.exe", "/NH"], { encoding: "utf8", timeout: 2000 });
-        return /chrome\.exe/i.test(out);
-      }
-      const out = execFileSync("pgrep", ["-f", "[Gg]oogle Chrome"], { encoding: "utf8", timeout: 2000 });
-      return out.trim().length > 0;
-    } catch {
-      // If the running-process check itself cannot be trusted, assume Chrome is already
-      // running rather than risk a session-restore hijack on a false "not running" read.
-      return true;
-    }
-  }
-  function ensureBrowserLaunchedForExtension(): void {
-    const now = Date.now();
-    if (now - lastBrowserLaunchAttemptAt < browserLaunchCooldownMs) return;
-    lastBrowserLaunchAttemptAt = now;
-    if (chromeAlreadyRunning()) return;
-    try {
-      const child = spawn(findChrome(), [], { detached: true, stdio: "ignore" });
-      child.unref();
-    } catch {
-      // No installed Chrome found, or the spawn itself failed -- the normal
-      // "extension did not become ready" timeout below still reports it.
-    }
-  }
-
-  function waitForExtensionReady(timeoutMs: number): Promise<boolean> {
-    if (options.browserTransport) return Promise.resolve(options.browserTransport.ready());
-    if (extension && extension === readyExtension && extension.readyState === WebSocket.OPEN) return Promise.resolve(true);
-    ensureBrowserLaunchedForExtension();
-    return new Promise((resolve) => {
-      const settle = (ready: boolean) => {
-        clearTimeout(timer);
-        readyWaiters.delete(settle);
-        resolve(ready);
-      };
-      readyWaiters.add(settle);
-      const timer = setTimeout(() => settle(false), Math.max(0, timeoutMs));
-    });
-  }
-
-  const sendApprovedGrant = (grant: WebAuthoritySnapshot["grants"][number]) => {
-    if (!extension || extension !== readyExtension || extension.readyState !== WebSocket.OPEN) return;
-    extension.send(JSON.stringify({ type: "grant-approved", grant: {
-      grantId: grant.id, origin: grant.origin, pathPrefix: grant.pathPrefix ?? "/", actions: grant.actions,
-    } }));
-  };
-
   let roomMode: RoomMode = "watch";
   try { if (options.modeFile) { const saved = readFileSync(options.modeFile, "utf8").trim() as RoomMode; if (ROOM_MODES.includes(saved)) roomMode = saved; } } catch { /* no saved mode yet */ }
   const broker = createWebBroker({
-    oneWriterPerTab: !!options.browserTransport,
+    oneWriterPerTab: false,
+    trustDeliveryReceipts: false,
     roomMode: () => roomMode,
-    send: (message) => {
-      if (options.browserTransport) return options.browserTransport.send(message);
-      if (!extension || extension !== readyExtension || extension.readyState !== WebSocket.OPEN) return false;
-      extension.send(JSON.stringify(message));
-      return true;
-    },
+    // Browser command delivery is retired. The core remains as the local
+    // activity/approval ledger used by the desktop broker, but it has no
+    // socket or isolated-browser transport to send to.
+    send: () => false,
     timeoutMs: options.timeoutMs,
     claimTtlMs: options.claimTtlMs,
     loopGuard: options.loopGuard,
@@ -523,17 +522,14 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     ...(options.mutationFence ? { mutationFence: options.mutationFence } : {}),
   });
   options.ui?.attachBroker(broker);
-  const unsubscribeBrowser = options.browserTransport?.subscribe(
-    (message) => broker.onExtensionMessage(message), () => broker.onExtensionClosed(),
-  );
 
   const ownerOnlyPaths = new Set([
-    "/web/mode", "/web/shutdown", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
+    "/web/mode", "/web/approve", "/web/deny", "/web/revoke", "/web/revoke-all",
     "/web/actions/approve", "/web/actions/deny", "/web/aware/members/invite", "/web/aware/members/remove",
     "/web/aware/disclosures/decision", "/web/protocol",
-    "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note", "/web/ui/model",
+    "/web/ui/command", "/web/ui/approve", "/web/ui/deny", "/web/ui/save-note", "/web/ui/model", "/web/ui/work-mode",
   ]);
-  const ownerPipeReadPaths = new Set(["/web/aware/members", "/web/aware/disclosures"]);
+  const ownerPipeReadPaths = new Set(["/web/aware/members", "/web/aware/disclosures", "/web/diagnostics/latency"]);
   const ownerReply = (ok: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ ok, ...extra });
   function memberPrincipal(body: Record<string, unknown>): string | null {
     const agent = body.agent;
@@ -581,6 +577,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
     if (request.path === "/web/protocol" && request.method === "GET") {
       return ownerReply(true, { protocol: "m9r-web/0", messages: protocolLedger.snapshot() });
     }
+    if (request.path === "/web/diagnostics/latency" && request.method === "GET") {
+      return ownerReply(true, { summary: computerUseLatencySummary() });
+    }
     if (request.path === "/web/protocol" && request.method === "POST") {
       if (typeof request.body !== "object" || request.body === null || Array.isArray(request.body)) return ownerReply(false, { error: "protocol message must be an object" });
       const accepted = acceptProtocolFrame(request.body as unknown as ProtocolMessage, ownerPrincipalId);
@@ -603,6 +602,9 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       } else if (request.path === "/web/ui/approve" || request.path === "/web/ui/deny") {
         if (keys.length !== 1 || typeof body.id !== "string" || !body.id || body.id.length > 128) return ownerReply(false, { error: "desktop pill approval ID is invalid" });
         message = { type: request.path.endsWith("/approve") ? "ui-approve" : "ui-deny", id: body.id };
+      } else if (request.path === "/web/ui/work-mode") {
+        if (keys.length !== 1 || (body.mode !== "working" && body.mode !== "agents-free")) return ownerReply(false, { error: "invalid owner work mode" });
+        message = { type: "ui-work-mode", mode: body.mode };
       } else if (request.path === "/web/ui/model") {
         if (keys.some((key) => !["handle", "model", "effort"].includes(key))
           || typeof body.handle !== "string" || !/^@?[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(body.handle)
@@ -679,7 +681,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         ...(typeof body.maxUses === "number" ? { maxUses: body.maxUses } : {}),
       });
       if (!persist()) return ownerReply(false, { error: "could not persist web authority state" });
-      if (result.ok) { sendApprovedGrant(result.grant); return result; }
+      if (result.ok) return result;
       return ownerReply(false, { error: result.error });
     }
     if (request.path === "/web/deny" || request.path === "/web/revoke") {
@@ -772,7 +774,12 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
             : ownerReply(false, { error: typeof value.error === "string" ? value.error.slice(0, 500) : "resident provider-session owner refused delivery" });
         });
       }
-      if (request.method === "POST" && ownerOnlyPaths.has(request.path)) return handleOwnerRequest(request);
+      if (request.method === "POST" && ownerOnlyPaths.has(request.path)) {
+        if (typeof request.ownerKey !== "string" || !sameSecret(request.ownerKey, options.key)) {
+          return ownerReply(false, { error: "owner credential is required for this mutation" });
+        }
+        return handleOwnerRequest(request);
+      }
       if (request.method === "POST" && request.path === "/web/mcp/store") {
         if (!options.agentMcpStore) return { ok: false, error: "Owner-brokered M9R task state writes are unavailable." };
         const result = applyAgentMcpStoreMutation(options.agentMcpStore, request.body, options.multiplayerRuntime);
@@ -813,15 +820,11 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/status") {
         const nativeDesktopRoute = options.nativeDesktopRoute === true;
-        const extensionConnected = !!extension && extension.readyState === WebSocket.OPEN;
-        const extensionReady = !!extension && extension === readyExtension && extension.readyState === WebSocket.OPEN;
         return reply(res, 200, {
           ok: true,
           broker: "ready",
-          browserTransport: options.browserTransport ? "agent-chrome" : nativeDesktopRoute ? "native-desktop" : "extension",
-          browserReady: options.browserTransport?.ready() ?? (nativeDesktopRoute || extensionReady),
-          extensionConnected,
-          extensionReady,
+          browserTransport: nativeDesktopRoute ? "native-desktop" : "unavailable",
+          browserReady: nativeDesktopRoute,
         });
       }
       if (req.method === "GET" && requestUrl.pathname === "/web/agents") {
@@ -869,7 +872,7 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
         const sender = memberPrincipal({ agent: values.sender });
         const recipient = memberPrincipal({ agent: values.recipient });
         if (!sender || !recipient) return reply(res, 400, { ok: false, error: "sender and recipient must be valid room agent handles" });
-        // AWARE membership enforcement disabled here too -- see the /cmd handler's comment.
+        // AWARE membership enforcement remains disabled here as it is for the local task route.
         return reply(res, 200, { ok: true });
       }
       if (req.method === "POST" && requestUrl.pathname === "/web/protocol") {
@@ -990,7 +993,6 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
           ...(typeof body.maxUses === "number" ? { maxUses: body.maxUses } : {}),
         });
         if (!persist()) return;
-        if (result.ok) sendApprovedGrant(result.grant);
         return result.ok ? reply(res, 200, result) : reply(res, 404, { ok: false, error: result.error });
       }
       if (requestUrl.pathname === "/web/deny" || requestUrl.pathname === "/web/revoke") {
@@ -1004,108 +1006,13 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
       if (!persist()) return;
       return reply(res, 200, { ok: true, revoked });
     }
-    if (req.method !== "POST" || (req.url !== "/cmd" && req.url !== "/batch")) return reply(res, 404, { ok: false, error: "not found" });
-    if (req.headers.origin) return reply(res, 403, { ok: false, error: "browser-originated requests are refused" });
-    if (!sameSecret(req.headers["x-m9r-key"] as string | undefined, options.key)) {
-      return reply(res, 401, { ok: false, error: "missing or wrong key" });
+    // These legacy command routes once waited for a browser extension. Return
+    // an explicit migration hint so stale clients cannot silently wait or
+    // mistake the 404 for a transient broker failure.
+    if (requestUrl.pathname === "/cmd" || requestUrl.pathname === "/batch") {
+      return reply(res, 410, { ok: false, error: "The browser-extension command route is retired; use m9r_stage_action instead." });
     }
-    const body = await readBody(req);
-    if (body === null) return reply(res, 413, { ok: false, error: "request too large" });
-    let parsed: WebRequest | WebBatchRequest;
-    try {
-      parsed = JSON.parse(body) as WebRequest;
-    } catch {
-      return reply(res, 400, { ok: false, error: "invalid json" });
-    }
-    const principalId = principalForAction(parsed);
-    if (!principalId) return reply(res, 400, { ok: false, error: "AWARE participant identity is missing or invalid" });
-    // AWARE membership enforcement is disabled on the local /cmd path by owner decision (2026-09-30):
-    // it started blocking every local agent with no owner-facing way to admit them, and the owner has
-    // not asked for this gate at all -- it was never on the requested work list. The protocol ledger
-    // code (packages/web-protocol-placeholder) stays in the tree for whenever it's actually built out
-    // and proven, but nothing here calls authorizeAction to block dispatch until that happens.
-    const ready = await waitForExtensionReady(options.extensionConnectTimeoutMs ?? 30_000);
-    if (!ready) return reply(res, 200, { ok: false, error: "the browser extension did not become ready before the connection wait expired" });
-    const batch = req.url === "/batch";
-    const result = batch ? await broker.submitBatch(parsed as unknown as WebBatchRequest) : await broker.submit(parsed as WebRequest);
-    // AWARE disclosure-receipt gating is disabled too, same owner decision as the membership gate
-    // above -- it withheld the actual result of an action that had already run (page text, click
-    // labels, navigation titles) behind a manual per-result owner-approval step, which blocked
-    // ordinary agent use exactly like the membership gate did. Left in the tree, not called here.
-    return reply(res, 200, result);
-  });
-
-  const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_EXTENSION_MESSAGE_BYTES });
-  const uiSinks = new Map<WebSocket, (state: UiState) => boolean>();
-
-  server.on("upgrade", (req, socket, head) => {
-    const origin = String(req.headers.origin ?? "");
-    const candidateId = origin.startsWith("chrome-extension://") ? origin.slice("chrome-extension://".length).replace(/\/$/, "") : "";
-    const id = candidateId && !/[/?#]/.test(candidateId) ? candidateId : "";
-    const permitted = !options.browserTransport && req.url === "/ext" && id !== "" && (allowed.length > 0 ? allowed.includes(id) : allowAnyExtension);
-    if (!permitted) {
-      socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    sockets.handleUpgrade(req, socket, head, (ws) => {
-      if (extension && extension.readyState === WebSocket.OPEN) extension.close(4000, "replaced by a newer extension connection");
-      extension = ws;
-      readyExtension = null;
-      ws.on("message", (data) => {
-        try {
-          const message: unknown = JSON.parse(data.toString());
-          if (typeof message === "object" && message !== null && "type" in message && message.type === "ready") {
-            if (extension !== ws) return;
-            readyExtension = ws;
-            settleReadyWaiters(true);
-            for (const grant of authority?.grants() ?? []) if (!grant.revokedAt && grant.expiresAt > Date.now()) sendApprovedGrant(grant);
-            ws.send(JSON.stringify({ type: "broker-state", stopped: broker.feedSnapshot().stop.state === "stopped" }));
-            return;
-          }
-          if (extension !== ws || readyExtension !== ws) return;
-          // The only door for human-typed web messages: the ready, origin-checked extension socket.
-          if (isUiMessage(message)) {
-            if (!uiSinks.has(ws)) uiSinks.set(ws, (state: UiState) => { if (extension !== ws || ws.readyState !== WebSocket.OPEN) return false; ws.send(JSON.stringify(state)); return true; });
-            options.ui?.handleExtensionMessage(message, uiSinks.get(ws));
-            return;
-          }
-          if (typeof message === "object" && message !== null && "type" in message && message.type === "stop-all") {
-            broker.stopAll("you");
-            return;
-          }
-          if (typeof message === "object" && message !== null && "type" in message && message.type === "message-visibility") {
-            const visibility = message as { sessionId?: unknown; show?: unknown };
-            if (typeof visibility.sessionId === "string" && visibility.sessionId.length <= 128 && typeof visibility.show === "boolean") {
-              const accepted = broker.setMessageTextVisibility(visibility.sessionId, visibility.show);
-              ws.send(JSON.stringify({ type: "message-visibility-result", sessionId: visibility.sessionId, show: visibility.show, accepted }));
-            }
-            return;
-          }
-            if (typeof message === "object" && message !== null && "type" in message && message.type === "permission-result") {
-            const permission = message as { grantId?: unknown; origin?: unknown; granted?: unknown };
-            if (typeof permission.grantId !== "string" || typeof permission.origin !== "string" || typeof permission.granted !== "boolean" || !authority) return;
-            const grant = authority.grants().find((item) => item.id === permission.grantId && item.origin === permission.origin && !item.revokedAt);
-            if (!grant) return;
-            if (!permission.granted) authority.revoke(grant.id);
-            try { persistAuthority(); } catch { /* enforcement remains fail-closed in the broker core */ }
-            return;
-          }
-          broker.onExtensionMessage(message);
-        } catch {
-          // ignore malformed frames
-        }
-      });
-      ws.on("close", () => {
-        options.ui?.unsubscribe(uiSinks.get(ws));
-        uiSinks.delete(ws);
-        if (extension === ws) {
-          extension = null;
-          readyExtension = null;
-          broker.onExtensionClosed();
-        }
-      });
-    });
+    return reply(res, 404, { ok: false, error: "not found" });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -1119,15 +1026,11 @@ export async function startWebBroker(options: WebBrokerServerOptions): Promise<{
   const close = () => {
     if (closePromise) return closePromise;
     closePromise = new Promise<void>((resolve) => {
-      settleReadyWaiters(false);
-      unsubscribeBrowser?.();
-      extension?.close();
-      sockets.close();
       const ownerClosed = ownerServer
         ? new Promise<void>((done) => ownerServer.close(() => done()))
         : Promise.resolve();
       const httpClosed = new Promise<void>((done) => server.close(() => done()));
-      void Promise.allSettled([ownerClosed, httpClosed, options.browserTransport?.close()]).then(() => resolve());
+      void Promise.allSettled([ownerClosed, httpClosed]).then(() => resolve());
       (ownerServer as (typeof ownerServer) & { closeAllConnections?: () => void } | null)?.closeAllConnections?.();
       server.closeAllConnections();
     });

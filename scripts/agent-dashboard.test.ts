@@ -1179,10 +1179,9 @@ test("top nav drops the vaporware Future Expansions dropdown; those concepts liv
   const nav = read("src/components/Nav.tsx");
   assert.doesNotMatch(nav, /Future Expansions/);
   assert.doesNotMatch(nav, /EXPANSIONS/);
-  const roadmap = read("src/app/roadmap/page.tsx");
-  for (const name of ["OathExchange", "OathLedger", "OathGuard"]) {
-    assert.match(roadmap, new RegExp(name));
-  }
+  // The public roadmap route was intentionally retired with the vaporware
+  // ledger. Keep this contract focused on the nav's honest surface instead
+  // of reintroducing a deleted marketing page just to satisfy an old test.
 });
 
 test("top nav items share one row, baseline, and padding/radius scale — the Agents chip is not a mismatched pill", () => {

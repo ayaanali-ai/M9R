@@ -17,7 +17,7 @@ const subprocessors = [
   ["Stripe", "Payment processing, subscriptions, trials, invoices, and the billing portal. Card details are collected by Stripe, not stored by M9R."],
   ["Resend", "Transactional email such as account confirmations, invitations, and notices."],
   ["GitHub", "Sign-in with GitHub and the GitHub App integration, only when you choose to use them."],
-  ["Google", "Sign-in with Google, only when you choose to use it. Voice input in the browser extension uses Chrome's speech recognition under Google's terms."],
+  ["Google", "Sign-in with Google, only when you choose to use it. Voice input in the Windows desktop pill uses the speech-recognition service provided by the installed WebView2 runtime under that provider's terms."],
 ] as const;
 
 export default function DataProcessingPage() {

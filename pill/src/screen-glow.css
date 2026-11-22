@@ -1,0 +1,62 @@
+:root {
+  color-scheme: dark;
+  background: transparent;
+  --glow-color: #ffffff;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+}
+
+#screen-glow {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 700ms ease;
+}
+
+#screen-glow::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 3px solid color-mix(in srgb, var(--glow-color) 48%, transparent);
+  border-radius: 22px;
+  box-shadow:
+    inset 0 0 12px 2px color-mix(in srgb, var(--glow-color) 52%, transparent),
+    inset 0 0 34px 7px color-mix(in srgb, var(--glow-color) 22%, transparent),
+    0 0 12px 2px color-mix(in srgb, var(--glow-color) 25%, transparent);
+  transition: border-color 400ms ease, box-shadow 500ms ease;
+}
+
+#screen-glow.visible { opacity: 0.8; }
+#screen-glow.live { animation: screen-glow-breathe 3.6s ease-in-out infinite; }
+
+#screen-glow.rainbow::before {
+  border-color: transparent;
+  padding: 18px;
+  background: conic-gradient(#ff5f6d, #ffb347, #f9f871, #47e891, #4fc3ff, #8b6cff, #ff5fd2, #ff5f6d);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  box-shadow:
+    inset 0 0 14px 3px rgba(255, 255, 255, 0.22),
+    inset 0 0 34px 7px rgba(141, 101, 255, 0.18),
+    0 0 18px 3px rgba(141, 101, 255, 0.2);
+  animation: rainbow-hue 16s linear infinite, screen-glow-breathe 4.2s ease-in-out infinite;
+}
+
+@keyframes rainbow-hue { to { filter: hue-rotate(360deg); } }
+@keyframes screen-glow-breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  #screen-glow, #screen-glow::before { transition: none; animation: none !important; }
+}

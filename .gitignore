@@ -29,6 +29,9 @@
 # misc
 .DS_Store
 *.pem
+# The update-manifest VERIFICATION key is public by design and must ship/commit;
+# only this one file is exempted. Never add a similar exception for a private key.
+!release-assets/update-public-key.pem
 
 # debug
 npm-debug.log*
@@ -133,8 +136,10 @@ M9R_COMPLETE_HANDOFF*.docx
 /overlay/dist
 /overlay/src-tauri/target
 /overlay/src-tauri/gen
-engine/dist/
-/engine/candidates/
+# Flow guard 3A/4A: all build output lives under /engine/ (dist/, temp build
+# dirs, candidates/) -- none of it is source, so none of it should ever make
+# the working tree look dirty to the clean-tree build guard.
+/engine/
 /hook/target
 /native-input-host/target/
 runleak-analyzer-mvp/node_modules/
@@ -150,3 +155,10 @@ skills-lock.json
 
 # Overlay accept/rollback recovery binaries (never a build input, never a source file)
 release-assets/recovery/*.exe
+
+# Session scratch/working docs: kept on disk, never committed (per owner decision 2026-11-11)
+/FULL_SYSTEM_AUDIT.md
+/PROGRESS_NOTES.md
+/T*-export.json
+/diagnostics/
+/paint-codex.png

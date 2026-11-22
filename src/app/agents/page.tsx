@@ -36,14 +36,14 @@ export default function AgentsPage() {
             <h1>Connect an agent</h1>
             <p>
               This page is the complete setup guide. Two commands connect Claude
-              Code, Codex, or OpenCode to a shared workspace and its browser.
+              Code, Codex, or OpenCode to a shared workspace and the native desktop runtime.
             </p>
           </header>
 
           <nav className="lp-agents-toc" aria-label="On this page">
             <a href="#requirements">Requirements</a>
             <a href="#install">Install</a>
-            <a href="#browser">Browser</a>
+            <a href="#browser">Browser and desktop</a>
             <a href="#what-happens">What happens</a>
             <a href="#verify">Verify</a>
             <a href="#commands">Commands</a>
@@ -65,19 +65,18 @@ export default function AgentsPage() {
             <p className="lp-agents-note">
               Approve once in the browser. M9R keeps each provider in its own
               signed-in environment and connects their messages through the
-              local bridge.
+              broker-owned desktop bridge.
             </p>
           </section>
 
           <section id="browser">
-            <h2>Browser work</h2>
-            <p>To use the shared browser, run the second command and load the one managed extension folder it opens:</p>
-            <InstallCommand command="npx m9r-cli web setup" />
+            <h2>Browser and desktop work</h2>
+            <p>Browser and app work use the native desktop runtime. No browser extension, unpacked folder, or Developer mode is required. On Windows, register broker login startup only if you want it:</p>
+            <InstallCommand command="npx m9r-cli web setup --broker-only" />
             <p className="lp-agents-note">
-              Turn on Developer mode in Chrome or Edge, choose <strong>Load
-              unpacked</strong>, and select the copied <code>%LOCALAPPDATA%\M9R\extension</code>
-              folder. Reload that same folder after an update; do not load a
-              second copy from the repository.
+              The broker observes and controls the exact owner-visible browser
+              window through the same native desktop path used for other apps.
+              Keep the window open and signed in when a task needs your account.
             </p>
           </section>
 
@@ -85,7 +84,7 @@ export default function AgentsPage() {
             <h2>What happens</h2>
             <ol className="lp-agents-steps">
               <li>Finds every supported agent CLI on this machine (Claude Code, Codex, OpenCode) and opens one browser approval for all of them.</li>
-              <li>Configures the local provider bridge and starts the browser broker when you run <code>web setup</code>.</li>
+              <li>Configures the local provider bridge and starts the broker-owned native desktop runtime.</li>
               <li>From then on agents can exchange workspace messages without a command for every message.</li>
             </ol>
           </section>
@@ -101,7 +100,7 @@ export default function AgentsPage() {
             <table className="lp-agents-table">
               <tbody>
                 <tr><td><code>npx m9r-cli connect</code></td><td>Connect every supported agent CLI on this machine, one time, human-approved</td></tr>
-                <tr><td><code>npx m9r-cli web setup</code></td><td>Install the managed browser extension and local broker</td></tr>
+                <tr><td><code>npx m9r-cli web setup --broker-only</code></td><td>Optionally register the local broker to start at Windows login</td></tr>
                 <tr><td><code>npx m9r-cli doctor</code></td><td>Check the connection and API reachability</td></tr>
                 <tr><td><code>npx m9r-cli rules</code></td><td>Fetch what the workspace currently remembers</td></tr>
                 <tr><td><code>npx m9r-cli inbox</code></td><td>Pull pending instructions from the workspace</td></tr>

@@ -6,6 +6,7 @@ import {
   MAX_GOAL_CHARS,
   approxTokens,
   findByIdempotencyKey,
+  isReplyToTask,
   newTask,
   redactSecrets,
   renderInboxInjection,
@@ -62,6 +63,21 @@ const t0 = "2026-09-20T00:00:00.000Z";
 const mk = (over: Partial<Parameters<typeof newTask>[0]> = {}, seq = 1, id = `T${seq}`) =>
   newTask({ from: "claude", to: "codex", goal: "investigate the relay reconnect bug", origin: "human_typed", idempotencyKey: `k${seq}`, ...over }, { id, seq }, t0);
 
+test("exact reply matching follows only the requested conversation ancestry and sender", () => {
+  const link = { conversationId: "plan", messageId: "question", senderAgentId: "agent-claude", recipientAgentId: "agent-codex",
+    replyDepth: 0, kind: "delegate" as const, summary: "Question" };
+  const request = mk({ a2a: link });
+  const followup = mk({ a2a: { ...link, messageId: "clarification", replyToMessageId: "question" } }, 2);
+  const answer = mk({ from: "codex", to: "claude", a2a: { ...link, messageId: "answer", replyToMessageId: "clarification" } }, 3);
+  assert.equal(isReplyToTask(answer, request, [request, followup, answer]), true);
+  assert.equal(isReplyToTask({ ...answer, from: "someone-else" }, request, [request, followup]), false);
+  assert.equal(isReplyToTask({ ...answer, a2a: { ...answer.a2a!, conversationId: "other" } }, request, [request, followup]), false);
+  assert.equal(isReplyToTask(answer, request, [request]), false, "missing ancestry is not guessed from conversation membership");
+  const cycle = { ...followup, a2a: { ...followup.a2a!, replyToMessageId: "answer" } };
+  assert.equal(isReplyToTask(answer, request, [request, cycle, answer]), false);
+  assert.equal(isReplyToTask({ ...answer, a2a: undefined, replyToTaskId: request.id }, request, []), true, "formal result replies retain their exact task route");
+});
+
 test("a human-typed task needs no approval; an agent-initiated one waits unless a standing rule covers it", () => {
   assert.equal(mk().approval, "not_needed");
   assert.equal(mk({ origin: "agent_initiated" }).approval, "pending");
@@ -72,7 +88,7 @@ test("goals are capped with a visible marker and secrets are redacted before sto
   const long = mk({ goal: "x".repeat(MAX_GOAL_CHARS + 500) });
   assert.equal(long.goal.length <= MAX_GOAL_CHARS, true);
   assert.equal(long.goalTruncated, true);
-  assert.match(long.goal, /truncated: full text via get_task/);
+  assert.match(long.goal, /\[truncated\]/);
   const leaky = mk({ goal: "use api_key=sk-abcdefghijklmnopqrstuvwxyz123456 and password: hunter2hunter2" });
   assert.doesNotMatch(leaky.goal, /sk-abcdefghijklmnopqrstuvwxyz123456/);
   assert.doesNotMatch(leaky.goal, /hunter2hunter2/);
@@ -123,12 +139,12 @@ test("at most three items are shown, the rest are counted, and the cursor advanc
   assert.deepEqual(next.includedIds, ["T4", "T5"]);
 });
 
-test("each item stays within its token cap and points at get_task", () => {
+test("each item stays within its token cap and points at the real task evidence tool", () => {
   const big = mk({ goal: "y".repeat(1900) });
   const r = renderInboxInjection([big], 0);
   const item = r.text.split("\n")[1];
   assert.equal(approxTokens(item) <= CAPS.inboxItemTokens, true, `${approxTokens(item)} tokens`);
-  assert.match(item, /Details: get_task T1\./);
+  assert.match(item, /m9r_working_context taskId=T1 action=evidence evidenceTaskId=T1\./);
 });
 
 test("a pending task is flagged so the agent does not act; denied and expired are hidden", () => {
@@ -146,7 +162,7 @@ test("the session card is a few lines of pointers within its cap, and never carr
   const card = renderSessionCard({ handle: "claude", others: [{ handle: "codex", activity: "editing relay/hub.ts" }], pendingCount: 2, memoryDir: ".m9r/memory" });
   assert.match(card, /M9R connected as @claude\./);
   assert.match(card, /@codex \(editing relay\/hub\.ts\)/);
-  assert.match(card, /2 pending inbox item/);
+  assert.match(card, /incoming work|2 pending inbox item/);
   assert.match(card, /indexed in \.m9r\/memory\/index\.md/);
   assert.doesNotMatch(renderSessionCard({ handle: "claude", others: [], pendingCount: 0 }), /memory/i, "no memory line when there is no folder");
   assert.equal(approxTokens(card) <= CAPS.cardTokens, true);

@@ -2,11 +2,15 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$OutputDirectory,
+    [Parameter(Mandatory = $true)]
+    [string]$Version,
     [string]$RuntimeDirectory,
     [string]$CliDistDirectory,
     [string]$AcceptedRuntimePath,
     [switch]$Candidate
 )
+
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "-Version must be a plain semantic version such as 0.1.0, got: $Version" }
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -82,6 +86,10 @@ foreach ($asset in $assets) {
 if (-not (Test-Path -LiteralPath $overlay -PathType Leaf)) {
     throw 'Required release binary is missing: engine/dist/m9r-overlay.exe. Build the M9R desktop pill, then run npm run build:engine before packaging the standalone release.'
 }
+$updatePublicKeyPath = Join-Path $root 'release-assets\update-public-key.pem'
+if (-not (Test-Path -LiteralPath $updatePublicKeyPath -PathType Leaf)) {
+    throw 'Required release asset is missing: release-assets\update-public-key.pem. Run scripts\generate-update-signing-key.mjs once first.'
+}
 $acceptedRuntime = Read-RuntimeIdentity $acceptedRuntimePath 'Accepted'
 $runtimeIdentity = Read-RuntimeIdentity (Join-Path $dist 'm9r-build-info.json') 'Built'
 Assert-RuntimeIdentityMatches $runtimeIdentity $acceptedRuntime 'Built runtime'
@@ -97,7 +105,6 @@ foreach ($runtimeFile in @(
     (Join-Path $cuaRuntime 'bin\cua-cursor-theme.exe'),
     (Join-Path $cuaRuntime 'bin\cua_driver_sdk.dll'),
     (Join-Path $cuaRuntime 'bin\cua_driver_node_runtime.node'),
-    (Join-Path $cuaRuntime 'bin\cua_driver_abi.h'),
     (Join-Path $root 'cli\THIRD_PARTY_NOTICES.md'),
     (Join-Path $root 'cli\licenses\MIT-Cua.txt'),
     (Join-Path $root 'cli\licenses\MPL-2.0.txt'),
@@ -115,6 +122,8 @@ try {
     foreach ($asset in $assets) { Copy-Item -LiteralPath (Join-Path $dist $asset) -Destination (Join-Path $stage $asset) }
     Copy-Item -LiteralPath $overlay -Destination (Join-Path $stage 'm9r-overlay.exe')
     Copy-Item -LiteralPath $acceptedRuntimePath -Destination (Join-Path $stage 'm9r-accepted-runtime.json')
+    Copy-Item -LiteralPath $updatePublicKeyPath -Destination (Join-Path $stage 'update-public-key.pem')
+    Set-Content -LiteralPath (Join-Path $stage 'VERSION') -Value $Version -Encoding ASCII -NoNewline
     Copy-Item -LiteralPath $cuaRuntime -Destination (Join-Path $stage 'cua-driver-runtime') -Recurse
     Copy-Item -LiteralPath (Join-Path $root 'cli\THIRD_PARTY_NOTICES.md') -Destination (Join-Path $stage 'THIRD_PARTY_NOTICES.md')
     Copy-Item -LiteralPath (Join-Path $root 'cli\licenses') -Destination (Join-Path $stage 'licenses') -Recurse

@@ -1,10 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-export interface StageAppLaunchSpec { executable: string; args: string[]; windowExecutable?: string }
-export type BrowserLaunchMode = "personal" | "isolated";
+export interface StageAppLaunchSpec {
+  executable: string;
+  args: string[];
+  windowExecutable?: string;
+  /** Exact image path used to distinguish a packaged app from a same-named legacy executable. */
+  windowExecutablePath?: string;
+  appUserModelId?: string;
+}
 
 /** The browser executable family that the stage broker knows how to attach. */
 export type StageBrowserKind = "chrome" | "msedge";
@@ -13,42 +19,45 @@ export interface BrowserWindowCandidate {
   pid: number;
   windowId: string;
   appName: string;
+  /** Native process image when available; appName remains the compatibility fallback. */
+  processName?: string | null;
+  /** Shell identity published for packaged application-frame windows. */
+  appUserModelId?: string | null;
+  /** Full process image path supplied by the native Windows inventory. */
+  processPath?: string | null;
   title: string;
   /** Native window eligibility metadata. Older test/adaptor callers may omit it. */
   isOnScreen?: boolean;
   minimized?: boolean;
-  onCurrentSpace?: boolean;
   zIndex?: string;
+  /** Zero-based Win32 top-to-bottom EnumWindows order (smaller is nearer the foreground). */
+  zOrder?: number;
   width?: number;
   height?: number;
 }
 
+export interface ForegroundBrowserWindowIdentity {
+  pid: number;
+  windowId: string;
+  visible: boolean;
+  minimized: boolean;
+}
+
 /**
- * Keep browser launch policy explicit. Personal is the default: it uses the
- * user's normal profile and cookies. Isolated remains available as an owner
- * selected mode for tests or a deliberately separate profile.
+ * Browser stages always use the owner's normal profile and cookies. There is
+ * deliberately no isolated-profile branch: the retired extension/isolated
+ * browser was a second routing architecture and could silently split the
+ * agent's work away from the browser the owner actually sees.
  */
 export function ownedBrowserLaunch(
   root: string,
   stageName: string,
   app: StageAppLaunchSpec,
-  options: { mode?: BrowserLaunchMode; startUrl?: string } = {},
+  options: { startUrl?: string } = {},
 ): StageAppLaunchSpec {
   if (!/^(?:preview-)?agent-[a-f0-9]{24}$/.test(stageName)) throw new Error("Invalid browser stage name.");
   if (app.args.length || !/^(?:chrome|msedge)\.exe$/i.test(basename(app.executable))) return app;
-  const mode = options.mode ?? "personal";
-  if (mode === "isolated") {
-    return {
-      ...app,
-      args: [
-        `--user-data-dir=${join(root, "stage-browser-profiles", stageName)}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--new-window",
-        options.startUrl ?? "about:blank",
-      ],
-    };
-  }
+  void root;
   // Chrome hands a personal launch to its existing browser process. Always
   // request a new window so the broker can identify the window created for the
   // task without stealing an already-open window the owner is using.
@@ -67,11 +76,45 @@ export function stageWindowMatchesApp(candidate: BrowserWindowCandidate, app: St
   const key = (value: string) => basename(value).toLowerCase().replace(/\.exe$/, "");
   const expected = key(app.windowExecutable ?? app.executable);
   const actual = key(candidate.appName);
-  if (expected === actual) return true;
+  // Packaged Windows apps are launched through explorer.exe and are hosted in
+  // an ApplicationFrameHost top-level HWND. The host, not the inner XAML
+  // child, is the focusable/foreground identity the native stage can own.
+  // Accept a packaged wrapper only when Windows reports the exact AppsFolder
+  // identity. ApplicationFrameHost and ApplicationFrameWindow are generic
+  // hosts shared by unrelated apps; a nonempty title is not app identity.
+  const packagedActivation = app.args.some((arg) => /^shell:AppsFolder\\[^!]+![^!]+$/i.test(arg));
+  if (packagedActivation) {
+    if (["applicationframehost", "applicationframewindow"].includes(actual)) {
+      return Boolean(app.appUserModelId && candidate.appUserModelId
+        && app.appUserModelId.toLowerCase() === candidate.appUserModelId.toLowerCase());
+    }
+    if (candidate.appUserModelId && app.appUserModelId) {
+      return candidate.appUserModelId.toLowerCase() === app.appUserModelId.toLowerCase();
+    }
+    // Some packaged Win32 apps (including current Notepad) own their HWND
+    // directly and expose no AppUserModelId on the window property store.
+    // Their manifest gives us a stronger identity than a basename: an older
+    // notepad.exe can otherwise be mistaken for the packaged Windows app.
+    return Boolean(app.windowExecutablePath && candidate.processPath
+      && normalizeWindowsImagePath(app.windowExecutablePath) === normalizeWindowsImagePath(candidate.processPath));
+  }
+  if (expected === actual) {
+    // explorer.exe hosts both real folder windows and the shell's own permanent
+    // desktop/taskbar window (title "Program Manager"), which always exists whether
+    // or not a folder window is open. Matching on process name alone let a stale or
+    // nonexistent "Explorer" request silently reuse that desktop window forever
+    // instead of ever launching a real folder window.
+    if (actual === "explorer" && /^\s*$|^program manager$/i.test(candidate.title)) return false;
+    return true;
+  }
   if (!["windowsterminal", "openconsole", "conhost"].includes(actual)) return false;
   if (expected === "powershell" || expected === "pwsh") return /powershell/i.test(candidate.title);
   if (expected === "cmd") return /(?:command prompt|cmd\.exe)/i.test(candidate.title);
   return false;
+}
+
+function normalizeWindowsImagePath(value: string): string {
+  return value.replaceAll("/", "\\").replace(/\\+/g, "\\").toLowerCase();
 }
 
 function browserWindowMatches(candidate: BrowserWindowCandidate, kind: StageBrowserKind): boolean {
@@ -84,9 +127,9 @@ function browserWindowMatches(candidate: BrowserWindowCandidate, kind: StageBrow
 function eligibleBrowserWindow(candidate: BrowserWindowCandidate): boolean {
   // listWindows({ onScreenOnly: false }) is intentionally used during launch
   // polling so delegated browser processes can be discovered. Do not let that
-  // broad inventory turn hidden/minimized/wrong-desktop helper HWNDs into a
+  // broad inventory turn hidden/minimized helper HWNDs into a
   // false "multiple visible windows" refusal.
-  if (candidate.isOnScreen === false || candidate.minimized === true || candidate.onCurrentSpace === false) return false;
+  if (candidate.isOnScreen === false || candidate.minimized === true) return false;
   if (candidate.width !== undefined && candidate.width < 80) return false;
   if (candidate.height !== undefined && candidate.height < 60) return false;
   return true;
@@ -94,6 +137,7 @@ function eligibleBrowserWindow(candidate: BrowserWindowCandidate): boolean {
 
 function rankBrowserWindows(candidates: readonly BrowserWindowCandidate[]): BrowserWindowCandidate[] {
   return [...candidates].sort((left, right) => {
+    if (left.zOrder !== undefined && right.zOrder !== undefined && left.zOrder !== right.zOrder) return left.zOrder - right.zOrder;
     const leftZ = left.zIndex === undefined ? null : Number(left.zIndex);
     const rightZ = right.zIndex === undefined ? null : Number(right.zIndex);
     if (leftZ !== null && rightZ !== null && Number.isFinite(leftZ) && Number.isFinite(rightZ) && leftZ !== rightZ) return rightZ - leftZ;
@@ -102,6 +146,31 @@ function rankBrowserWindows(candidates: readonly BrowserWindowCandidate[]): Brow
     if (leftArea !== rightArea) return rightArea - leftArea;
     return `${left.pid}:${left.windowId}`.localeCompare(`${right.pid}:${right.windowId}`);
   });
+}
+
+/**
+ * Select among windows that have already passed exact app identity matching.
+ * The foreground HWND is the owner's active choice when it belongs to the
+ * target app; otherwise Win32's top-to-bottom enumeration order is a stable
+ * fallback. Multiple windows belonging to one exact app are not app-identity
+ * ambiguity and must not make app launch fail.
+ */
+export function selectTargetAppWindow<T extends BrowserWindowCandidate>(
+  candidates: readonly T[],
+  foreground?: { pid: number; windowId: string; visible?: boolean; minimized?: boolean },
+): T | undefined {
+  if (foreground && foreground.visible !== false && foreground.minimized !== true) {
+    const active = candidates.find((candidate) => candidate.pid === foreground.pid
+      && candidate.windowId.toLowerCase() === foreground.windowId.toLowerCase());
+    if (active) return active;
+  }
+  return [...candidates].sort((left, right) => {
+    if (left.zOrder !== undefined && right.zOrder !== undefined && left.zOrder !== right.zOrder) return left.zOrder - right.zOrder;
+    const leftZ = left.zIndex === undefined ? null : Number(left.zIndex);
+    const rightZ = right.zIndex === undefined ? null : Number(right.zIndex);
+    if (leftZ !== null && rightZ !== null && Number.isFinite(leftZ) && Number.isFinite(rightZ) && leftZ !== rightZ) return rightZ - leftZ;
+    return 0;
+  })[0];
 }
 
 /**
@@ -117,10 +186,10 @@ export function selectPersonalBrowserWindow(
   const matches = rankBrowserWindows(windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)));
   const fresh = matches.filter((candidate) => !beforeKeys.has(`${candidate.pid}:${candidate.windowId}`));
   if (fresh.length === 1) return fresh[0];
-  // A launch must never silently choose between two newly-created windows.
-  // The caller can keep polling for a single stable candidate or surface an
-  // explicit selection request; deterministic z-order is not user intent.
-  if (fresh.length > 1) return undefined;
+  // All candidates are exact Chrome windows created after this launch. Prefer
+  // the topmost fresh HWND rather than treating browser helper/window records
+  // as an app-level ambiguity.
+  if (fresh.length > 1) return selectTargetAppWindow(fresh);
   // If the browser was not running before launch, one visible candidate is a
   // safe adoption even when the platform did not expose a stable before-list.
   if (beforeKeys.size === 0 && matches.length === 1) return matches[0];
@@ -135,12 +204,86 @@ export function selectPersonalBrowserWindow(
 export function selectExistingPersonalBrowserWindow(
   kind: StageBrowserKind,
   windows: readonly BrowserWindowCandidate[],
+  foreground?: ForegroundBrowserWindowIdentity,
 ): BrowserWindowCandidate | undefined {
   const matches = rankBrowserWindows(windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)));
-  // Existing personal windows are user-owned. Without an explicit window/tab
-  // identity, adopting one of several eligible matches would silently retarget
-  // the user's work. Return only an unambiguous candidate.
-  return matches.length === 1 ? matches[0] : undefined;
+  if (matches.length === 1) return matches[0];
+  // When several personal windows exist, the actual foreground HWND is the
+  // user's current selection. Match its process and window identity exactly;
+  // z-order, size, title, or enumeration order are not substitutes for that.
+  if (matches.length > 1 && foreground && foreground.visible && !foreground.minimized) {
+    const active = matches.filter((candidate) => candidate.pid === foreground.pid
+      && candidate.windowId.toLowerCase() === foreground.windowId.toLowerCase());
+    if (active.length === 1) return active[0];
+  }
+  // If another app is foreground, a unique topmost eligible browser HWND is
+  // still a stable active-window choice. Never fall back to area or list order.
+  if (matches.length > 1 && matches.every((candidate) => candidate.zOrder !== undefined
+    || (candidate.zIndex !== undefined && Number.isFinite(Number(candidate.zIndex))))) {
+    if (matches.every((candidate) => candidate.zOrder !== undefined)) return selectTargetAppWindow(matches);
+    const highest = Math.max(...matches.map((candidate) => Number(candidate.zIndex)));
+    const frontmost = matches.filter((candidate) => Number(candidate.zIndex) === highest);
+    if (frontmost.length === 1) return frontmost[0];
+  }
+  return undefined;
+}
+
+export function hasAmbiguousExistingPersonalBrowserWindow(kind: StageBrowserKind, windows: readonly BrowserWindowCandidate[]): boolean {
+  return windows.filter((candidate) => browserWindowMatches(candidate, kind) && eligibleBrowserWindow(candidate)).length > 1;
+}
+
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  const path = relative(resolve(directory), resolve(candidate));
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+/** Detect well-known global package-manager command shim directories. */
+export function isPackageManagerShimPath(executable: string, env: Record<string, string | undefined> = process.env): boolean {
+  const roots = [
+    env.APPDATA ? join(env.APPDATA, "npm") : undefined,
+    env.PNPM_HOME,
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "pnpm") : undefined,
+    env.BUN_INSTALL ? join(env.BUN_INSTALL, "bin") : undefined,
+    env.YARN_BIN,
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Yarn", "bin") : undefined,
+  ].filter((path): path is string => Boolean(path));
+  if (roots.some((root) => isWithinDirectory(root, executable))) return true;
+  const parts = resolve(executable).toLowerCase().split(/[\\/]+/);
+  return parts.some((part, index) => part === "node_modules" && parts[index + 1] === ".bin");
+}
+
+/**
+ * Resolve a GUI app from Windows' installed-app inventory when the short name
+ * finds no direct executable or only finds a global package-manager shim.
+ * A detected shim is never launched as if it were the requested desktop app.
+ */
+export async function resolveStageLaunchApp(appId: string, input: {
+  env?: Record<string, string | undefined>;
+  resolveDirect: () => StageAppLaunchSpec;
+  discoverInstalledApp: (name: string) => Promise<StageAppLaunchSpec | undefined>;
+}): Promise<StageAppLaunchSpec> {
+  const env = input.env ?? process.env;
+  let direct: StageAppLaunchSpec | undefined;
+  let directError: unknown;
+  try { direct = input.resolveDirect(); } catch (error) { directError = error; }
+  // A friendly app name is not an instruction to launch whichever executable
+  // happens to win PATH/App-Paths lookup. Windows often exposes a legacy
+  // compatibility stub beside the packaged app (Notepad is the common case),
+  // and the stub can open the wrong window class or bypass the app's registered
+  // activation route. Ask the installed-app inventory first for names; only an
+  // explicit absolute executable path keeps the direct route authoritative.
+  const explicitPath = isAbsolute(appId);
+  const installed = explicitPath ? undefined : await input.discoverInstalledApp(appId);
+  if (installed) return installed;
+  const packageShim = direct !== undefined && isPackageManagerShimPath(direct.executable, env);
+  if (direct && !packageShim) return direct;
+
+  if (installed) return installed;
+  if (packageShim) {
+    throw new Error(`The app name "${appId}" resolved to a package-manager command shim, but Windows did not find a registered installed desktop app; the command shim was not launched.`);
+  }
+  if (directError) throw directError;
+  throw new Error(`The app "${appId}" could not be resolved to an installed desktop application.`);
 }
 export function isStageAppReference(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 1024
@@ -172,10 +315,9 @@ export function stageAppLaunchCwd(
 
 export function launchStageApp(app: StageAppLaunchSpec, options: { windowsHide?: boolean; cwd?: string } = {}): ChildProcess {
   // No shell, model-provided arguments, inherited stdin, or agent subprocess.
-  // Owner-preview must create the GUI on the interactive desktop so Windows
-  // attaches a virtual-desktop application view to the exact HWND. Background
-  // stages keep the hidden launch behavior and move the owned window before it
-  // is shown on the agent's stage.
+  // Owner-preview creates a normal owner-visible app window. Background launch
+  // behavior is a broker routing choice; it never creates or moves a Windows
+  // Task View desktop.
   return spawn(app.executable, app.args, { shell: false, windowsHide: options.windowsHide ?? true, cwd: stageAppLaunchCwd(options.cwd), stdio: "ignore" });
 }
 

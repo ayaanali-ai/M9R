@@ -31,6 +31,20 @@ const BOM = String.fromCharCode(0xfeff);
 
 const CWD = "/repo";
 
+test("task-log is routed to the native CLI command instead of reported as unknown", async () => {
+  const { deps, err } = makeDeps({ env: { USERPROFILE: "C:/Users/test" } });
+  assert.equal(await run(["task-log"], deps), 1);
+  assert.match(err.join("\n"), /Usage: m9r-cli task-log <task id>/);
+  assert.doesNotMatch(err.join("\n"), /Unknown command/);
+});
+
+test("observation-stats is routed to the native CLI command instead of reported as unknown", async () => {
+  const { deps, err } = makeDeps({ env: { USERPROFILE: "C:/Users/test" } });
+  assert.equal(await run(["observation-stats"], deps), 1);
+  assert.match(err.join("\n"), /available only to the owner at a terminal/);
+  assert.doesNotMatch(err.join("\n"), /Unknown command/);
+});
+
 interface FakeResponse {
   ok: boolean;
   status: number;
@@ -116,7 +130,7 @@ test("multiple scoped profiles require explicit selection even when a legacy tok
   assert.equal(await run(["whoami", "--agent-kind", "opencode"], deps), 0);
 });
 
-test("connect skips login startup without consent and still explains extension setup", async () => {
+test("connect skips login startup without consent and explains the native desktop route", async () => {
   let installed = 0;
   const { deps, out } = makeDeps({ files: { [agentLocalPath(CWD, "codex")]: JSON.stringify({ token: "test-token" }) },
     router: () => jsonResponse(200, { agentKind: "codex", authenticated: true, lastUsedAt: "2030-01-01T00:00:00Z" }),
@@ -124,7 +138,8 @@ test("connect skips login startup without consent and still explains extension s
   });
   assert.equal(await run(["connect", "--agents", "codex"], deps), 0);
   assert.equal(installed, 0);
-  assert.match(out.join("\n"), /npx m9r-cli web setup/);
+  assert.match(out.join("\n"), /npx m9r-cli web setup --broker-only/);
+  assert.match(out.join("\n"), /Browser-extension transport is retired/);
   deps.confirm = async () => true;
   assert.equal(await run(["connect", "--agents", "codex", "--no-autostart"], deps), 0);
   assert.equal(installed, 0);
@@ -1160,7 +1175,7 @@ test("doctor fails cleanly when there is no token", async () => {
 
   assert.equal(code, 1);
   const text = out.join("\n");
-  assert.match(text, /\[FAIL\] .*local\.json exists/);
+  assert.match(text, /\[FAIL\] .*user-scoped M9R credential store exists/);
   assert.match(text, /\[FAIL\] token present/);
   assert.equal(requests.length, 0, "doctor must not call the API without a token");
 });

@@ -1,18 +1,25 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { renameStateFile } from "./atomic-file";
 import { isAgentContext } from "./approval-core";
+import { DesktopInputNotDispatchedError, DesktopInputOutcomeUnknownError } from "./desktop-input-errors";
 import { defaultStoreRoot } from "./local-store";
+import { isProcessAlive } from "./process-liveness";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { MultiplayerDispatchFence } from "./multiplayer-dispatch-fence";
 
-const STAGE_REGISTRY_VERSION = 3;
-const MAX_STAGES = 16;
-const MAX_NATIVE_RESPONSE_BYTES = 32 * 1024;
+const STAGE_REGISTRY_VERSION = 6;
+const MAX_STAGE_REGISTRY_BYTES = 1024 * 1024;
+// A just-created empty stage is assigned immediately by task preparation. Keep
+// recent empty mappings through that handoff, then reclaim old cursor-only
+// entries because they contain no HWND or durable app state.
+const EMPTY_OWNER_PREVIEW_STAGE_TTL_MS = 60_000;
+const MAX_NATIVE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const OWNER_PREVIEW_STAGE_PREFIX = "preview-agent-";
-const DESKTOP_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const EMPTY_DESKTOP_ID_RE = /^00000000-0000-0000-0000-000000000000$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW_ID_RE = /^(?:0[xX][0-9a-f]+|[0-9]+)$/;
 const MACHINE_ID_FILE = "windows-stage-machine-id";
 const COORDINATION_KEY_RE = /^[a-f0-9]{64}$/;
@@ -23,47 +30,88 @@ export interface WindowsStageRecord {
   appId?: string;
   /** Stable, local-only intent group. Stages in one group may share a window. */
   coordinationKey?: string;
-  desktopId: string;
-  /** Random local coordination identity; the Windows desktop GUID never leaves this machine. */
+  /** Explicitly shared identity mapping; mutating service callers must supply the broker fence. */
+  sharedBinding?: true;
+  /** This anchor was established by the broker that fences every target mutation. */
+  fencedBinding?: true;
+  /** Random local identity for the owner's visible-screen coordination surface. */
   roomDesktopId: string;
-  /** Desktop active before M9R created this stage; null for adopted stages. */
-  returnToDesktopId: string | null;
-  /** The stage is a real Windows desktop; an anchor is optional for a newly created stage. */
-  anchor: { pid: number; windowId: string } | null;
+  /** Exact visible-window binding; null for a desktop-wide owner view. */
+  anchor: { pid: number; windowId: string; processGeneration?: string } | null;
   /** Random identity rotated whenever the registered anchor window changes. */
   roomWindowId: string | null;
-  /** Local-only owner mapping; never included in room coordination events. */
-  agentAssignment?: { handle: string; sessionTag: string };
+  /** Local-only owner mapping; never included in room coordination events.
+   * `taskId` is the task that most recently used this session's stage -- stages are
+   * one per authenticated session (see cursorStageName() in task-desktop-stage.ts), so
+   * this is overwritten on every prepare() call and never scopes identity, only staleness. */
+  agentAssignment?: { handle: string; sessionTag: string; taskId?: string };
   registeredAt: string;
 }
 
 interface StageRegistry {
-  version: 3;
+  version: 6;
   stages: WindowsStageRecord[];
 }
 
 interface NativeWindowStageInfo {
   pid: number;
   windowId: string;
-  desktopId: string;
-  onCurrentDesktop: boolean;
+  processGeneration?: string;
+}
+
+export interface NativeDispatchEvidence {
+  readonly helperPid: number;
+  readonly startedUnixNanos: string;
+  readonly endedUnixNanos: string;
+  readonly streamId?: string;
 }
 
 interface NativeStageResponse {
   ok: boolean;
+  dispatchState?: "not-dispatched" | "dispatched" | "uncertain";
+  route?: string;
+  target?: string | { pid?: number | null; windowId?: string | null };
+  type?: string;
   error?: string;
   window?: NativeWindowStageInfo;
-  desktop?: NativeDesktopStageInfo;
   desktopStructure?: NativeDesktopStructure;
+  windowStructure?: NativeWindowStructure;
+  semanticAction?: { dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
+    read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
+    caret?: { x: number; y: number };
+    scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null;
+    nativeDispatch?: NativeDispatchEvidence };
+  capture?: { dataUrl: string; width: number; height: number; originX?: number; originY?: number };
   input?: { childWindowId: string };
   pointWindow?: { pid: number; windowId: string; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } };
   control?: NativePointControl;
-  windows?: { pid: number; windowId: string; title: string; width: number; height: number }[];
+  windows?: { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; zOrder?: number; className?: string; processName?: string | null; processPath?: string | null; appUserModelId?: string | null }[];
   position?: { x: number; y: number };
-  windowState?: "closed" | "moved" | "minimized" | "occluded" | "hidden" | "visible";
-  foregroundWindow?: { pid: number; windowId: string; desktopId?: string; onCurrentDesktop?: boolean; title?: string; className?: string; visible?: boolean; minimized?: boolean };
+  windowState?: "closed" | "minimized" | "occluded" | "hidden" | "visible";
+  foregroundWindow?: { pid: number; windowId: string; title?: string; className?: string; visible?: boolean; minimized?: boolean };
+  foregroundContext?: { pid: number; windowId: string; processGeneration: string; physicalInputEpoch: number; visible: boolean; minimized: boolean };
+  physicalInputEpoch?: number;
+  restoration?: { restored: boolean; reason?: string };
   result?: unknown;
   state?: "minimized" | "maximized" | "restored";
+  processGeneration?: string;
+  rect?: { x?: number; y?: number; width?: number; height?: number };
+  text?: string;
+  childWindowId?: string;
+  classes?: string[];
+}
+
+function throwNativeInputFailure(result: NativeStageResponse, fallback: string): never {
+  const detail = result.error ?? fallback;
+  if (result.dispatchState === "not-dispatched") {
+    throw new DesktopInputNotDispatchedError(`${detail} No target input was sent.`, "native-dispatch-unavailable");
+  }
+  // Missing dispatchState is treated conservatively. This can happen when an
+  // older helper is still running or a malformed response is received; neither
+  // case proves that SendInput accepted zero events.
+  throw new DesktopInputOutcomeUnknownError(
+    `${detail} The native helper did not prove that this input sequence sent zero events; inspect the target before retrying.`,
+  );
 }
 
 export interface NativePointControl {
@@ -74,6 +122,11 @@ export interface NativePointControl {
   rect: { x: number; y: number; width: number; height: number };
   invoked: boolean;
   confirmed?: boolean;
+  // Reported by the uninvoked inspection call (shell_accessibility.rs). A
+  // control without InvokePattern will always fail an invoke attempt, not
+  // sometimes -- treating that failure as "uncertain" (T276) blocks a safe
+  // fallback for a known, not ambiguous, outcome.
+  supportsInvoke?: boolean;
 }
 
 export interface WindowsSystemControlRequest {
@@ -103,10 +156,31 @@ export interface NativeDesktopStructure {
   truncated: boolean;
 }
 
-interface NativeDesktopStageInfo {
-  desktopId: string;
-  isCurrent: boolean;
-  returnDesktopId?: string | null;
+export interface NativeWindowStructureElement extends NativeDesktopStructureElement {
+  /** SelectionItem state, or on/off Toggle state; null/absent is unknown. */
+  selected?: boolean | null;
+  ref: string;
+  /** Control View child-index path used for immediate native re-resolution. */
+  path: number[];
+  automationId: string;
+  /** Live UIA identity, independent of generated snapshot refs and tree position. */
+  runtimeId?: number[] | null;
+  actions?: { invoke: boolean; select: boolean; toggle: boolean; legacy: boolean; setValue: boolean; readValue?: boolean; scroll?: boolean };
+  /** UIA ScrollPattern progress when this element is a scroll container. Percent can be null when the provider omits it. */
+  scroll?: {
+    horizontal: { scrollable: boolean; percent: number | null; viewSize: number | null };
+    vertical: { scrollable: boolean; percent: number | null; viewSize: number | null };
+  } | null;
+}
+
+interface NativeScrollPosition { horizontal: number | null; vertical: number | null }
+
+export interface NativeWindowStructure {
+  scope: "window";
+  windowId: string;
+  status: "complete" | "partial";
+  elements: NativeWindowStructureElement[];
+  truncated: boolean;
 }
 
 export interface WindowsStageDependencies {
@@ -116,9 +190,32 @@ export interface WindowsStageDependencies {
   terminal?: boolean;
   env?: Record<string, string | undefined>;
   now?: () => Date;
-  invokeNative?: (request: Record<string, unknown>) => Promise<NativeStageResponse>;
+  invokeNative?: (request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void) => Promise<NativeStageResponse>;
+  /** The owner broker supplies the real shared mutation fence before allowing shared HWND mappings. */
+  sharedWindowFence?: Pick<MultiplayerDispatchFence, "begin">;
+  /** Test-only transport seam; production creates one persistent native process per stream. */
+  nativeHostFactory?: (streamId?: string) => { invoke(request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void): Promise<NativeStageResponse>; close(): void };
+  /** Internal API-call evidence. This callback never changes an action's outcome. */
+  onNativeDispatch?: (evidence: NativeDispatchEvidence) => void;
+  /** Safe foreground restoration outcome; diagnostics only, never changes action success. */
+  onForegroundRestoration?: (outcome: { status: "restored" | "skipped" | "failed"; reason?: string }) => void;
   /** Whether a process id still exists; injectable for tests. */
   processAlive?: (pid: number) => boolean;
+  /** Whether the task that most recently used a stage is still unfinished. Used only to
+   * decide whether another session may take over an already-claimed window: a window
+   * process like explorer.exe or chrome.exe outlives any one task, so processAlive() alone
+   * never frees a finished task's claim on it. Defaults to always-active (preserves prior
+   * behavior) when the caller has no task store to check against, e.g. in tests. */
+  taskActive?: (taskId: string) => boolean;
+}
+
+export interface NativeWindowTextDispatchReceipt {
+  /** Present only when the native helper explicitly reported a dispatch. */
+  dispatchState?: "dispatched";
+  /** Present only when the native route is the expected WM_CHAR message path. */
+  route?: "wm-char-post-message";
+  /** True/false only when an explicit native target identity was returned and checked. */
+  targetMatches?: boolean;
 }
 
 function defaultProcessAlive(pid: number): boolean {
@@ -127,17 +224,33 @@ function defaultProcessAlive(pid: number): boolean {
 }
 
 /**
- * Owner-preview stages only map an agent onto the desktop the owner already
- * uses; dropping one closes no window and no desktop. Once the window they
- * were bound to has exited they are dead bookkeeping, and without this they
- * accumulate until every new stage is refused at the registry limit.
- * Stages that own an M9R-created desktop are never pruned here.
+ * Owner-preview stages are local identity maps onto the owner's visible
+ * Windows surface; removing a record never closes or moves a window. Compact
+ * dead anchors and dormant empty cursor mappings without disturbing a live
+ * app binding or an in-flight task preparation.
  */
-function withoutStaleOwnerPreviewStages(stages: WindowsStageRecord[], alive: (pid: number) => boolean): WindowsStageRecord[] {
-  return stages.filter((stage) => !(stage.name.startsWith("preview-")
-    && stage.returnToDesktopId === null
-    && stage.anchor
-    && !alive(stage.anchor.pid)));
+function withoutStaleOwnerPreviewStages(
+  stages: WindowsStageRecord[],
+  alive: (pid: number) => boolean,
+  taskActive: (taskId: string) => boolean,
+  nowMs: number,
+): WindowsStageRecord[] {
+  return stages.filter((stage) => {
+    if (!stage.name.startsWith(OWNER_PREVIEW_STAGE_PREFIX)) return true;
+    const taskId = stage.agentAssignment?.taskId;
+    // A task may intentionally close its current app before selecting or
+    // launching the next one. Preserve that active stage identity even when
+    // the old HWND's process has exited; launch recovery clears only the dead
+    // anchor while retaining the in-flight assignment and coordination IDs.
+    if (taskId && taskActive(taskId)) return true;
+    if (stage.anchor) return alive(stage.anchor.pid);
+    if (taskId) return false;
+    // Cursor priming can create a stage before there is an app/window to bind.
+    // Preserve the short prepare→assign handoff, but don't retain empty session
+    // records indefinitely after the task has moved on or the provider closed.
+    const registeredAt = Date.parse(stage.registeredAt);
+    return Number.isFinite(registeredAt) && nowMs - registeredAt < EMPTY_OWNER_PREVIEW_STAGE_TTL_MS;
+  });
 }
 
 function normalizedName(value: string): string {
@@ -146,10 +259,6 @@ function normalizedName(value: string): string {
     throw new Error("Stage names must be 1–40 lowercase letters, numbers, hyphens, or underscores, and start with a letter or number.");
   }
   return name;
-}
-
-function isNonzeroDesktopId(value: unknown): value is string {
-  return typeof value === "string" && DESKTOP_ID_RE.test(value) && !EMPTY_DESKTOP_ID_RE.test(value);
 }
 
 function isPersistedAppId(value: unknown): value is string {
@@ -166,11 +275,10 @@ function parseRegistry(raw: string): StageRegistry {
   try { parsed = JSON.parse(raw); } catch { throw new Error("The local Windows stage registry is corrupt; it was left unchanged."); }
   const version = parsed && typeof parsed === "object" ? (parsed as { version?: unknown }).version : undefined;
   if (!parsed || typeof parsed !== "object" || typeof version !== "number"
-    || ![1, 2, STAGE_REGISTRY_VERSION].includes(version) || !Array.isArray((parsed as { stages?: unknown }).stages)) {
+    || ![1, 2, 3, 4, 5, STAGE_REGISTRY_VERSION].includes(version) || !Array.isArray((parsed as { stages?: unknown }).stages)) {
     throw new Error("The local Windows stage registry has an unsupported format; it was left unchanged.");
   }
   const stages = (parsed as { stages: unknown[] }).stages;
-  if (stages.length > MAX_STAGES) throw new Error("The local Windows stage registry exceeds its safe limit; it was left unchanged.");
   const names = new Set<string>();
   const records = stages.map((item): WindowsStageRecord => {
     if (!item || typeof item !== "object") throw new Error("The local Windows stage registry contains an invalid record; it was left unchanged.");
@@ -180,46 +288,50 @@ function parseRegistry(raw: string): StageRegistry {
     names.add(name);
     if (record.appId !== undefined && (!isPersistedAppId(record.appId))) throw new Error("The local Windows stage registry contains an invalid app reference; it was left unchanged.");
     if (record.coordinationKey !== undefined && !isCoordinationKey(record.coordinationKey)) throw new Error("The local Windows stage registry contains an invalid coordination key; it was left unchanged.");
-    if (typeof record.desktopId !== "string" || !DESKTOP_ID_RE.test(record.desktopId)) throw new Error("The local Windows stage registry contains an invalid desktop id; it was left unchanged.");
-    const returnToDesktopId = record.returnToDesktopId ?? null;
-    if (returnToDesktopId !== null && (typeof returnToDesktopId !== "string" || !DESKTOP_ID_RE.test(returnToDesktopId))) {
-      throw new Error("The local Windows stage registry contains an invalid return desktop id; it was left unchanged.");
-    }
+    if (record.sharedBinding !== undefined && record.sharedBinding !== true) throw new Error("The local Windows stage registry contains an invalid shared binding.");
+    if (record.fencedBinding !== undefined && record.fencedBinding !== true) throw new Error("The local Windows stage registry contains an invalid fenced binding.");
+    if (record.sharedBinding && !record.fencedBinding) throw new Error("The local Windows stage registry has a shared target without mutation fencing.");
     let anchor: WindowsStageRecord["anchor"] = null;
     if (record.anchor !== undefined && record.anchor !== null) {
       if (!Number.isInteger(record.anchor.pid) || (record.anchor.pid ?? 0) < 1 || typeof record.anchor.windowId !== "string" || !WINDOW_ID_RE.test(record.anchor.windowId)) {
         throw new Error("The local Windows stage registry contains an invalid anchor window; it was left unchanged.");
       }
-      anchor = { pid: record.anchor.pid!, windowId: record.anchor.windowId };
+      if (record.anchor.processGeneration !== undefined && !/^[a-f0-9]{16}$/i.test(record.anchor.processGeneration)) throw new Error("The local Windows stage registry contains an invalid process generation.");
+      anchor = { pid: record.anchor.pid!, windowId: record.anchor.windowId,
+        ...(record.anchor.processGeneration ? { processGeneration: record.anchor.processGeneration } : {}) };
     } else if (version === 1) {
       throw new Error("The local Windows stage registry contains an invalid anchor window; it was left unchanged.");
     }
     if (typeof record.registeredAt !== "string" || !Number.isFinite(Date.parse(record.registeredAt))) throw new Error("The local Windows stage registry contains an invalid registration time; it was left unchanged.");
     const roomDesktopId = record.roomDesktopId ?? (version < STAGE_REGISTRY_VERSION ? randomUUID() : null);
     const roomWindowId = record.roomWindowId ?? (version < STAGE_REGISTRY_VERSION && anchor ? randomUUID() : null);
-    if (typeof roomDesktopId !== "string" || !DESKTOP_ID_RE.test(roomDesktopId)
-      || (roomWindowId !== null && (typeof roomWindowId !== "string" || !DESKTOP_ID_RE.test(roomWindowId)))
+    if (typeof roomDesktopId !== "string" || !UUID_RE.test(roomDesktopId)
+      || (roomWindowId !== null && (typeof roomWindowId !== "string" || !UUID_RE.test(roomWindowId)))
       || (anchor === null && roomWindowId !== null) || (anchor !== null && roomWindowId === null)) {
       throw new Error("The local Windows stage registry contains an invalid room coordination identity; it was left unchanged.");
     }
     let agentAssignment: WindowsStageRecord["agentAssignment"];
     if (record.agentAssignment !== undefined) {
-      const value = record.agentAssignment as { handle?: unknown; sessionTag?: unknown } | null;
+      const value = record.agentAssignment as { handle?: unknown; sessionTag?: unknown; taskId?: unknown } | null;
       if (value !== null && (!value || typeof value !== "object" || Array.isArray(value)
-        || Object.keys(value).some((key) => key !== "handle" && key !== "sessionTag")
+        || Object.keys(value).some((key) => key !== "handle" && key !== "sessionTag" && key !== "taskId")
         || typeof value.handle !== "string" || !/^[a-z0-9_-]{1,40}$/.test(value.handle)
-        || typeof value.sessionTag !== "string" || !/^[a-f0-9]{8}$/.test(value.sessionTag))) {
+        || typeof value.sessionTag !== "string" || !/^[a-f0-9]{8}$/.test(value.sessionTag)
+        || (value.taskId !== undefined && (typeof value.taskId !== "string" || value.taskId.length < 1 || value.taskId.length > 100)))) {
         throw new Error("The local Windows stage registry contains an invalid agent assignment; it was left unchanged.");
       }
-      if (value) agentAssignment = { handle: value.handle as string, sessionTag: value.sessionTag as string };
+      if (value) {
+        agentAssignment = { handle: value.handle as string, sessionTag: value.sessionTag as string };
+        if (value.taskId !== undefined) agentAssignment.taskId = value.taskId as string;
+      }
     }
     return {
       name,
       ...(record.appId !== undefined ? { appId: record.appId } : {}),
       ...(record.coordinationKey !== undefined ? { coordinationKey: record.coordinationKey } : {}),
-      desktopId: record.desktopId.toLowerCase(),
+      ...(record.sharedBinding ? { sharedBinding: true as const } : {}),
+      ...(record.fencedBinding ? { fencedBinding: true as const } : {}),
       roomDesktopId: roomDesktopId.toLowerCase(),
-      returnToDesktopId: returnToDesktopId?.toLowerCase() ?? null,
       anchor,
       roomWindowId: roomWindowId?.toLowerCase() ?? null,
       ...(agentAssignment ? { agentAssignment } : {}),
@@ -238,7 +350,7 @@ function readOrCreateStageMachineId(root: string): string {
   const path = join(root, MACHINE_ID_FILE);
   const read = () => {
     const value = readFileSync(path, "utf8").trim();
-    if (!DESKTOP_ID_RE.test(value)) throw new Error("The local stage machine id is invalid; it was left unchanged.");
+    if (!UUID_RE.test(value)) throw new Error("The local stage machine id is invalid; it was left unchanged.");
     return value.toLowerCase();
   };
   if (existsSync(path)) return read();
@@ -257,13 +369,13 @@ function readRegistry(root: string): StageRegistry {
   const path = registryPath(root);
   if (!existsSync(path)) return { version: STAGE_REGISTRY_VERSION, stages: [] };
   const raw = readFileSync(path, "utf8");
-  if (Buffer.byteLength(raw, "utf8") > 16 * 1024) throw new Error("The local Windows stage registry is too large; it was left unchanged.");
+  if (Buffer.byteLength(raw, "utf8") > MAX_STAGE_REGISTRY_BYTES) throw new Error("The local Windows stage registry is too large; it was left unchanged.");
   return parseRegistry(raw);
 }
 
 export function formatWindowsStageRoomKeys(machineId: string, stage: Pick<WindowsStageRecord, "roomDesktopId" | "roomWindowId">): { desktop: string; window?: string } {
-  if (!DESKTOP_ID_RE.test(machineId) || !DESKTOP_ID_RE.test(stage.roomDesktopId)
-    || (stage.roomWindowId !== null && !DESKTOP_ID_RE.test(stage.roomWindowId))) {
+  if (!UUID_RE.test(machineId) || !UUID_RE.test(stage.roomDesktopId)
+    || (stage.roomWindowId !== null && !UUID_RE.test(stage.roomWindowId))) {
     throw new Error("The local Windows stage room identifiers are invalid.");
   }
   return {
@@ -327,7 +439,11 @@ function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
   const target = registryPath(root);
   const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
-    writeFileSync(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const serialized = `${JSON.stringify(registry, null, 2)}\n`;
+    if (Buffer.byteLength(serialized, "utf8") > MAX_STAGE_REGISTRY_BYTES) {
+      throw new Error("The local Windows stage registry would exceed its 1 MiB storage budget; no stage update was saved.");
+    }
+    writeFileSync(temporary, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
     renameStateFile(temporary, target);
   } catch (error) {
     try { unlinkSync(temporary); } catch { /* preserve the original write error */ }
@@ -335,14 +451,21 @@ function writeRegistryWhileLocked(root: string, registry: StageRegistry): void {
   }
 }
 
+/** Normalize a live HWND identity. Legacy OS desktop fields are ignored:
+ * stages bind to the owner's visible Windows surface and never switch virtual
+ * desktops. */
 function normalizeWindowInfo(value: unknown): NativeWindowStageInfo {
   if (!value || typeof value !== "object") throw new Error("The native Windows stage helper returned no window result.");
   const item = value as Partial<NativeWindowStageInfo>;
   if (!Number.isInteger(item.pid) || (item.pid ?? 0) < 1 || typeof item.windowId !== "string" || !WINDOW_ID_RE.test(item.windowId)
-      || !isNonzeroDesktopId(item.desktopId) || typeof item.onCurrentDesktop !== "boolean") {
+      || !/[^0]/.test(item.windowId.replace(/^0[xX]/, ""))) {
     throw new Error("The native Windows stage helper returned an invalid window result.");
   }
-  return { pid: item.pid!, windowId: item.windowId, desktopId: item.desktopId.toLowerCase(), onCurrentDesktop: item.onCurrentDesktop };
+  if (item.processGeneration !== undefined && !/^[a-f0-9]{16}$/i.test(item.processGeneration)) throw new Error("The native helper returned an invalid process generation.");
+  return {
+    pid: item.pid!, windowId: item.windowId,
+    ...(item.processGeneration ? { processGeneration: item.processGeneration } : {}),
+  };
 }
 
 export function createWindowsDesktopStageManager(deps: WindowsStageDependencies = {}) {
@@ -350,21 +473,188 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
   const root = deps.root ?? defaultStoreRoot(homedir(), deps.env ?? process.env);
   const now = deps.now ?? (() => new Date());
   const processAlive = deps.processAlive ?? defaultProcessAlive;
-  /** Prune dead owner-preview stages only when the registry is full. */
-  function roomFor(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
-    return registry.stages.length >= MAX_STAGES ? withoutStaleOwnerPreviewStages(registry.stages, processAlive) : registry.stages;
+  const taskActive = deps.taskActive ?? (() => true);
+  /** Compact dead anchors and expired empty cursor-stage records before adding one. */
+  function compactRegistryStages(registry: { stages: WindowsStageRecord[] }): WindowsStageRecord[] {
+    return withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime());
   }
-  const invokeNative = deps.invokeNative ?? ((request) => invokeWindowsStageHelper(
-    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), request,
-  ));
+  const streamContext = new AsyncLocalStorage<string>();
+  const foregroundAuthority = new AsyncLocalStorage<(request: Record<string, unknown>) => Promise<{
+    restoreOwnerContext: boolean; ownerInputEpoch?: number; retainOwnerInputMonitor?: boolean;
+  } | void>>();
+  const foregroundHandoff = new AsyncLocalStorage<{
+    restoreOwnerContext: boolean;
+    retainOwnerInputMonitor: boolean;
+    owner?: NonNullable<NativeStageResponse["foregroundContext"]>;
+    targets: Map<string, { pid: number; windowId: string }>;
+  }>();
+  const foregroundOperations = new Set(["bringToForeground", "setWindowState", "sendClick", "sendDrag", "sendScroll", "sendKeyCombo", "sendText", "restoreCursorPosition", "restoreForegroundContext"]);
+  const liveStageChildPids = new Set<number>();
+  const trackStageChildPid = (pid: number | undefined, alive: boolean): void => {
+    if (typeof pid !== "number") return;
+    if (alive) liveStageChildPids.add(pid); else liveStageChildPids.delete(pid);
+    recordStageChildPids(root, [...liveStageChildPids]);
+  };
+  if (!deps.invokeNative && !deps.nativeHostFactory) reapOrphanStageChildren(root);
+  const hostFactory = deps.nativeHostFactory ?? (() => createPersistentWindowsStageHost(
+    deps.nativeHostPath ?? join(root, "bin", "m9r-native-input-host.exe"), trackStageChildPid, deps.env));
+  const persistentHost = deps.invokeNative ? undefined : hostFactory();
+  const streamHosts = new Map<string, ReturnType<typeof hostFactory>>();
+  const foregroundMonitorLeases = new Map<string, Set<string>>();
+  const activeForegroundMonitorHosts = new Set<string>();
+  const monitorHostKey = (streamId: string | undefined) => streamId ?? "default";
+  let managerClosed = false;
+  const invokeNative = async (request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void): Promise<NativeStageResponse> => {
+    if (managerClosed) return Promise.reject(new Error("The native desktop-stage manager is closed."));
+    const operation = String(request.op);
+    const globalMediaInput = operation === "systemControl" && request.control === "media";
+    let authorization: { restoreOwnerContext: boolean; ownerInputEpoch?: number; retainOwnerInputMonitor?: boolean } | void = undefined;
+    if (foregroundOperations.has(operation) || globalMediaInput) {
+      const authorize = foregroundAuthority.getStore();
+      if (!authorize) throw new DesktopInputNotDispatchedError(globalMediaInput
+        ? "Global media input requires an owner-authorized task turn; no media key was sent."
+        : "Foreground dispatch requires an owner-authorized task turn; no input was sent.", "foreground-approval");
+      authorization = await authorize(request);
+      if (operation === "restoreForegroundContext" && authorization?.restoreOwnerContext !== true) {
+        return { ok: true, restoration: { restored: false, reason: "foreground-grant-revoked" } };
+      }
+    }
+    const handoff = foregroundHandoff.getStore();
+    if (handoff && authorization?.retainOwnerInputMonitor === true) handoff.retainOwnerInputMonitor = true;
+    if (handoff && operation !== "restoreForegroundContext" && !globalMediaInput
+      && authorization?.restoreOwnerContext === true) {
+      const target = foregroundRequestTarget(request);
+      if (target) {
+        handoff.targets.set(foregroundIdentityKey(target.pid, target.windowId), target);
+        if (!handoff.owner) {
+          const captured = await invokeNative({ op: "captureForegroundContext" });
+          const owner = captured.foregroundContext;
+          if (!captured.ok || !owner || !Number.isSafeInteger(owner.pid) || owner.pid < 1
+            || !WINDOW_ID_RE.test(owner.windowId) || !/^[a-f0-9]{16}$/i.test(owner.processGeneration)
+            || !Number.isSafeInteger(owner.physicalInputEpoch) || owner.physicalInputEpoch < 0
+            || !owner.visible || owner.minimized) {
+            throw new DesktopInputNotDispatchedError(
+              "The owner foreground context could not be captured safely; no foreground input was sent.",
+              "foreground-approval");
+          }
+          handoff.owner = owner;
+        }
+        if (authorization.ownerInputEpoch !== undefined && authorization.ownerInputEpoch !== handoff.owner.physicalInputEpoch) {
+          throw new DesktopInputNotDispatchedError(
+            "Owner input changed after foreground approval; no target input was sent. Approve a new foreground turn if it is still needed.",
+            "foreground-approval");
+        }
+        handoff.restoreOwnerContext = true;
+      }
+    }
+    if (handoff?.restoreOwnerContext && handoff.owner && foregroundOperations.has(operation)
+      && operation !== "restoreForegroundContext") {
+      const input = await invokeNative({ op: "physicalInputEpoch" });
+      if (!input.ok || input.physicalInputEpoch !== handoff.owner.physicalInputEpoch) {
+        throw new DesktopInputNotDispatchedError(
+          "Owner input changed during the approved foreground turn; no further foreground input was sent.",
+          "foreground-approval");
+      }
+    }
+    const streamId = streamContext.getStore();
+    const result = deps.invokeNative ? await deps.invokeNative(request, dragProgress) : !streamId
+      ? await persistentHost!.invoke(request, dragProgress)
+      : await (streamHosts.get(streamId) ?? (() => {
+        const host = hostFactory(streamId); streamHosts.set(streamId, host); return host;
+      })()).invoke(request, dragProgress);
+    const monitorKey = monitorHostKey(streamId);
+    if (operation === "captureForegroundContext" && result.ok) activeForegroundMonitorHosts.add(monitorKey);
+    if (operation === "releaseForegroundContextMonitor" && result.ok) {
+      activeForegroundMonitorHosts.delete(monitorKey);
+      foregroundMonitorLeases.delete(monitorKey);
+    }
+    return result;
+  };
+  function withInputStream<T>(streamId: string, operation: () => Promise<T>): Promise<T> {
+    if (!/^stream-[a-f0-9]{24}$/.test(streamId)) throw new Error("Invalid native input-stream identity.");
+    if (managerClosed) throw new Error("The native desktop-stage manager is closed.");
+    return streamContext.run(streamId, operation);
+  }
+  function withForegroundAuthorization<T>(authorize: (request: Record<string, unknown>) => Promise<{
+    restoreOwnerContext: boolean; ownerInputEpoch?: number; retainOwnerInputMonitor?: boolean;
+  } | void>, operation: () => Promise<T>): Promise<T> {
+    const handoff: {
+      restoreOwnerContext: boolean;
+      retainOwnerInputMonitor: boolean;
+      owner?: NonNullable<NativeStageResponse["foregroundContext"]>;
+      targets: Map<string, { pid: number; windowId: string }>;
+    } = { restoreOwnerContext: false, retainOwnerInputMonitor: false, targets: new Map<string, { pid: number; windowId: string }>() };
+    const restore = async () => {
+      try {
+        if (handoff.owner && handoff.restoreOwnerContext && handoff.targets.size) {
+          const current = await currentForegroundWindow();
+          const authorizedCurrentProcess = [...handoff.targets.values()].some((target) => target.pid === current.pid);
+          if (!authorizedCurrentProcess) {
+            deps.onForegroundRestoration?.({ status: "skipped", reason: "foreground-changed" });
+          } else {
+            const owner = handoff.owner;
+            if (sameForegroundIdentity(owner, current)) {
+              deps.onForegroundRestoration?.({ status: "restored", reason: "already-owner-window" });
+            } else {
+              const result = await invokeNative({ op: "restoreForegroundContext", pid: current.pid, windowId: current.windowId,
+                ownerPid: owner.pid, ownerWindowId: owner.windowId, ownerProcessGeneration: owner.processGeneration,
+                physicalInputEpoch: owner.physicalInputEpoch });
+              if (result.restoration?.restored) deps.onForegroundRestoration?.({ status: "restored", reason: result.restoration.reason });
+              else deps.onForegroundRestoration?.({ status: "skipped", reason: result.restoration?.reason ?? result.error ?? "restore-unavailable" });
+            }
+          }
+        }
+      } catch (error) {
+        deps.onForegroundRestoration?.({ status: "failed", reason: error instanceof Error ? error.message : String(error) });
+      } finally {
+        const streamId = streamContext.getStore();
+        const monitorKey = monitorHostKey(streamId);
+        const hasTaskLeases = (foregroundMonitorLeases.get(monitorKey)?.size ?? 0) > 0;
+        if (!handoff.retainOwnerInputMonitor && !hasTaskLeases && activeForegroundMonitorHosts.has(monitorKey)) {
+          try {
+            const released = await invokeNative({ op: "releaseForegroundContextMonitor" });
+            if (!released.ok) deps.onForegroundRestoration?.({ status: "failed", reason: released.error ?? "owner-input-monitor-release-failed" });
+          } catch (error) {
+            deps.onForegroundRestoration?.({ status: "failed", reason: error instanceof Error ? error.message : String(error) });
+          }
+        }
+      }
+    };
+    return foregroundHandoff.run(handoff, () => foregroundAuthority.run(authorize, async () => {
+      try { return await operation(); }
+      finally { await restore(); }
+    }));
+  }
+  function closeInputStream(streamId: string): void {
+    streamHosts.get(streamId)?.close();
+    streamHosts.delete(streamId);
+    foregroundMonitorLeases.delete(monitorHostKey(streamId));
+    activeForegroundMonitorHosts.delete(monitorHostKey(streamId));
+  }
+  function closeManager(): void {
+    if (managerClosed) return;
+    managerClosed = true;
+    persistentHost?.close();
+    for (const host of streamHosts.values()) host.close();
+    streamHosts.clear();
+    foregroundMonitorLeases.clear();
+    activeForegroundMonitorHosts.clear();
+    process.removeListener("exit", closeManager);
+  }
+  if (!deps.invokeNative) process.once("exit", closeManager);
+  function verifiedWindowInfo(value: unknown) {
+    const window = normalizeWindowInfo(value);
+    if (!deps.invokeNative && !window.processGeneration) throw new Error("The native runtime cannot verify process generations; stage input requires the current verified candidate.");
+    return window;
+  }
 
   function assertWindows(): void {
-    if (platform !== "win32") throw new Error("The Windows virtual-desktop stage is available only on Windows.");
+    if (platform !== "win32") throw new Error("The Windows desktop stage is available only on Windows.");
   }
 
   function assertOwner(): void {
     if (!deps.terminal && !(process.stdin.isTTY && process.stdout.isTTY)) throw new Error("Windows stage changes require the owner at an interactive terminal.");
-    if (isAgentContext(deps.env ?? process.env)) throw new Error("Agents cannot create, activate, register, or move owner desktop stages; ask the owner to run this command in a terminal.");
+    if (isAgentContext(deps.env ?? process.env)) throw new Error("Agents cannot change owner desktop-stage bindings; ask the owner to manage the local stage in a terminal.");
   }
 
   async function inspectWindow(pidInput: string, windowId: string): Promise<NativeWindowStageInfo> {
@@ -374,7 +664,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     const handle = parseWindowId(windowId);
     const result = await invokeNative({ op: "inspect", pid, windowId: handle });
     if (!result.ok) throw new Error(result.error ?? "Windows could not inspect that window.");
-    return normalizeWindowInfo(result.window);
+    const window = verifiedWindowInfo(result.window);
+    if (window.pid !== pid || window.windowId !== handle) throw new Error("Windows returned a different window identity; no retargeting is allowed.");
+    return window;
   }
 
   async function windowAtPoint(x: number, y: number): Promise<{ pid: number; windowId: bigint; shell?: boolean; keyboardWindow?: boolean; screenOrigin?: { x: number; y: number } }> {
@@ -406,27 +698,38 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (![x, y].every((n) => Number.isSafeInteger(n) && n >= -32768 && n <= 32767)) throw new Error("Invalid accessibility point.");
     const result = await invokeNative({ op: expected ? "invokePointControl" : "inspectPointControl", x, y,
       ...(expected ? { label: expected.label, pid: expected.pid, windowId: expected.windowId, windowPid: expected.windowPid } : {}) });
-    if (!result.ok) throw new Error(result.error ?? "Windows accessibility control operation failed.");
+    if (!result.ok) {
+      if (expected) throwNativeInputFailure(result, "Windows accessibility control invocation failed.");
+      throw new Error(result.error ?? "Windows accessibility control inspection failed.");
+    }
     const control = result.control;
     if (!control || typeof control.label !== "string" || !control.label.trim() || !Number.isSafeInteger(control.pid) || control.pid < 1
       || typeof control.windowId !== "string" || !WINDOW_ID_RE.test(control.windowId) || !Number.isSafeInteger(control.windowPid) || control.windowPid < 1
       || !control.rect || !Object.values(control.rect).every(Number.isFinite) || control.rect.width <= 0 || control.rect.height <= 0
-      || control.invoked !== Boolean(expected)) throw new Error("Windows returned an invalid accessibility control.");
+      || control.invoked !== Boolean(expected)) {
+      if (expected) throw new DesktopInputOutcomeUnknownError("Windows returned an invalid accessibility invocation result; inspect the target before retrying.");
+      throw new Error("Windows returned an invalid accessibility control.");
+    }
     return control;
   }
 
   /**
-   * Read the bounded Windows control-view tree rooted at the virtual desktop.
+   * Read the bounded Windows control-view tree rooted at the UI Automation
+   * desktop element (not a Windows Task View desktop).
    * This is one shared observation capability for shell, taskbar, and visible
    * app controls; it is not a provider- or application-specific route.
    */
   async function desktopStructure(options: { maxElements?: number; maxDepth?: number } = {}): Promise<NativeDesktopStructure> {
     assertWindows();
     assertOwner();
-    const maxElements = options.maxElements ?? 64;
-    const maxDepth = options.maxDepth ?? 10;
-    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 64
-      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 10) {
+    // Keep the wrapper aligned with the native UIA walker. The previous
+    // desktop-wide 64/10 ceiling silently dropped taskbar, shell, and app
+    // controls before the provider ever saw them; the native host already
+    // supports the same 4096/64 bounds used for exact windows.
+    const maxElements = options.maxElements ?? 4096;
+    const maxDepth = options.maxDepth ?? 64;
+    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 4096
+      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 64) {
       throw new Error("Windows desktop structure bounds are invalid.");
     }
     const result = await invokeNative({ op: "inspectDesktopStructure", maxElements, maxDepth });
@@ -455,7 +758,256 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return structure;
   }
 
-  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
+  // --- Item 6 of the latency plan: an event-driven UI-tree cache for windowStructure(). ---
+  //
+  // windowStructure() previously did a full real UIA tree walk on every single call, even when
+  // nothing about the window had changed since the last call a moment ago (e.g. re-reading the
+  // tree right after a click to confirm it landed, then reading it again for the next action).
+  //
+  // Invalidation is event-driven, not a blind poll: every dispatch function below that can
+  // plausibly change a window's UI (click, type, drag, scroll, key combo, close) calls
+  // invalidateWindowStructureCache(pid, windowId) right after it runs, win or lose -- a cache
+  // entry only survives between calls that provably didn't touch that window. A short TTL
+  // (UI_TREE_CACHE_TTL_MS) is kept as a safety net under that, in case some future mutation path
+  // forgets to invalidate; it bounds the blast radius of a missed invalidation to a brief window
+  // instead of an indefinitely stale tree.
+  //
+  // Shadow mode: caching a UI tree is exactly the kind of thing that must be proven before it's
+  // trusted (an agent silently clicking a stale coordinate would be a worse bug than any amount of
+  // latency). So by default (M9R_TRUST_UI_TREE_CACHE unset), this NEVER skips the real fetch --
+  // every call still does the genuine UIA walk. What the cache path adds in shadow mode is pure
+  // request coalescing (below) plus a running comparison against what a trusting caller would
+  // have been served, recorded in uiTreeCacheStats() for the owner to inspect before flipping the
+  // trust flag on. Only with M9R_TRUST_UI_TREE_CACHE=1 does a fresh cache hit actually skip the
+  // real native round trip.
+  const UI_TREE_CACHE_TTL_MS = 250;
+  const trustUiTreeCache = (deps.env ?? process.env).M9R_TRUST_UI_TREE_CACHE === "1";
+  const windowStructureCache = new Map<string, { structure: NativeWindowStructure; fetchedAtMs: number }>();
+  const windowStructureInflight = new Map<string, Promise<NativeWindowStructure>>();
+  const uiTreeCacheCounters = { hits: 0, coalesced: 0, misses: 0, shadowCompared: 0, shadowMismatches: 0 };
+
+  function windowStructureCacheKey(pid: number, windowId: string, maxElements: number, maxDepth: number): string {
+    return `${pid}:${windowId}:${maxElements}:${maxDepth}`;
+  }
+
+  /** A cheap but complete structural fingerprint: order, and every validated field except `ref`,
+   *  must match. `ref` is deliberately excluded -- it is snapshot-qualified by design (a fresh,
+   *  never-reused value on every real tree read, by the native host's own documented contract,
+   *  so an old provider ref can never silently resolve against a new element) and so differs
+   *  between two real fetches of the exact same, truly unchanged window. Including it would make
+   *  every shadow comparison report a false mismatch regardless of whether anything on screen
+   *  actually changed. `path` (the element's structural position) is the stable identity used
+   *  here instead, matching how invokeWindowElement itself re-validates a target (by path and
+   *  expected role/label/className/automationId/runtimeId, never by `ref`). */
+  function fingerprintWindowStructure(structure: NativeWindowStructure): string {
+    return JSON.stringify({
+      status: structure.status,
+      truncated: structure.truncated,
+      elements: structure.elements.map((element) => ({
+        label: element.label, role: element.role, className: element.className,
+        automationId: element.automationId, depth: element.depth, path: element.path,
+        enabled: element.enabled, focused: element.focused, selected: element.selected, rect: element.rect,
+        actions: element.actions, scroll: element.scroll,
+      })),
+    });
+  }
+
+  /** Invalidates every cached windowStructure() entry for one window, across every bounds variant
+   *  (maxElements/maxDepth) a caller may have requested. Called after any dispatch that could have
+   *  changed that window's UI, regardless of whether the dispatch itself reported success. */
+  function invalidateWindowStructureCache(pid: number, windowId: string): void {
+    const prefix = `${pid}:${windowId}:`;
+    for (const key of windowStructureCache.keys()) if (key.startsWith(prefix)) windowStructureCache.delete(key);
+  }
+
+  /** Shadow-mode and trust-mode counters: hits/misses/coalesced requests, and how often a cache
+   *  hit's content would have actually matched a fresh real read. Not reset between calls --
+   *  meant to be inspected over a session to decide whether to flip M9R_TRUST_UI_TREE_CACHE. */
+  function uiTreeCacheStats() {
+    return { ...uiTreeCacheCounters, trusted: trustUiTreeCache, cachedWindows: windowStructureCache.size };
+  }
+
+  async function windowStructure(pid: number, windowId: string, options: { maxElements?: number; maxDepth?: number } = {}): Promise<NativeWindowStructure> {
+    assertWindows();
+    assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const maxElements = options.maxElements ?? 256;
+    const maxDepth = options.maxDepth ?? 32;
+    if (!Number.isSafeInteger(maxElements) || maxElements < 1 || maxElements > 4096
+      || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 64) {
+      throw new Error("Windows window structure bounds are invalid.");
+    }
+    const key = windowStructureCacheKey(pid, windowId, maxElements, maxDepth);
+    const cached = windowStructureCache.get(key);
+    const cacheFresh = cached !== undefined && now().getTime() - cached.fetchedAtMs < UI_TREE_CACHE_TTL_MS;
+
+    if (trustUiTreeCache && cacheFresh) {
+      uiTreeCacheCounters.hits += 1;
+      return cached!.structure;
+    }
+
+    const inflight = windowStructureInflight.get(key);
+    if (inflight) { uiTreeCacheCounters.coalesced += 1; return inflight; }
+
+    const fetchPromise = (async () => {
+      const structure = await fetchWindowStructureUncached(pid, windowId, maxElements, maxDepth);
+      if (cached) {
+        uiTreeCacheCounters.shadowCompared += 1;
+        if (fingerprintWindowStructure(cached.structure) !== fingerprintWindowStructure(structure)) uiTreeCacheCounters.shadowMismatches += 1;
+      } else {
+        uiTreeCacheCounters.misses += 1;
+      }
+      windowStructureCache.set(key, { structure, fetchedAtMs: now().getTime() });
+      return structure;
+    })();
+    windowStructureInflight.set(key, fetchPromise);
+    try { return await fetchPromise; } finally { windowStructureInflight.delete(key); }
+  }
+
+  async function fetchWindowStructureUncached(pid: number, windowId: string, maxElements: number, maxDepth: number): Promise<NativeWindowStructure> {
+    const snapshotId = randomUUID();
+    const inspected = await invokeNative({ op: "inspect", pid, windowId });
+    if (!inspected.ok) throw new Error(inspected.error ?? "Windows could not inspect the target window.");
+    const result = await invokeNative({ op: "inspectWindowStructure", pid, windowId, maxElements, maxDepth, snapshotId });
+    if (!result.ok) throw new Error(result.error ?? "Windows UI Automation could not inspect the target window.");
+    const structure = result.windowStructure;
+    if (!structure || structure.scope !== "window" || structure.windowId !== windowId
+      || !["complete", "partial"].includes(structure.status) || !Array.isArray(structure.elements)
+      || structure.elements.length > maxElements || typeof structure.truncated !== "boolean") {
+      throw new Error("Windows returned an invalid window UI Automation structure.");
+    }
+    for (const element of structure.elements) {
+      if (!element || typeof element.ref !== "string" || !/^window-ui-element-[A-Za-z0-9-]+$/.test(element.ref)
+        || typeof element.label !== "string" || element.label.length > 160
+        || typeof element.role !== "string" || element.role.length > 80
+        || typeof element.className !== "string" || element.className.length > 120
+        || typeof element.automationId !== "string" || element.automationId.length > 256
+        || (element.runtimeId != null && (!Array.isArray(element.runtimeId) || element.runtimeId.length < 1 || element.runtimeId.length > 128
+          || element.runtimeId.some((part) => !Number.isInteger(part) || part < -2147483648 || part > 2147483647)))
+        || !Array.isArray(element.path) || element.path.length > maxDepth
+        || element.path.some((part) => !Number.isSafeInteger(part) || part < 0)
+        || !Number.isSafeInteger(element.depth) || element.depth < 0 || element.depth > maxDepth
+        || typeof element.enabled !== "boolean" || typeof element.focused !== "boolean"
+        || !element.rect || ![element.rect.x, element.rect.y, element.rect.width, element.rect.height].every(Number.isFinite)
+        || element.rect.width <= 0 || element.rect.height <= 0
+        || (element.actions !== undefined && Object.values(element.actions).some((action) => typeof action !== "boolean"))) {
+        throw new Error("Windows returned an invalid window UI Automation element.");
+      }
+      if (element.scroll !== undefined && element.scroll !== null && ["horizontal", "vertical"].some((axis) => {
+        const value = element.scroll?.[axis as "horizontal" | "vertical"];
+        return !value || typeof value.scrollable !== "boolean"
+          || (value.percent !== null && (!Number.isFinite(value.percent) || value.percent < 0 || value.percent > 100))
+          || (value.viewSize !== null && (!Number.isFinite(value.viewSize) || value.viewSize < 0 || value.viewSize > 100));
+      })) throw new Error("Windows returned invalid UI Automation scroll state.");
+    }
+    return structure;
+  }
+
+  async function invokeWindowElement(pid: number, windowId: string, input: {
+    path: number[]; action: "activate" | "setValue" | "readValue" | "scroll"; expectedRole: string; expectedLabel: string;
+    expectedClassName: string; expectedAutomationId: string; expectedRuntimeId?: number[]; text?: string; direction?: "up" | "down" | "left" | "right";
+    granularity?: "small" | "large"; maxChars?: number; includeCaret?: boolean;
+  }): Promise<{ dispatched: boolean; mechanism?: string; reason?: string; valueConfirmed?: boolean;
+    read?: boolean; value?: string; truncated?: boolean; redacted?: boolean;
+    caret?: { x: number; y: number };
+    scrollBefore?: NativeScrollPosition; scrollAfter?: NativeScrollPosition; moved?: boolean | null }> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    if (!Array.isArray(input.path) || input.path.length > 64 || input.path.some((part) => !Number.isSafeInteger(part) || part < 0)
+      || !input.expectedRole || (!input.expectedLabel && !input.expectedAutomationId && !input.expectedRuntimeId)
+      || (input.expectedRuntimeId !== undefined && (!Array.isArray(input.expectedRuntimeId) || input.expectedRuntimeId.length < 1 || input.expectedRuntimeId.length > 128
+        || input.expectedRuntimeId.some((part) => !Number.isInteger(part) || part < -2147483648 || part > 2147483647)))
+      || (input.action === "setValue" && typeof input.text !== "string")
+      || (input.action === "readValue" && input.maxChars !== undefined
+        && (!Number.isSafeInteger(input.maxChars) || input.maxChars < 1 || input.maxChars > 4096))
+      || (input.action === "scroll" && (!input.direction || !["up", "down", "left", "right"].includes(input.direction)
+        || (input.granularity !== undefined && input.granularity !== "small" && input.granularity !== "large")))) {
+      throw new Error("The native semantic action identity is invalid.");
+    }
+    let inspected: NativeWindowStageInfo;
+    try { inspected = await inspectWindow(String(pid), windowId); }
+    catch (error) {
+      throw new DesktopInputNotDispatchedError(
+        `The native semantic target could not be revalidated; no input was sent. ${error instanceof Error ? error.message : String(error)}`,
+        "target-identity",
+      );
+    }
+    if (inspected.pid !== pid || inspected.windowId !== windowId) {
+      throw new DesktopInputNotDispatchedError("The native semantic target changed before dispatch; no semantic input was sent.", "target-identity");
+    }
+    let result: NativeStageResponse;
+    try {
+      result = await invokeNative({ op: "invokeWindowElement", pid, windowId, ...input });
+    } catch (error) {
+      if (error instanceof DesktopInputNotDispatchedError || error instanceof DesktopInputOutcomeUnknownError) throw error;
+      throw new DesktopInputOutcomeUnknownError(
+        `The native semantic action transport failed without proving whether Windows dispatched it. Inspect the target before retrying. ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!result.ok) throwNativeInputFailure(result, "Windows could not dispatch the native semantic action.");
+    const semanticAction = result.semanticAction;
+    if (!semanticAction || typeof semanticAction.dispatched !== "boolean"
+      || (semanticAction.mechanism !== undefined && typeof semanticAction.mechanism !== "string")
+      || (semanticAction.reason !== undefined && typeof semanticAction.reason !== "string")
+      || (semanticAction.valueConfirmed !== undefined && typeof semanticAction.valueConfirmed !== "boolean")
+      || (semanticAction.read !== undefined && typeof semanticAction.read !== "boolean")
+      // Rust limits Unicode scalar values; JavaScript counts UTF-16 code units,
+      // so supplementary characters can occupy two units each.
+      || (semanticAction.value !== undefined && (typeof semanticAction.value !== "string" || semanticAction.value.length > (input.maxChars ?? 512) * 2))
+      || (semanticAction.truncated !== undefined && typeof semanticAction.truncated !== "boolean")
+      || (semanticAction.redacted !== undefined && typeof semanticAction.redacted !== "boolean")
+      || (semanticAction.moved !== undefined && semanticAction.moved !== null && typeof semanticAction.moved !== "boolean")
+      || ([semanticAction.scrollBefore, semanticAction.scrollAfter].some((position) => position !== undefined
+        && (!position || [position.horizontal, position.vertical].some((axis) => axis !== null && (!Number.isFinite(axis) || axis < 0 || axis > 100)))))) {
+      throw new DesktopInputOutcomeUnknownError("Windows returned an invalid native semantic action result; inspect the target before retrying.");
+    }
+    const evidence = semanticAction.nativeDispatch;
+    if (evidence && Number.isSafeInteger(evidence.helperPid) && evidence.helperPid > 0
+      && /^\d{1,24}$/.test(evidence.startedUnixNanos) && /^\d{1,24}$/.test(evidence.endedUnixNanos)
+      && BigInt(evidence.endedUnixNanos) >= BigInt(evidence.startedUnixNanos)) {
+      try { deps.onNativeDispatch?.({ ...evidence, ...(streamContext.getStore() ? { streamId: streamContext.getStore() } : {}) }); }
+      catch { /* telemetry never reclassifies a dispatched input */ }
+    }
+    // Native timing stays in the owner diagnostic channel, not provider tool context.
+    const { nativeDispatch: _nativeDispatch, ...resultWithoutNativeTiming } = semanticAction;
+    // "readValue" cannot change the window's UI; every other action (activate/setValue/scroll)
+    // plausibly can, whether or not it reports success -- invalidate either way.
+    if (input.action !== "readValue") invalidateWindowStructureCache(pid, windowId);
+    return resultWithoutNativeTiming;
+  }
+
+  async function captureWindow(pid: number, windowId: string): Promise<{ dataUrl: string; width: number; height: number; originX: number; originY: number }> {
+    assertWindows();
+    assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const inspected = await invokeNative({ op: "inspect", pid, windowId });
+    if (!inspected.ok) throw new Error(inspected.error ?? "Windows could not inspect the target window.");
+    const result = await invokeNative({ op: "captureWindow", pid, windowId });
+    const capture = result.capture;
+    if (!result.ok || !capture || typeof capture.dataUrl !== "string" || !/^data:image\/png;base64,/.test(capture.dataUrl)
+      || !Number.isSafeInteger(capture.width) || capture.width < 1 || !Number.isSafeInteger(capture.height) || capture.height < 1
+      || typeof capture.originX !== "number" || !Number.isSafeInteger(capture.originX)
+      || typeof capture.originY !== "number" || !Number.isSafeInteger(capture.originY)) {
+      throw new Error(result.error ?? "Windows could not capture the target window.");
+    }
+    return { dataUrl: capture.dataUrl, width: capture.width, height: capture.height,
+      originX: capture.originX, originY: capture.originY };
+  }
+
+  /** Capture the owner's visible virtual screen directly with Win32 GDI. */
+  async function captureDesktop(): Promise<{ dataUrl: string; width: number; height: number; originX?: number; originY?: number }> {
+    assertWindows();
+    assertOwner();
+    const result = await invokeNative({ op: "captureDesktop" });
+    const capture = result.capture;
+    if (!result.ok || !capture || typeof capture.dataUrl !== "string" || !/^data:image\/png;base64,/.test(capture.dataUrl)
+      || !Number.isSafeInteger(capture.width) || capture.width < 1 || !Number.isSafeInteger(capture.height) || capture.height < 1) {
+      throw new Error(result.error ?? "Windows could not capture the owner desktop.");
+    }
+    return capture;
+  }
+
+  async function registerWindow(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string, shared = false): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
@@ -467,30 +1019,34 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
       const savedCoordinationKey = coordinationKey ?? existing?.coordinationKey;
-      const claimed = registry.stages.find((stage) => stage.name !== name
-        && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
-        && !(savedCoordinationKey && stage.coordinationKey === savedCoordinationKey));
-      if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
-      if (existing && existing.desktopId !== info.desktopId) {
-        throw new Error(`Stage “${name}” already names a different desktop. Forget it first, then register the new desktop.`);
+      // Same staleness tolerance as assertWindowUnclaimed(): a dead preview stage's
+      // leftover anchor must not permanently lock its window away from every later task.
+      if (shared && (!deps.sharedWindowFence || !existing?.agentAssignment?.taskId || !taskActive(existing.agentAssignment.taskId))) {
+        throw new Error("A shared window binding requires an active authenticated task and the owner broker's mutation fence.");
       }
+      const liveClaimants = withoutStaleOwnerPreviewStages(registry.stages, processAlive, taskActive, now().getTime()).filter((stage) => stage.name !== name
+        && stage.anchor?.pid === info.pid && stage.anchor.windowId === info.windowId
+        && !(stage.agentAssignment?.taskId && !taskActive(stage.agentAssignment.taskId)));
+      if (shared && liveClaimants.some((stage) => !stage.fencedBinding)) throw new Error("An unfenced stage already owns this window; re-observe it through the owner broker before sharing it.");
+      const claimed = shared ? undefined : liveClaimants.find((stage) => !(deps.sharedWindowFence && stage.fencedBinding
+        && savedCoordinationKey && stage.coordinationKey === savedCoordinationKey));
+      if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
       const savedAppId = appId ?? existing?.appId;
       const record: WindowsStageRecord = {
         name,
         ...(savedAppId !== undefined ? { appId: savedAppId } : {}),
         ...(savedCoordinationKey !== undefined ? { coordinationKey: savedCoordinationKey } : {}),
-        desktopId: info.desktopId,
+        ...(shared ? { sharedBinding: true as const } : {}),
+        ...(deps.sharedWindowFence ? { fencedBinding: true as const } : {}),
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
-        returnToDesktopId: existing?.returnToDesktopId ?? null,
-        anchor: { pid: info.pid, windowId: info.windowId },
-        roomWindowId: existing?.anchor?.pid === info.pid && existing.anchor.windowId === info.windowId
+        anchor: { pid: info.pid, windowId: info.windowId, ...(info.processGeneration ? { processGeneration: info.processGeneration } : {}) },
+        roomWindowId: existing?.anchor?.pid === info.pid && existing.anchor.windowId === info.windowId && existing.anchor.processGeneration === info.processGeneration
           ? existing.roomWindowId
           : randomUUID(),
         ...(existing?.agentAssignment ? { agentAssignment: existing.agentAssignment } : {}),
         registeredAt: existing?.registeredAt ?? now().toISOString(),
       };
-      const kept = existing ? registry.stages : roomFor(registry);
-      if (!existing && kept.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+      const kept = existing ? registry.stages : compactRegistryStages(registry);
       writeRegistryWhileLocked(root, {
         version: STAGE_REGISTRY_VERSION,
         stages: existing
@@ -502,81 +1058,37 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       release();
     }
   }
+  async function register(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<WindowsStageRecord> {
+    return registerWindow(nameInput, pidInput, windowIdInput, appId, coordinationKey);
+  }
+  /** Explicit read/target sharing only. Input still goes through the service's target fence. */
+  async function attachSharedWindow(name: string, pid: string, windowId: string, appId?: string) {
+    const stage = await registerWindow(name, pid, windowId, appId, undefined, true);
+    return { stage, window: { ...stage.anchor! } };
+  }
 
   async function create(nameInput: string): Promise<WindowsStageRecord> {
-    assertWindows();
-    assertOwner();
-    const name = normalizedName(nameInput);
-    const release = acquireRegistryLock(root);
-    try {
-      const registry = readRegistry(root);
-      if (registry.stages.some((stage) => stage.name === name)) throw new Error(`A local stage named “${name}” already exists.`);
-      registry.stages = roomFor(registry);
-      if (registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
-
-      // Prepare durable recovery evidence before crossing the native side-effect
-      // boundary. A failed registry replacement must not erase the created ID.
-      const recoveryRoot = join(root, "desktop-creation-recovery");
-      mkdirSync(recoveryRoot, { recursive: true });
-      const recoveryFile = join(recoveryRoot, `${randomUUID()}.json`);
-      writeFileSync(recoveryFile, JSON.stringify({ name, state: "creation-requested", requestedAt: now().toISOString() }), { flag: "wx", mode: 0o600 });
-      const result = await invokeNative({ op: "createDesktop" });
-      writeFileSync(recoveryFile, JSON.stringify({ name, state: result.ok ? "created-unregistered" : "failed", desktop: result.desktop,
-        error: result.error, recordedAt: now().toISOString() }), { mode: 0o600 });
-      if (!result.ok) throw new Error(result.error ?? "Windows could not create a virtual desktop.");
-      const desktop = normalizeDesktopInfo(result.desktop);
-      if (desktop.isCurrent) throw new Error("Windows created the desktop but activated it unexpectedly; M9R did not register the stage.");
-      if (registry.stages.some((stage) => stage.desktopId === desktop.desktopId)) throw new Error("Windows returned a desktop already registered under another stage name; the new stage was not registered.");
-      if (!desktop.returnDesktopId) throw new Error("Windows created a stage but did not return the desktop that was active beforehand; M9R did not save the stage.");
-
-      const record: WindowsStageRecord = {
-        name,
-        desktopId: desktop.desktopId,
-        roomDesktopId: randomUUID(),
-        returnToDesktopId: desktop.returnDesktopId.toLowerCase(),
-        anchor: null,
-        roomWindowId: null,
-        registeredAt: now().toISOString(),
-      };
-      try {
-        writeRegistryWhileLocked(root, { version: STAGE_REGISTRY_VERSION, stages: [...registry.stages, record] });
-      } catch (error) {
-        throw new Error(`Windows created desktop ${desktop.desktopId}, but M9R could not save its local stage mapping. The desktop was left intact; recovery evidence: ${recoveryFile}. ${error instanceof Error ? error.message : ""}`.trim());
-      }
-      try { unlinkSync(recoveryFile); } catch { /* a retained journal is reconcilable against the saved registry; do not misreport a mapped desktop as failed */ }
-      return record;
-    } finally {
-      release();
-    }
+    return ensureStage(nameInput);
   }
 
   /**
-   * Rebinds an owner-preview mapping to the desktop Windows is showing.
-   * Any old HWND association is detached as registry metadata only; the user
-   * window itself is never closed, moved, or activated.
+   * Creates or refreshes the local M9R stage mapping. It does not create or
+   * switch an operating-system desktop.
    */
-  async function adoptCurrentDesktop(nameInput: string): Promise<WindowsStageRecord> {
+  async function ensureStage(nameInput: string): Promise<WindowsStageRecord> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
-    const result = await invokeNative({ op: "currentDesktop" });
-    if (!result.ok) throw new Error(result.error ?? "Windows could not identify the active desktop.");
-    const desktop = normalizeDesktopInfo(result.desktop);
-    if (!desktop.isCurrent) throw new Error("Windows did not confirm that the reported desktop is active.");
-
     const release = acquireRegistryLock(root);
     try {
       const registry = readRegistry(root);
       const existing = registry.stages.find((stage) => stage.name === name);
-      if (!existing) registry.stages = roomFor(registry);
-      if (!existing && registry.stages.length >= MAX_STAGES) throw new Error(`This machine already has ${MAX_STAGES} registered stages.`);
+      if (!existing) registry.stages = compactRegistryStages(registry);
       const record: WindowsStageRecord = {
         name,
         ...(existing?.appId !== undefined ? { appId: existing.appId } : {}),
         ...(existing?.coordinationKey !== undefined ? { coordinationKey: existing.coordinationKey } : {}),
-        desktopId: desktop.desktopId,
         roomDesktopId: existing?.roomDesktopId ?? randomUUID(),
-        returnToDesktopId: null,
         anchor: null,
         roomWindowId: null,
         ...(existing?.agentAssignment ? { agentAssignment: existing.agentAssignment } : {}),
@@ -594,22 +1106,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     }
   }
 
-  function normalizeDesktopInfo(value: unknown): NativeDesktopStageInfo {
-    if (!value || typeof value !== "object") throw new Error("The native Windows stage helper returned no desktop result.");
-    const item = value as Partial<NativeDesktopStageInfo>;
-    if (!isNonzeroDesktopId(item.desktopId) || typeof item.isCurrent !== "boolean"
-        || (item.returnDesktopId !== undefined && item.returnDesktopId !== null
-          && !isNonzeroDesktopId(item.returnDesktopId))) {
-      throw new Error("The native Windows stage helper returned an invalid desktop result.");
-    }
-    return {
-      desktopId: item.desktopId.toLowerCase(),
-      isCurrent: item.isCurrent,
-      ...(item.returnDesktopId ? { returnDesktopId: item.returnDesktopId.toLowerCase() } : {}),
-    };
-  }
-
-  async function inspectStage(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo; anchor?: NativeWindowStageInfo }> {
+  async function inspectStage(nameInput: string): Promise<{ stage: WindowsStageRecord; anchor?: NativeWindowStageInfo }> {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
@@ -618,69 +1115,30 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (stage.anchor) {
       const result = await invokeNative({ op: "inspect", pid: stage.anchor.pid, windowId: stage.anchor.windowId });
       if (!result.ok) throw new Error(`Stage “${name}” anchor is unavailable: ${result.error ?? "unknown window error"}. The desktop mapping was kept.`);
-      const anchor = normalizeWindowInfo(result.window);
-      if (anchor.desktopId !== stage.desktopId) throw new Error(`Stage “${name}” anchor moved to another desktop. The saved mapping was kept; re-register it only after owner review.`);
-      return { stage, desktop: { desktopId: anchor.desktopId, isCurrent: anchor.onCurrentDesktop }, anchor };
+      const anchor = verifiedWindowInfo(result.window);
+      if (!stage.anchor.processGeneration && anchor.processGeneration
+        && anchor.pid === stage.anchor.pid && anchor.windowId === stage.anchor.windowId) {
+        // A window saved before generations were recorded: the live window still has the same process and
+        // handle, so bind its generation now. Refusing here stranded every stage saved by an older build.
+        stage.anchor = { ...stage.anchor, processGeneration: anchor.processGeneration };
+        const release = acquireRegistryLock(root);
+        try {
+          const registry = readRegistry(root);
+          writeRegistryWhileLocked(root, { ...registry,
+            stages: registry.stages.map((item) => item.name === name && item.anchor?.pid === anchor.pid && item.anchor.windowId === anchor.windowId
+              ? { ...item, anchor: { ...item.anchor, processGeneration: anchor.processGeneration! } } : item) });
+        } finally { release(); }
+      }
+      if (!deps.invokeNative && !stage.anchor.processGeneration) {
+        throw new Error("This saved window has no process-generation binding. Explicitly select or bind the intended current window before input; M9R will not silently trust a legacy PID/HWND.");
+      }
+      if (anchor.pid !== stage.anchor.pid || anchor.windowId !== stage.anchor.windowId
+        || (stage.anchor.processGeneration !== undefined && anchor.processGeneration !== stage.anchor.processGeneration)) {
+        throw new Error("The selected window process generation changed; refresh the exact target before sending input.");
+      }
+      return { stage, anchor };
     }
-    // Owner-preview is a live view of the desktop currently shown to the user.
-    // Its desktop identity is rechecked through the public foreground-window
-    // query; querying the private shell desktop manager here made ordinary
-    // preview actions depend on an unrelated, version-sensitive COM service.
-    if (name.startsWith(OWNER_PREVIEW_STAGE_PREFIX) && stage.agentAssignment) {
-      const current = await invokeNative({ op: "currentDesktop" });
-      if (!current.ok) throw new Error(`The owner's current desktop is unavailable: ${current.error ?? "unknown desktop error"}.`);
-      const desktop = normalizeDesktopInfo(current.desktop);
-      return { stage, desktop: { desktopId: stage.desktopId, isCurrent: desktop.desktopId === stage.desktopId } };
-    }
-    const result = await invokeNative({ op: "inspectDesktop", desktopId: stage.desktopId });
-    if (!result.ok) throw new Error(`Stage “${name}” is unavailable: ${result.error ?? "unknown desktop error"}. The local mapping was kept.`);
-    const desktop = normalizeDesktopInfo(result.desktop);
-    if (desktop.desktopId !== stage.desktopId) throw new Error(`Stage “${name}” resolved to a different desktop. The saved mapping was kept.`);
-    return { stage, desktop };
-  }
-
-  async function activate(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo }> {
-    assertWindows();
-    assertOwner();
-    const name = normalizedName(nameInput);
-    const stage = readRegistry(root).stages.find((item) => item.name === name);
-    if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
-    const result = await invokeNative({ op: "activateDesktop", desktopId: stage.desktopId });
-    if (!result.ok) throw new Error(result.error ?? "Windows could not activate the stage.");
-    const desktop = normalizeDesktopInfo(result.desktop);
-    if (desktop.desktopId !== stage.desktopId || !desktop.isCurrent) throw new Error("Windows did not confirm that the requested stage is active.");
-    return { stage, desktop };
-  }
-
-  async function returnToOwnerDesktop(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo }> {
-    assertWindows();
-    assertOwner();
-    const name = normalizedName(nameInput);
-    const stage = readRegistry(root).stages.find((item) => item.name === name);
-    if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
-    if (!stage.returnToDesktopId) throw new Error(`Stage “${name}” was adopted from an existing desktop and has no saved return desktop.`);
-    const result = await invokeNative({ op: "activateDesktop", desktopId: stage.returnToDesktopId });
-    if (!result.ok) throw new Error(result.error ?? "Windows could not return to the desktop that was active before stage creation.");
-    const desktop = normalizeDesktopInfo(result.desktop);
-    if (desktop.desktopId !== stage.returnToDesktopId || !desktop.isCurrent) {
-      throw new Error("Windows did not confirm that the original desktop is active.");
-    }
-    return { stage, desktop };
-  }
-
-  async function moveWindow(nameInput: string, pidInput: string, windowIdInput: string): Promise<{ fromDesktopId: string; window: NativeWindowStageInfo; stage: WindowsStageRecord }> {
-    assertWindows();
-    assertOwner();
-    const name = normalizedName(nameInput);
-    const stage = readRegistry(root).stages.find((item) => item.name === name);
-    if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
-    const current = await inspectWindow(pidInput, windowIdInput);
-    if (current.desktopId === stage.desktopId) return { fromDesktopId: current.desktopId, window: current, stage };
-    const result = await invokeNative({ op: "move", pid: current.pid, windowId: current.windowId, desktopId: stage.desktopId });
-    if (!result.ok) throw new Error(result.error ?? "Windows could not move the window.");
-    const moved = normalizeWindowInfo(result.window);
-    if (moved.desktopId !== stage.desktopId) throw new Error("Windows did not confirm that the window reached the registered stage.");
-    return { fromDesktopId: current.desktopId, window: moved, stage };
+    return { stage };
   }
 
   async function attachWindow(nameInput: string, pidInput: string, windowIdInput: string, appId?: string, coordinationKey?: string): Promise<{ stage: WindowsStageRecord; window: NativeWindowStageInfo }> {
@@ -691,8 +1149,9 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!stage) throw new Error(`No stage named “${name}” is registered on this machine.`);
     const sharedKey = coordinationKey ?? stage.coordinationKey;
     assertWindowUnclaimed(name, Number(pidInput), windowIdInput, sharedKey);
-    const current = await inspectWindow(pidInput, windowIdInput);
-    if (current.desktopId !== stage.desktopId) await moveWindow(name, pidInput, windowIdInput);
+    // registerWindow performs the exact PID/HWND inspection immediately
+    // before persisting the binding. A separate inspection here duplicated
+    // that native round trip without strengthening the post-write check below.
     const registered = await register(name, pidInput, windowIdInput, appId, sharedKey);
     const inspected = await inspectStage(name);
     if (!inspected.anchor || inspected.anchor.pid !== registered.anchor?.pid || inspected.anchor.windowId !== registered.anchor?.windowId) {
@@ -701,7 +1160,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return { stage: registered, window: inspected.anchor };
   }
 
-  async function roomKeys(nameInput: string): Promise<{ stage: WindowsStageRecord; desktop: NativeDesktopStageInfo; anchor?: NativeWindowStageInfo }> {
+  async function roomKeys(nameInput: string): Promise<{ stage: WindowsStageRecord; anchor?: NativeWindowStageInfo }> {
     const inspected = await inspectStage(nameInput);
     const name = inspected.stage.name;
     const release = acquireRegistryLock(root);
@@ -714,8 +1173,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
       }
       const registry = readRegistry(root);
       const stage = registry.stages.find((item) => item.name === name);
-      if (!stage || stage.desktopId !== inspected.stage.desktopId
-        || stage.anchor?.pid !== inspected.stage.anchor?.pid
+      if (!stage || stage.anchor?.pid !== inspected.stage.anchor?.pid
         || stage.anchor?.windowId !== inspected.stage.anchor?.windowId) {
         throw new Error(`Stage “${name}” changed while its room identifiers were being prepared. Refresh and retry.`);
       }
@@ -732,11 +1190,12 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return readRegistry(root).stages;
   }
 
-  function assignAgent(nameInput: string, assignment: { handle: string; sessionTag: string } | null): WindowsStageRecord {
+  function assignAgent(nameInput: string, assignment: { handle: string; sessionTag: string; taskId?: string } | null): WindowsStageRecord {
     assertWindows();
     assertOwner();
     const name = normalizedName(nameInput);
-    if (assignment && (!/^[a-z0-9_-]{1,40}$/.test(assignment.handle) || !/^[a-f0-9]{8}$/.test(assignment.sessionTag))) {
+    if (assignment && (!/^[a-z0-9_-]{1,40}$/.test(assignment.handle) || !/^[a-f0-9]{8}$/.test(assignment.sessionTag)
+      || (assignment.taskId !== undefined && (assignment.taskId.length < 1 || assignment.taskId.length > 100)))) {
       throw new Error("Invalid local agent-to-stage assignment.");
     }
     const release = acquireRegistryLock(root);
@@ -773,16 +1232,6 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     }
   }
 
-  async function controlInput(name: string, kind: "click" | "type" | "scroll", input: { x: number; y: number; imageWidth: number; imageHeight: number; text?: string; direction?: "up" | "down" }) {
-    const inspected = await inspectStage(name);
-    if (!inspected.anchor) throw new Error("Stage has no registered app window.");
-    const result = await invokeNative({ op: "input", kind, pid: inspected.anchor.pid, windowId: inspected.anchor.windowId,
-      desktopId: inspected.stage.desktopId, ...input });
-    if (!result.ok) throw new Error(result.error ?? "Native child-control input failed.");
-    if (!result.input?.childWindowId) throw new Error("Native input returned no exact control identity.");
-    return result.input;
-  }
-
   async function listOwnedWindows(name: string, pid: number) {
     await inspectStage(name);
     return listOwnedWindowsForProcess(pid);
@@ -800,31 +1249,87 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffff_ffff) throw new Error("Invalid owned process id.");
     const result = await invokeNative({ op: "listOwnedWindows", pid });
     if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Owned-window discovery failed.");
-    if (result.windows.length > 16 || result.windows.some((window) => window.pid !== pid
-      || typeof window.windowId !== "string" || !WINDOW_ID_RE.test(window.windowId)
-      || !/[^0]/.test(window.windowId.replace(/^0[xX]/, ""))
-      || typeof window.title !== "string" || !Number.isFinite(window.width) || !Number.isFinite(window.height)
-      || window.width < 80 || window.height < 60)) throw new Error("Owned-window discovery returned an invalid identity.");
-    return result.windows;
+    // Window enumeration can include helper, hidden, or otherwise non-targetable
+    // HWNDs alongside the real app window. Rejecting the entire response because
+    // one sibling is malformed makes a valid app launch fail before exact app
+    // matching gets a chance to select its window. Filter candidates here; the
+    // caller still selects by exact process/app identity and validates the chosen
+    // PID/HWND again before binding or dispatching input.
+    return result.windows.filter((window) => Number.isSafeInteger(window?.pid) && window.pid === pid
+      && typeof window.windowId === "string" && WINDOW_ID_RE.test(window.windowId)
+      && /[^0]/.test(window.windowId.replace(/^0[xX]/, ""))
+      && typeof window.title === "string" && Number.isFinite(window.width) && Number.isFinite(window.height)
+      && window.width >= 80 && window.height >= 60
+      && (window.zOrder === undefined || (Number.isSafeInteger(window.zOrder) && window.zOrder >= 0))
+      && (window.processPath == null || (typeof window.processPath === "string" && window.processPath.length > 0 && window.processPath.length <= 32_768))
+      && (window.appUserModelId == null || (typeof window.appUserModelId === "string" && /^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(window.appUserModelId))));
+  }
+
+  async function listVisibleWindows() {
+    assertWindows();
+    assertOwner();
+    const result = await invokeNative({ op: "listVisibleWindows" });
+    if (!result.ok || !Array.isArray(result.windows)) throw new Error(result.error ?? "Windows could not enumerate visible application windows.");
+    return result.windows.filter((window): window is { pid: number; windowId: string; title: string; width: number; height: number; x?: number; y?: number; zOrder?: number; className?: string; processName?: string | null; processPath?: string | null; appUserModelId?: string | null } =>
+      Number.isSafeInteger(window.pid) && window.pid > 0 && typeof window.windowId === "string" && WINDOW_ID_RE.test(window.windowId)
+      && typeof window.title === "string" && Number.isSafeInteger(window.width) && window.width > 0
+      && Number.isSafeInteger(window.height) && window.height > 0
+      && (window.zOrder === undefined || (Number.isSafeInteger(window.zOrder) && window.zOrder >= 0))
+      && (window.processPath == null || (typeof window.processPath === "string" && window.processPath.length > 0 && window.processPath.length <= 32_768))
+      && (window.appUserModelId == null || (typeof window.appUserModelId === "string" && /^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$/.test(window.appUserModelId))));
+  }
+
+  async function warm(): Promise<void> {
+    assertWindows();
+    assertOwner();
+    const result = await invokeNative({ op: "ping" });
+    if (!result.ok) throw new Error(result.error ?? "The native Windows stage helper failed its readiness check.");
+  }
+
+  /** The only automatic replacement resolver. A PID or title alone never
+   * authorizes a rebind; creation time must match and exactly one HWND exists. */
+  async function resolveWindowReplacement(nameInput: string) {
+    assertWindows();
+    assertOwner();
+    const stage = readRegistry(root).stages.find((item) => item.name === normalizedName(nameInput));
+    const anchor = stage?.anchor;
+    if (!anchor?.processGeneration) return undefined;
+    const process = await invokeNative({ op: "processGeneration", pid: anchor.pid });
+    if (!process.ok || process.processGeneration !== anchor.processGeneration) return undefined;
+    const candidates = await listOwnedWindowsForProcess(anchor.pid);
+    if (candidates.length !== 1 || candidates[0]!.windowId === anchor.windowId) return undefined;
+    const replacement = await inspectWindow(String(anchor.pid), candidates[0]!.windowId);
+    if (replacement.processGeneration !== anchor.processGeneration) return undefined;
+    return replacement;
   }
 
   async function presentOwnerWindow(name: string, pid: number, windowId: string, coordinationKey?: string) {
     const existing = readRegistry(root).stages.find((stage) => stage.name === normalizedName(name));
     assertWindowUnclaimed(name, pid, windowId, coordinationKey ?? existing?.coordinationKey);
-    const inspected = await inspectStage(name);
-    if (!inspected.desktop.isCurrent) throw new Error("The owner's desktop changed before application presentation.");
-    const result = await invokeNative({ op: "presentOwnerWindow", pid, windowId, desktopId: inspected.stage.desktopId });
-    if (!result.ok || result.window?.pid !== pid || result.window.windowId !== windowId
-      || result.window.desktopId !== inspected.stage.desktopId || result.window.onCurrentDesktop !== true) {
-      throw new Error(result.error ?? "The requested application window was not presented on the owner's desktop.");
+    const result = await invokeNative({ op: "presentOwnerWindow", pid, windowId });
+    if (!result.ok || result.window?.pid !== pid || result.window.windowId !== windowId) {
+      throw new Error(result.error ?? "The requested application window was not presented.");
     }
-    return result.window;
+    return verifiedWindowInfo(result.window);
   }
 
   function assertWindowUnclaimed(name: string, pid: number, windowId: string, coordinationKey?: string) {
-    const claimed = readRegistry(root).stages.find((stage) => stage.name !== name
+    // A claim from a stage whose process has already exited is leftover registry
+    // state, not a live hold -- the same staleness rule register() already uses to
+    // prune dead preview stages. Checking it here too, not only at registration
+    // time, stops a finished or crashed earlier session from permanently locking
+    // a window out of every later task that happens to reuse the same app.
+    const claimants = withoutStaleOwnerPreviewStages(readRegistry(root).stages, processAlive, taskActive, now().getTime());
+    const claimed = claimants.find((stage) => stage.name !== name
       && stage.anchor?.pid === pid && stage.anchor.windowId === windowId
-      && !(coordinationKey && stage.coordinationKey === coordinationKey));
+      && !(deps.sharedWindowFence && stage.fencedBinding && coordinationKey && stage.coordinationKey === coordinationKey)
+      // A window host like explorer.exe or chrome.exe outlives any one task, so the
+      // process never exits between tasks and the staleness check above never fires.
+      // The real signal for "is this still a live hold" is whether the claimant's own
+      // most recent task is still unfinished -- once it finished, the claim is stale
+      // bookkeeping the same way a dead process's claim is, and must not block a
+      // different, later task (even from a different session) from using the window.
+      && !(stage.agentAssignment?.taskId && !taskActive(stage.agentAssignment.taskId)));
     if (claimed) throw new Error(`The requested window is already claimed by stage “${claimed.name}”; release or coordinate that ownership first.`);
   }
 
@@ -832,7 +1337,7 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     assertWindows(); assertOwner();
     parsePid(String(pid)); parseWindowId(windowId);
     const result = await invokeNative({ op: "windowStatus", pid, windowId });
-    if (!result.ok || !["closed", "moved", "minimized", "occluded", "hidden", "visible"].includes(result.windowState ?? "")) {
+    if (!result.ok || !["closed", "minimized", "occluded", "hidden", "visible"].includes(result.windowState ?? "")) {
       throw new Error(result.error ?? "Window lifecycle state could not be verified.");
     }
     return result.windowState!;
@@ -852,20 +1357,62 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return current;
   }
 
-  async function currentForegroundWindow(): Promise<{ pid: number; windowId: string; desktopId: string; onCurrentDesktop: boolean; title: string; className: string; visible: boolean; minimized: boolean }> {
+  async function currentForegroundWindow(): Promise<{ pid: number; windowId: string; title: string; className: string; visible: boolean; minimized: boolean }> {
     assertWindows(); assertOwner();
     const result = await invokeNative({ op: "currentForegroundWindow" });
     const current = result.foregroundWindow;
     if (!result.ok || !current || !Number.isSafeInteger(current.pid) || current.pid < 1
       || typeof current.windowId !== "string" || !WINDOW_ID_RE.test(current.windowId) || !/[^0]/.test(current.windowId.replace(/^0[xX]/, ""))
-      || typeof current.desktopId !== "string" || !DESKTOP_ID_RE.test(current.desktopId)
-      || typeof current.onCurrentDesktop !== "boolean" || typeof current.title !== "string" || current.title.length > 512
+      || typeof current.title !== "string" || current.title.length > 512
       || typeof current.className !== "string" || current.className.length > 256
       || typeof current.visible !== "boolean" || typeof current.minimized !== "boolean") {
       throw new Error(result.error ?? "Windows returned an invalid foreground-window identity.");
     }
-    return { pid: current.pid, windowId: current.windowId, desktopId: current.desktopId.toLowerCase(), onCurrentDesktop: current.onCurrentDesktop,
+    return { pid: current.pid, windowId: current.windowId,
       title: current.title, className: current.className, visible: current.visible, minimized: current.minimized };
+  }
+
+  async function physicalInputEpoch(): Promise<number> {
+    assertWindows(); assertOwner();
+    const result = await invokeNative({ op: "physicalInputEpoch" });
+    if (!result.ok || !Number.isSafeInteger(result.physicalInputEpoch) || (result.physicalInputEpoch as number) < 0) {
+      throw new DesktopInputNotDispatchedError(result.error ?? "The Windows physical-input checkpoint could not be read; no foreground authority was reused.", "foreground-approval");
+    }
+    return result.physicalInputEpoch as number;
+  }
+
+  /** Starts the stream's low-level monitor only after the owner approves a foreground turn. */
+  async function captureOwnerInputEpoch(leaseKey: string): Promise<number> {
+    assertWindows(); assertOwner();
+    if (!leaseKey || leaseKey.length > 1_024) throw new Error("The owner-input monitor lease identity is invalid.");
+    const result = await invokeNative({ op: "captureForegroundContext" });
+    const owner = result.foregroundContext;
+    if (!result.ok || !owner || !Number.isSafeInteger(owner.pid) || owner.pid < 1 || !WINDOW_ID_RE.test(owner.windowId)
+      || !/^[a-f0-9]{16}$/i.test(owner.processGeneration) || !Number.isSafeInteger(owner.physicalInputEpoch)
+      || owner.physicalInputEpoch < 0 || !owner.visible || owner.minimized) {
+      throw new DesktopInputNotDispatchedError(result.error ?? "The owner input monitor could not capture a valid visible foreground context; no input was sent.", "foreground-approval");
+    }
+    const key = monitorHostKey(streamContext.getStore());
+    let leases = foregroundMonitorLeases.get(key);
+    if (!leases) { leases = new Set(); foregroundMonitorLeases.set(key, leases); }
+    leases.add(leaseKey);
+    return owner.physicalInputEpoch;
+  }
+
+  async function releaseOwnerInputMonitor(leaseKey: string, streamId?: string): Promise<void> {
+    if (!leaseKey || leaseKey.length > 1_024) throw new Error("The owner-input monitor lease identity is invalid.");
+    const release = async () => {
+      const key = monitorHostKey(streamContext.getStore());
+      const leases = foregroundMonitorLeases.get(key);
+      if (!leases?.delete(leaseKey)) return;
+      if (leases.size > 0) return;
+      foregroundMonitorLeases.delete(key);
+      if (!activeForegroundMonitorHosts.has(key)) return;
+      const result = await invokeNative({ op: "releaseForegroundContextMonitor" });
+      if (!result.ok) throw new DesktopInputNotDispatchedError(result.error ?? "Windows could not release the owner-input monitor.", "foreground-approval");
+    };
+    if (streamId) await withInputStream(streamId, release);
+    else await release();
   }
 
   async function systemControl(request: WindowsSystemControlRequest): Promise<Record<string, unknown>> {
@@ -900,33 +1447,252 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     return result.windows;
   }
 
+  /**
+   * Real, owned input dispatch -- SendInput at the native layer, not the
+   * vendored Cua Driver. `pid`/`windowId` identify the target; every op here
+   * requires the target to already be (or be brought to) the real OS
+   * foreground window, since that is the only window `SendInput` keyboard
+   * events can ever reach, regardless of what the caller intends to target.
+   */
+  async function windowRect(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "windowRect", pid, windowId });
+    const rect = result.rect as { x?: number; y?: number; width?: number; height?: number } | undefined;
+    if (!result.ok || !rect || ![rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === "number" && Number.isFinite(n)) || (rect.width as number) <= 0 || (rect.height as number) <= 0) {
+      throw new Error(result.error ?? "Windows returned no valid window bounds.");
+    }
+    return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
+  }
+
+  /**
+   * Reads the real usable work area of whichever monitor the window is
+   * currently on -- screen bounds with the taskbar (and any other app-bar)
+   * already subtracted, for that specific monitor in a multi-monitor setup,
+   * regardless of which edge the taskbar is docked to. A window snap/dock
+   * computed from this can never cover the taskbar the way one computed
+   * from full screen/monitor bounds, or from an approximate drag endpoint
+   * that misses the real edge pixel, can.
+   */
+  async function workArea(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "workArea", pid, windowId });
+    const rect = result.rect as { x?: number; y?: number; width?: number; height?: number } | undefined;
+    if (!result.ok || !rect || ![rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === "number" && Number.isFinite(n)) || (rect.width as number) <= 0 || (rect.height as number) <= 0) {
+      throw new Error(result.error ?? "Windows returned no valid monitor work area.");
+    }
+    return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
+  }
+
+  async function bringToForeground(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "bringToForeground", pid, windowId });
+    if (!result.ok) throw new Error(result.error ?? "Windows declined to raise the target window to the foreground.");
+  }
+
+  async function sendClick(pid: number, windowId: string, x: number, y: number,
+    options: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3 } = {}) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendClick", pid, windowId, x, y, ...options });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the click.");
+  }
+
+  /** Posts one click to the exact target HWND/child, without touching the OS pointer or foreground. */
+  async function postClickToWindow(pid: number, windowId: string, x: number, y: number,
+    options: { button?: "left" | "right" | "middle"; count?: 1 | 2 | 3 } = {}) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "postClickToWindow", pid, windowId, x, y, ...options });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the targeted click message.");
+    if (result.dispatchState !== "dispatched" || result.route !== "PostMessageW" || result.target !== "exact-window") {
+      throw new DesktopInputOutcomeUnknownError("The native helper did not prove that the targeted click was queued to the exact window.");
+    }
+    return { route: result.route, target: result.target, dispatched: true as const };
+  }
+
+  async function sendDrag(pid: number, windowId: string, fromX: number, fromY: number, toX: number, toY: number, durationMs?: number,
+    dragProgress?: (x: number, y: number) => void) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendDrag", pid, windowId, fromX, fromY, toX, toY, ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(dragProgress ? { dragProgress: true } : {}) }, dragProgress);
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the drag.");
+  }
+
+  async function sendScroll(pid: number, windowId: string, x: number, y: number, amount: number, axis: "horizontal" | "vertical" = "vertical") {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendScroll", pid, windowId, x, y, amount, axis });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the scroll.");
+  }
+
+  /** Posts a wheel message to the exact target HWND/child, without touching the OS pointer or foreground. */
+  async function postScrollToWindow(pid: number, windowId: string, x: number, y: number, amount: number,
+    axis: "horizontal" | "vertical" = "vertical") {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "postScrollToWindow", pid, windowId, x, y, amount, axis });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the targeted scroll message.");
+    if (result.dispatchState !== "dispatched" || result.route !== "PostMessageW" || result.target !== "exact-window") {
+      throw new DesktopInputOutcomeUnknownError("The native helper did not prove that the targeted scroll was queued to the exact window.");
+    }
+    return { route: result.route, target: result.target, dispatched: true as const };
+  }
+
+  async function sendKeyCombo(pid: number, windowId: string, keys: string[]) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendKeyCombo", pid, windowId, keys });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the key combination.");
+  }
+
+  async function sendText(pid: number, windowId: string, text: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendText", pid, windowId, text });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the typed text.");
+  }
+
+  /**
+   * The background-safe sibling of {@link sendText}: posts WM_CHAR directly to the target
+   * window's own message queue instead of SendInput, so it never requires -- and never steals --
+   * OS foreground. Only reaches plain Win32 controls that handle WM_CHAR for text entry; a control
+   * with custom input handling must still go through sendText (real foreground) or a UIA
+   * SetValue/pattern call.
+   */
+  async function sendTextToWindow(pid: number, windowId: string, text: string): Promise<NativeWindowTextDispatchReceipt> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "sendTextToWindow", pid, windowId, text });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the background-typed text.");
+    if (result.dispatchState !== "dispatched") return {};
+
+    // Preserve the native receipt without treating the helper's success bit as
+    // proof of the target or route. Older helper builds may still return only
+    // { ok: true }; those remain compatible but carry no fabricated evidence.
+    const returnedTarget = result.target;
+    const targetObject = returnedTarget && typeof returnedTarget === "object" ? returnedTarget : undefined;
+    const targetMatches = typeof targetObject?.pid === "number"
+      && Number.isSafeInteger(targetObject.pid)
+      && targetObject.pid === pid
+      && typeof targetObject.windowId === "string"
+      && targetObject.windowId === windowId;
+    const route = result.route === "wm-char-post-message" ? result.route : undefined;
+    return {
+      dispatchState: "dispatched",
+      ...(route ? { route } : {}),
+      ...(targetObject?.pid !== undefined || targetObject?.windowId !== undefined ? { targetMatches } : {}),
+    };
+  }
+
+  /**
+   * Posts WM_CLOSE directly to a window, foreground-independent -- the same
+   * property sendTextToWindow has for text. Test-only scaffolding for the
+   * Phase 0 T3 proof (provoking a real app's own unsaved-changes dialog);
+   * production closes an owned app by killing its process, never this.
+   */
+  async function postCloseWindow(pid: number, windowId: string) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "postCloseWindow", pid, windowId });
+    invalidateWindowStructureCache(pid, windowId);
+    if (!result.ok) throwNativeInputFailure(result, "Windows declined the WM_CLOSE request.");
+  }
+
+  /**
+   * Resolves a window's descendant window whose real class is exactly
+   * "Edit", if any. Used by background text delivery to redirect WM_CHAR to
+   * a real app's actual editable child surface when the top-level frame it
+   * was given is not itself an editable control.
+   */
+  async function findEditChildWindow(pid: number, windowId: string): Promise<string | undefined> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "findEditChildWindow", pid, windowId });
+    if (!result.ok) throw new Error(result.error ?? "Could not search for a classic Edit child window.");
+    return typeof result.childWindowId === "string" ? result.childWindowId : undefined;
+  }
+
+  /** Diagnostic only: every descendant window's own class name, in enumeration order. */
+  async function listChildWindowClasses(pid: number, windowId: string): Promise<string[]> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "listChildWindowClasses", pid, windowId });
+    if (!result.ok || !Array.isArray(result.classes)) throw new Error(result.error ?? "Could not enumerate child window classes.");
+    return result.classes;
+  }
+
   async function setWindowState(name: string, state: "minimized" | "maximized" | "restored") {
     const inspected = await inspectStage(name);
     if (!inspected.anchor) throw new Error("No exact selected window.");
     const result = await invokeNative({ op: "setWindowState", ...inspected.anchor, state });
     if (!result.ok || result.state !== state) throw new Error(result.error ?? "Window state was not verified.");
+    // Minimizing/maximizing/restoring changes every cached element's bounds (and,
+    // for minimize, its visibility) exactly like a resize does -- same reasoning
+    // as setWindowFrame below, same missed invalidation.
+    invalidateWindowStructureCache(inspected.anchor.pid, inspected.anchor.windowId);
     return state;
   }
 
-  async function showOwnedWindow(name: string) {
-    const inspected = await inspectStage(name);
-    if (!inspected.anchor) throw new Error("Stage has no registered owned app.");
-    const result = await invokeNative({ op: "showOwnedWindow", pid: inspected.anchor.pid, windowId: inspected.anchor.windowId, desktopId: inspected.stage.desktopId });
-    if (!result.ok) throw new Error(result.error ?? "The owned app could not be shown on its background stage.");
-    return normalizeWindowInfo(result.window);
+  async function setWindowFrame(pid: number, windowId: string, frame: { x: number; y: number; width: number; height: number }) {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    if (![frame.x, frame.y, frame.width, frame.height].every(Number.isSafeInteger)
+      || frame.x < -16_383 || frame.x > 16_383 || frame.y < -16_383 || frame.y > 16_383
+      || frame.width < 1 || frame.width > 16_383 || frame.height < 1 || frame.height > 16_383) {
+      throw new Error("Invalid native window frame.");
+    }
+    const result = await invokeNative({ op: "setWindowFrame", pid, windowId, ...frame });
+    const rect = result.rect as { x?: number; y?: number; width?: number; height?: number } | undefined;
+    if (!result.ok || !rect || ![rect.x, rect.y, rect.width, rect.height].every((n) => typeof n === "number" && Number.isFinite(n))) {
+      throw new Error(result.error ?? "Windows did not confirm the requested window frame.");
+    }
+    // A resize/move changes every cached element's rect. This was the one
+    // dispatch path that mutates the window's UI and never invalidated the
+    // cache -- harmless under the shadow-mode default (every call still does
+    // a real fetch regardless), but a real stale-rect bug the moment
+    // M9R_TRUST_UI_TREE_CACHE=1 is ever flipped on.
+    invalidateWindowStructureCache(pid, windowId);
+    return { x: rect.x as number, y: rect.y as number, width: rect.width as number, height: rect.height as number };
   }
 
-  async function moveOwnedWindow(name: string, pid: number, windowId: string) {
-    const inspected = await inspectStage(name);
-    if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffff_ffff) throw new Error("Invalid owned process id.");
-    const id = parseWindowId(windowId);
-    const result = await invokeNative({ op: "showAndMoveOwnedWindow", pid, windowId: id, desktopId: inspected.stage.desktopId });
-    if (!result.ok) throw new Error(result.error ?? "Windows could not place the launched app on its stage.");
-    const window = normalizeWindowInfo(result.window);
-    if (window.pid !== pid || window.windowId !== id || window.desktopId !== inspected.stage.desktopId || window.onCurrentDesktop) {
-      throw new Error("Windows did not confirm the launched app on its background stage.");
-    }
-    return { stage: inspected.stage, window };
+  /**
+   * Reads a window's or control's real text directly via GetWindowTextW -- never a UIA tree
+   * read, never an echo of input that was sent. Test-only verification seam: production
+   * correctness relies on the driver's own UIA/capture evidence, not this.
+   */
+  async function getWindowText(pid: number, windowId: string): Promise<string> {
+    assertWindows(); assertOwner();
+    parsePid(String(pid)); parseWindowId(windowId);
+    const result = await invokeNative({ op: "getWindowText", pid, windowId });
+    if (!result.ok || typeof result.text !== "string") throw new Error(result.error ?? "Windows could not read the window's text.");
+    return result.text;
+  }
+
+  async function clipboardRead() {
+    assertWindows(); assertOwner();
+    const result = await invokeNative({ op: "clipboardRead" });
+    const value = result.result as { text?: unknown } | undefined;
+    if (!result.ok || typeof value?.text !== "string") throw new Error(result.error ?? "Windows could not read the shared clipboard.");
+    return value.text;
+  }
+
+  async function clipboardWrite(text: string) {
+    assertWindows(); assertOwner();
+    if (typeof text !== "string" || text.length > 1_000_000) throw new Error("Clipboard text is invalid or too large.");
+    const result = await invokeNative({ op: "clipboardWrite", text });
+    if (!result.ok) throw new Error(result.error ?? "Windows could not write the shared clipboard.");
   }
 
   /**
@@ -961,7 +1727,10 @@ export function createWindowsDesktopStageManager(deps: WindowsStageDependencies 
     } finally { release(); }
   }
 
-  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, register, create, adoptCurrentDesktop, inspectStage, activate, returnToOwnerDesktop, moveWindow, attachWindow, roomKeys, list, assignAgent, forget, controlInput, listOwnedWindows, listOwnedWindowsForProcess, moveOwnedWindow, presentOwnerWindow, showOwnedWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, systemControl, setWindowState, ownedPopups };
+  return { inspectWindow, windowAtPoint, pointControl, desktopStructure, windowStructure, invalidateWindowStructureCache, uiTreeCacheStats, invokeWindowElement, captureWindow, captureDesktop, register, create, ensureStage, inspectStage, resolveWindowReplacement, attachWindow, roomKeys, list, assignAgent, forget, listOwnedWindows, listOwnedWindowsForProcess, listVisibleWindows, presentOwnerWindow, clearOwnedAnchor, getOwnerCursorPosition, restoreOwnerCursorPosition, windowStatus, foregroundWindow, currentForegroundWindow, physicalInputEpoch, captureOwnerInputEpoch, releaseOwnerInputMonitor, systemControl, setWindowState, setWindowFrame, clipboardRead, clipboardWrite, ownedPopups, warm,
+    close: closeManager,
+    withInputStream, closeInputStream, attachSharedWindow, withForegroundAuthorization,
+    bringToForeground, sendClick, postClickToWindow, sendDrag, sendScroll, postScrollToWindow, sendKeyCombo, sendText, sendTextToWindow, postCloseWindow, findEditChildWindow, listChildWindowClasses, getWindowText, windowRect, workArea };
 }
 
 function parsePid(value: string): number {
@@ -977,50 +1746,351 @@ function parseWindowId(value: string): string {
   return value;
 }
 
-function invokeWindowsStageHelper(executable: string, request: Record<string, unknown>): Promise<NativeStageResponse> {
-  if (!existsSync(executable)) throw new Error(`The native Windows stage helper is missing at ${executable}. Reinstall or rebuild the M9R Windows runtime first.`);
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, ["--desktop-stage-json"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill();
-      const operation = typeof request.op === "string" ? request.op : "unknown";
-      reject(new Error(`Native Windows desktop-stage operation “${operation}” timed out after 8 seconds; the helper was terminated.`));
-    }, 8_000);
-    const finish = (error?: Error, value?: NativeStageResponse) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve(value!);
-    };
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
-      stdout += chunk;
-      if (Buffer.byteLength(stdout, "utf8") > MAX_NATIVE_RESPONSE_BYTES) {
-        child.kill();
-        finish(new Error("The native Windows stage helper response exceeded its safe size."));
-      }
+function foregroundIdentityKey(pid: number, windowId: string): string {
+  try { return `${pid}:${BigInt(windowId).toString()}`; }
+  catch { return `${pid}:${windowId}`; }
+}
+
+function sameForegroundIdentity(left: { pid: number; windowId: string }, right: { pid: number; windowId: string }): boolean {
+  return foregroundIdentityKey(left.pid, left.windowId) === foregroundIdentityKey(right.pid, right.windowId);
+}
+
+function foregroundRequestTarget(request: Record<string, unknown>): { pid: number; windowId: string } | undefined {
+  const pid = typeof request.pid === "number" ? request.pid
+    : typeof request.pid === "string" && /^\d+$/.test(request.pid) ? Number(request.pid) : NaN;
+  const windowId = typeof request.windowId === "string" ? request.windowId
+    : typeof request.windowId === "number" && Number.isSafeInteger(request.windowId) ? String(request.windowId) : undefined;
+  if (!Number.isSafeInteger(pid) || pid < 1 || !windowId || !WINDOW_ID_RE.test(windowId)) return undefined;
+  return { pid, windowId };
+}
+
+interface PendingNativeStageRequest {
+  readonly requestId: string;
+  readonly operation: string;
+  readonly resolve: (response: NativeStageResponse) => void;
+  readonly reject: (error: Error) => void;
+  readonly queuedAt: number;
+  readonly timeoutMs: number;
+  readonly frame: Buffer;
+  readonly dragProgress?: (x: number, y: number) => void;
+  sentAt?: number;
+  startedAt?: number;
+  timeout?: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * One long-lived native stage host per manager.  Spawning the helper for every
+ * inspect/capture/input operation made a multi-step task pay process startup,
+ * DLL loading, and UIA initialization repeatedly.  The host speaks the same
+ * bounded length-prefixed JSON protocol as the input host. Requests are
+ * serialized by the queue and independently identified so acknowledgements
+ * and responses can be correlated with their caller.
+ */
+/**
+ * A `--desktop-stage-server` child is spawned with no OS-level job/process-group tie to its Node
+ * parent. A graceful parent exit kills it via `closeManager`, but `Stop-Process -Force` (TerminateProcess)
+ * is not catchable, so the child is orphaned and runs forever -- confirmed live on 2026-11-13, where
+ * every forced broker restart during install left its old `--desktop-stage-server` children running
+ * alongside the new ones. Only one broker runs at a time by design, so every pid recorded here by a
+ * *previous* manager instance is safe to kill the moment a new one starts up.
+ */
+/** @internal exported for the orphan-reaping unit test only */
+export function orphanStagePidsPath(root: string): string {
+  return join(root, "native-stage-children.json");
+}
+
+/** @internal exported for the orphan-reaping unit test only */
+export function reapOrphanStageChildren(root: string): void {
+  const path = orphanStagePidsPath(root);
+  let pids: unknown;
+  try { pids = JSON.parse(readFileSync(path, "utf8")); }
+  catch { return; }
+  if (!Array.isArray(pids)) return;
+  for (const pid of pids) {
+    if (typeof pid !== "number" || !Number.isInteger(pid)) continue;
+    try { if (isProcessAlive(pid)) process.kill(pid, "SIGKILL"); }
+    catch { /* already gone, or not killable -- either way it is not this manager's problem */ }
+  }
+  try { writeFileSync(path, "[]"); } catch { /* best-effort cleanup only */ }
+}
+
+/** @internal exported for the orphan-reaping unit test only */
+export function recordStageChildPids(root: string, pids: readonly number[]): void {
+  try { writeFileSync(orphanStagePidsPath(root), JSON.stringify(pids)); }
+  catch { /* best-effort: worst case a future manager instance finds a stale pid to skip */ }
+}
+
+function createPersistentWindowsStageHost(executable: string, trackPid?: (pid: number | undefined, alive: boolean) => void, hostEnv?: Record<string, string | undefined>) {
+  let child: ChildProcessWithoutNullStreams | undefined;
+  // The pid of a helper we have told to die but have not yet confirmed exited. `failAll()` drops `child`
+  // to `undefined` as soon as a kill is issued, not when the OS confirms the process is actually gone
+  // (TerminateProcess is not instantaneous, especially mid native UIA call) -- without this, the very next
+  // `ensureChild()` can spawn a second live helper while the first is still exiting, exactly as was
+  // confirmed live on 2026-11-10 (an old helper staying alive alongside a freshly spawned one after a
+  // timeout). `ensureChild()` force-confirms this pid is gone before ever spawning its replacement.
+  let terminatingPid: number | undefined;
+  let closed = false;
+  let buffer = Buffer.alloc(0);
+  let stderrTail = "";
+  const pending = new Map<string, PendingNativeStageRequest>();
+  let activeRequestId: string | undefined;
+  const startAcknowledgementTimeoutMs = 15_000;
+  const inputOperations = new Set(["sendClick", "postClickToWindow", "sendDrag", "sendScroll", "postScrollToWindow", "sendKeyCombo", "sendText", "sendTextToWindow", "postCloseWindow", "invokeWindowElement"]);
+
+
+  const notDispatchedError = (request: Pick<PendingNativeStageRequest, "operation">, message: string): Error => inputOperations.has(request.operation)
+    ? new DesktopInputNotDispatchedError(`${message} No target input was sent.`, "native-dispatch-unavailable")
+    : new Error(message);
+
+  /** Kill a helper that is being replaced (not one being shut down for good) and remember its pid so the
+   * next `ensureChild()` can confirm it is actually gone before spawning a second live helper. */
+  const terminate = (target: ChildProcessWithoutNullStreams | undefined): void => {
+    if (!target) return;
+    if (typeof target.pid === "number") terminatingPid = target.pid;
+    target.kill();
+  };
+
+  const failProtocol = (error: Error, reason: string): void => {
+    terminate(child);
+    failAll(error,
+      (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because ${reason}.`),
+      () => error);
+  };
+
+  const diagnosticError = (message: string): Error => {
+    const detail = stderrTail.trim().replace(/\s+/g, " ").slice(-2_000);
+    return new Error(detail ? `${message} Native helper stderr: ${detail}` : message);
+  };
+
+  const operationTimeoutMs = (operation: string): number => {
+    if (["inspectDesktopStructure", "inspectWindowStructure", "captureWindow", "captureDesktop", "pointControl", "inspectPointControl", "invokePointControl"].includes(operation)) return 30_000;
+    if (operation === "listVisibleWindows") return 12_000;
+    if (operation === "foregroundWindow" || operation === "bringToForeground") return 3_000;
+    return 15_000;
+  };
+
+  const failAll = (
+    error: Error,
+    unstartedError: (request: PendingNativeStageRequest) => Error = () => error,
+    activeUnstartedError: (request: PendingNativeStageRequest) => Error = unstartedError,
+  ): void => {
+    const failedActiveRequestId = activeRequestId;
+    const active = [...pending.values()];
+    pending.clear();
+    for (const request of active) {
+      if (request.timeout) clearTimeout(request.timeout);
+      request.reject(request.startedAt ? error
+        : request.requestId === failedActiveRequestId ? activeUnstartedError(request) : unstartedError(request));
+    }
+    activeRequestId = undefined;
+    child = undefined;
+    buffer = Buffer.alloc(0);
+    stderrTail = "";
+  };
+
+  const dispatchNext = (): void => {
+    if (closed || !child || activeRequestId) return;
+    const request = [...pending.values()].find((candidate) => candidate.sentAt === undefined);
+    if (!request) return;
+    const host = child;
+    request.sentAt = Date.now();
+    activeRequestId = request.requestId;
+    request.timeout = setTimeout(() => {
+      const elapsedMs = Date.now() - request.sentAt!;
+      // No acknowledgement does not prove the active operation was not run:
+      // the helper may have started it while its response pipe was unhealthy.
+      // Keep that one result uncertain; later queued input is known not sent.
+      const error = diagnosticError(`Native Windows desktop-stage operation “${request.operation}” (${request.requestId}) received no start acknowledgement within ${elapsedMs}ms; its outcome is uncertain and the helper was terminated.`);
+      process.stderr.write(`[native-stage-helper-no-start] operation=${request.operation}; requestId=${request.requestId}; elapsedMs=${elapsedMs}\n`);
+      terminate(host);
+      failAll(error,
+        (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the preceding helper request never started.`),
+        () => error);
+    }, startAcknowledgementTimeoutMs);
+    host.stdin.write(request.frame, (writeError) => {
+      if (!writeError) return;
+      const error = diagnosticError(`Native Windows stage request ${request.operation} (${request.requestId}) could not be written; its outcome is uncertain${writeError.message ? `: ${writeError.message}` : "."}`);
+      terminate(host);
+      failAll(error,
+        (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the preceding helper request could not be written.`),
+        () => error);
     });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-2_000); });
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (settled) return;
+  };
+
+  const parseFrames = (): void => {
+    while (buffer.length >= 4) {
+      const length = buffer.readUInt32LE(0);
+      if (length < 1 || length > MAX_NATIVE_RESPONSE_BYTES) {
+        failProtocol(new Error("The native Windows stage helper response exceeded its safe size."), "the helper response protocol became invalid");
+        return;
+      }
+      if (buffer.length < 4 + length) return;
+      const body = buffer.subarray(4, 4 + length);
+      buffer = buffer.subarray(4 + length);
       let parsed: unknown;
-      try { parsed = JSON.parse(stdout); } catch { finish(new Error(`Native Windows stage helper returned invalid JSON${stderr.trim() ? `: ${stderr.trim()}` : "."}`)); return; }
-      if (!parsed || typeof parsed !== "object" || typeof (parsed as NativeStageResponse).ok !== "boolean") {
-        finish(new Error("Native Windows stage helper returned an invalid response."));
+      try { parsed = JSON.parse(body.toString("utf8")); }
+      catch {
+        failProtocol(new Error("Native Windows stage helper returned invalid JSON."), "the helper response protocol became invalid");
+        return;
+      }
+      if (!parsed || typeof parsed !== "object") {
+        failProtocol(new Error("Native Windows stage helper returned an invalid response."), "the helper response protocol became invalid");
         return;
       }
       const response = parsed as NativeStageResponse;
-      if (code !== 0 && response.ok) finish(new Error("Native Windows stage helper exited unsuccessfully after reporting success."));
-      else finish(undefined, response);
+      const requestId = typeof (response as NativeStageResponse & { requestId?: unknown }).requestId === "string"
+        ? (response as NativeStageResponse & { requestId: string }).requestId : undefined;
+      if (!requestId) {
+        failProtocol(new Error("Native Windows stage helper response omitted its request id; the active operation outcome is uncertain."), "the helper response omitted its request id");
+        return;
+      }
+      const request = pending.get(requestId);
+      if (!request) {
+        failProtocol(new Error(`Native Windows stage helper returned an unknown request id ${requestId}; the active operation outcome is uncertain.`), "the helper response did not match the active request");
+        return;
+      }
+      if (response.type === "started") {
+        if (activeRequestId !== requestId) {
+          const error = new Error(`Native Windows stage helper started out-of-order request ${requestId}.`);
+          failProtocol(error, "the helper response protocol became invalid");
+          return;
+        }
+        if (!request.startedAt) {
+          if (request.timeout) clearTimeout(request.timeout);
+          request.startedAt = Date.now();
+          request.timeout = setTimeout(() => {
+            const elapsedMs = Date.now() - request.startedAt!;
+            const error = new Error(`Native Windows desktop-stage operation “${request.operation}” (${request.requestId}) did not return after ${elapsedMs}ms; its outcome is uncertain, the helper was terminated, and the target must be re-observed before retrying.`);
+            terminate(child);
+            failAll(error,
+              (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the preceding ${request.operation} request timed out.`),
+              () => error);
+          }, request.timeoutMs);
+        }
+        continue;
+      }
+      if (response.type === "drag-progress" && request.operation === "sendDrag" && request.startedAt && activeRequestId === requestId) {
+        const { x, y } = parsed as { x?: unknown; y?: unknown };
+        if (typeof x === "number" && typeof y === "number" && Number.isSafeInteger(x) && Number.isSafeInteger(y)) {
+          try { request.dragProgress?.(x, y); } catch { /* presentation is best effort */ }
+        }
+        continue;
+      }
+      if (typeof response.ok !== "boolean") {
+        const error = new Error("Native Windows stage helper returned an invalid response; the active operation outcome is uncertain.");
+        failProtocol(error, "the helper response was invalid");
+        return;
+      }
+      if (activeRequestId !== requestId) {
+        const error = new Error(`Native Windows stage helper completed out-of-order request ${requestId}.`);
+        failProtocol(error, "the helper response protocol became invalid");
+        return;
+      }
+      pending.delete(requestId);
+      if (request.timeout) clearTimeout(request.timeout);
+      activeRequestId = undefined;
+      request.resolve(response);
+      dispatchNext();
+    }
+  };
+
+  /** True if `pid` is still a live process. Windows reuses pids, but this is only ever checked for the
+   * brief window right after we asked that exact pid to terminate, so a false positive here only costs
+   * one extra, harmless kill attempt on a pid that has already been recycled. */
+  const isPidAlive = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true; }
+    catch { return false; }
+  };
+
+  const ensureChild = (): ChildProcessWithoutNullStreams => {
+    if (closed) throw new Error("Native Windows stage helper is closed.");
+    if (child) return child;
+    if (!existsSync(executable)) throw new Error(`The native Windows stage helper is missing at ${executable}. Reinstall or rebuild the M9R Windows runtime first.`);
+    if (terminatingPid !== undefined) {
+      // A previous helper was told to die but may not have actually exited yet. Confirm it, and force it
+      // again if needed, before a second live helper is ever spawned alongside it.
+      if (isPidAlive(terminatingPid)) {
+        process.stderr.write(`[native-stage-helper-exit] pid=${terminatingPid} had not exited before its replacement was about to spawn; forcing it down now\n`);
+        try { process.kill(terminatingPid, "SIGKILL"); } catch { /* already gone, or not killable; either way we proceed */ }
+      }
+      terminatingPid = undefined;
+    }
+    // hostEnv already gates the JS-side assertOwner() check in the enclosing manager (isAgentContext(deps.env
+    // ?? process.env)); without also passing it here, the spawned helper always inherited the real process.env
+    // regardless of deps.env, so the native host's own agent-context guard (main.rs has_agent_context) saw this
+    // process's real CLAUDECODE/CODEX_*/OPENCODE* markers even when a caller explicitly overrode deps.env to
+    // avoid that. This function has no `deps` in scope -- it is a standalone top-level factory, not a closure
+    // inside createWindowsDesktopStageManager -- so the override must be threaded in as its own parameter.
+    const spawned = spawn(executable, ["--desktop-stage-server"],
+      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, ...(hostEnv ?? {}) } });
+    child = spawned;
+    trackPid?.(spawned.pid, true);
+    spawned.stdout.on("data", (chunk: Buffer | string) => {
+      buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+      parseFrames();
     });
-    child.stdin.end(JSON.stringify(request));
-  });
+    spawned.stderr.on("data", (chunk: Buffer | string) => {
+      stderrTail = `${stderrTail}${Buffer.from(chunk).toString("utf8")}`.slice(-8_192);
+    });
+    spawned.once("close", () => {
+      if (terminatingPid === spawned.pid) terminatingPid = undefined;
+      trackPid?.(spawned.pid, false);
+    });
+    spawned.once("error", (error) => failAll(error,
+      (request) => notDispatchedError(request, `Native Windows desktop-stage operation “${request.operation}” was not dispatched because the helper could not be started.`),
+      (request) => notDispatchedError(request, `Native Windows desktop-stage operation “${request.operation}” was not dispatched because the helper could not be started.`)));
+    spawned.once("close", (code, signal) => {
+      if (child === spawned) {
+        const active = [...pending.values()].map((request) => `${request.operation}:${request.requestId}:${request.startedAt ? Date.now() - request.startedAt : `queued-${Date.now() - request.queuedAt}`}ms`).join(",");
+        const detail = `pid=${spawned.pid ?? "unknown"}; exitCode=${code ?? "unknown"}; signal=${signal ?? "none"}; pending=${active || "none"}`;
+        process.stderr.write(`[native-stage-helper-exit] ${detail}\n`);
+        const error = diagnosticError(`Native Windows stage helper exited unexpectedly (${code ?? "unknown"}, ${signal ?? "no signal"}); ${detail}.`);
+        failAll(error,
+          (request) => notDispatchedError(request, `Native Windows desktop-stage operation “${request.operation}” was not dispatched because the preceding helper request ended the process. ${detail}.`),
+          () => error);
+      }
+    });
+    return spawned;
+  };
+
+  const invoke = (request: Record<string, unknown>, dragProgress?: (x: number, y: number) => void): Promise<NativeStageResponse> => {
+    const operation = typeof request.op === "string" ? request.op : "unknown";
+    const requestId = typeof request.requestId === "string" && request.requestId.length > 0 ? request.requestId : randomUUID();
+    let payload: Buffer;
+    try { payload = Buffer.from(JSON.stringify({ ...request, requestId }), "utf8"); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return Promise.reject(notDispatchedError({ operation }, `Native Windows desktop-stage operation “${operation}” was not dispatched because its request could not be serialized: ${reason}.`));
+    }
+    if (payload.length > 16 * 1024) {
+      return Promise.reject(notDispatchedError({ operation }, `Native Windows desktop-stage operation “${operation}” was not dispatched because its request was invalid or too large.`));
+    }
+    return new Promise((resolve, reject) => {
+      const frame = Buffer.allocUnsafe(4 + payload.length);
+      frame.writeUInt32LE(payload.length, 0);
+      payload.copy(frame, 4);
+      try { ensureChild(); }
+      catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        reject(notDispatchedError({ operation }, `Native Windows desktop-stage operation “${operation}” was not dispatched because the helper is unavailable: ${reason}.`));
+        return;
+      }
+      pending.set(requestId, { requestId, operation, resolve, reject, queuedAt: Date.now(), timeoutMs: operationTimeoutMs(operation), frame, dragProgress });
+      dispatchNext();
+    });
+  };
+
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    if (!child) return;
+    child.kill();
+    const error = diagnosticError("Native Windows stage helper was closed; the active operation outcome is uncertain.");
+    failAll(error,
+      (queued) => notDispatchedError(queued, `Native Windows desktop-stage operation “${queued.operation}” was not dispatched because the helper was closed before it started.`),
+      () => error);
+  };
+  return { invoke, close };
 }
 
 export async function runWindowsDesktopStageCli(args: string[], deps: WindowsStageDependencies = {}): Promise<number> {
@@ -1035,21 +2105,15 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
           const inspected = await manager.inspectStage(stage.name);
           return {
             name: stage.name,
-            desktopId: stage.desktopId,
-            returnToDesktopId: stage.returnToDesktopId,
             ...(stage.agentAssignment ? { agentAssignment: stage.agentAssignment } : {}),
             hasAnchor: Boolean(inspected.anchor),
-            isCurrent: inspected.desktop.isCurrent,
-            status: inspected.desktop.isCurrent ? "current" : "background",
+            status: "available",
           };
         } catch (error) {
           return {
             name: stage.name,
-            desktopId: stage.desktopId,
-            returnToDesktopId: stage.returnToDesktopId,
             ...(stage.agentAssignment ? { agentAssignment: stage.agentAssignment } : {}),
             hasAnchor: false,
-            isCurrent: false,
             status: "unavailable",
             error: error instanceof Error ? error.message : "Windows could not inspect this stage.",
           };
@@ -1068,16 +2132,6 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
       process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
       return 0;
     }
-    if (json && action === "activate" && commandArgs.length === 2) {
-      const result = await manager.activate(commandArgs[1]!);
-      process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
-      return 0;
-    }
-    if (json && action === "return" && commandArgs.length === 2) {
-      const result = await manager.returnToOwnerDesktop(commandArgs[1]!);
-      process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
-      return 0;
-    }
     if (action === "room-keys" && commandArgs.length === 2) {
       const result = await manager.roomKeys(commandArgs[1]!);
       const machineId = readOrCreateStageMachineId(deps.root ?? defaultStoreRoot(homedir(), deps.env ?? process.env));
@@ -1092,8 +2146,8 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
     }
     if (action === "register" && commandArgs.length === 4) {
       const stage = await manager.register(commandArgs[1]!, commandArgs[2]!, commandArgs[3]!);
-      process.stdout.write(`Registered local stage “${stage.name}” on desktop ${stage.desktopId}.\n`);
-      process.stdout.write("The stage label is local to this machine. M9R did not create or switch a desktop.\n");
+      process.stdout.write(`Registered owner-visible stage “${stage.name}”.\n`);
+      process.stdout.write("The stage is a local window mapping; no Windows desktop was created or switched.\n");
       return 0;
     }
     if (json && action === "attach-window" && commandArgs.length === 4) {
@@ -1103,44 +2157,27 @@ export async function runWindowsDesktopStageCli(args: string[], deps: WindowsSta
     }
     if (action === "create" && commandArgs.length === 2) {
       const stage = await manager.create(commandArgs[1]!);
-      process.stdout.write(`Created M9R stage “${stage.name}” on Windows desktop ${stage.desktopId}. It remains in the background; use “m9r web stage activate ${stage.name}” to switch to it.\n`);
+      process.stdout.write(`Registered owner-visible stage “${stage.name}”. No Windows desktop was created or switched.\n`);
       return 0;
     }
     if (action === "inspect" && commandArgs.length === 2) {
       const result = await manager.inspectStage(commandArgs[1]!);
       const anchor = result.anchor ? `; anchor PID ${result.anchor.pid}, window ${result.anchor.windowId}` : "";
-      process.stdout.write(`Stage ${result.stage.name}: desktop ${result.desktop.desktopId}${anchor}; ${result.desktop.isCurrent ? "currently active" : "on another desktop"}.\n`);
-      return 0;
-    }
-    if (action === "activate" && commandArgs.length === 2) {
-      const result = await manager.activate(commandArgs[1]!);
-      process.stdout.write(`Activated stage “${result.stage.name}” (${result.desktop.desktopId}). The visible Windows desktop changed.\n`);
-      return 0;
-    }
-    if (action === "return" && commandArgs.length === 2) {
-      const result = await manager.returnToOwnerDesktop(commandArgs[1]!);
-      process.stdout.write(`Returned from stage “${result.stage.name}” to its original desktop (${result.desktop.desktopId}).\n`);
-      return 0;
-    }
-    if (action === "move-window" && commandArgs.length === 4) {
-      const result = await manager.moveWindow(commandArgs[1]!, commandArgs[2]!, commandArgs[3]!);
-      process.stdout.write(result.fromDesktopId === result.stage.desktopId
-        ? `Window ${result.window.windowId} is already on stage ${result.stage.name}.\n`
-        : `Moved window ${result.window.windowId} from desktop ${result.fromDesktopId} to stage ${result.stage.name} (${result.stage.desktopId}).\n`);
+      process.stdout.write(`Stage ${result.stage.name}: owner-visible${anchor}.\n`);
       return 0;
     }
     if (action === "forget" && commandArgs.length === 2) {
       const stage = manager.forget(commandArgs[1]!);
-      process.stdout.write(`Forgot local mapping for stage ${stage.name}; Windows desktop and windows were not deleted.\n`);
+      process.stdout.write(`Forgot local mapping for stage ${stage.name}; no window was closed.\n`);
       return 0;
     }
     if (action === "list" && commandArgs.length === 1) {
       const stages = manager.list();
-      process.stdout.write(stages.length ? stages.map((stage) => `${stage.name}\t${stage.desktopId}${stage.anchor ? `\tanchor PID ${stage.anchor.pid}, window ${stage.anchor.windowId}` : "\tcreated by M9R"}`).join("\n") + "\n" : "No local Windows stages registered.\n");
+      process.stdout.write(stages.length ? stages.map((stage) => `${stage.name}${stage.anchor ? `\tanchor PID ${stage.anchor.pid}, window ${stage.anchor.windowId}` : "\tno window selected"}`).join("\n") + "\n" : "No local Windows stages registered.\n");
       return 0;
     }
-    process.stderr.write("Usage: m9r web stage list | create <name> | register <name> <pid> <window-id> | inspect <name> | activate <name> | return <name> | move-window <name> <pid> <window-id> | room-keys <name> | capture <name> --json | cursor <name> <x> <y> --json | forget <name> [--json]\n");
-    process.stderr.write("Create and activate require an interactive owner terminal; activate changes the visible Windows desktop. register adopts an existing desktop from one of its windows.\n");
+    process.stderr.write("Usage: m9r web stage list | create <name> | register <name> <pid> <window-id> | inspect <name> | room-keys <name> | capture <name> --json | cursor <name> <x> <y> --json | forget <name> [--json]\n");
+    process.stderr.write("Stages bind exact windows on the owner's visible Windows screen. They do not create, switch, or move between Windows desktops.\n");
     return action ? 1 : 0;
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : "Windows stage operation failed."}\n`);

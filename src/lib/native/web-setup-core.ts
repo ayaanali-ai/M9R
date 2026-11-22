@@ -1,17 +1,9 @@
-import { DETECTABLE_AGENT_KINDS, type DetectedAgent, type DetectableAgentKind } from "../agent-detection-core";
-import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { chooseOpenCodeModelFromCatalog } from "./opencode-model-core";
 
 export type WebOpenCodeLayout = "legacy" | "servers";
-export type WebSetupBrowser = "chrome" | "edge";
 export type WebConfigUninstallMode = "restore-backup" | "remove-managed-entry" | "delete-created-file" | "unchanged";
-export type WebExtensionFileAction = "write" | "preserve" | "unchanged" | "delete";
 
-/** Stable unpacked-development identity. The Web Store assigns its own production ID. */
-export const WEB_EXTENSION_ID = "mahhaigfogjneccbmbpbedlnkhgdcmhb";
-/** Set after the Chrome Web Store assigns the production extension ID. */
-export const WEB_STORE_EXTENSION_ID_ENV = "M9R_WEB_STORE_EXTENSION_ID";
 
 /** Prefer the active OpenCode config layout (including the legacy ~/.opencode layout),
  * then XDG/APPDATA fallbacks, with plugins beside the selected config.
@@ -50,11 +42,6 @@ export function resolveOpenCodeGlobalPaths(input: {
     configPaths: configPaths.length > 0 ? configPaths : [configPath],
     pluginDirectory: join(dirname(configPath), "plugins"),
   };
-}
-
-/** Browser-internal setup pages are opened only when the user supplies the explicit opt-in. */
-export function shouldOpenBrowserSetup(args: readonly string[]): boolean {
-  return args.includes("--open-browser-setup");
 }
 
 export const OPENCODE_IDENTITY_PLUGIN_FILENAME = "m9r-identity.js";
@@ -885,101 +872,10 @@ export default M9rOpenCodePlugin;
 `;
 }
 
-/** One canonical allow-list source for setup, bundled broker, and the CLI broker. */
-export function webExtensionAllowlist(input: {
-  developmentId?: string;
-  storeId?: string;
-} = {}): string[] {
-  const developmentId = input.developmentId ?? WEB_EXTENSION_ID;
-  const storeId = input.storeId ?? process.env[WEB_STORE_EXTENSION_ID_ENV]?.trim();
-  if (!/^[a-p]{32}$/.test(developmentId)) throw new Error("The M9R development extension ID is invalid.");
-  if (storeId && !/^[a-p]{32}$/.test(storeId)) throw new Error(`${WEB_STORE_EXTENSION_ID_ENV} must be a valid 32-character Chromium extension ID.`);
-  return [...new Set([developmentId, ...(storeId ? [storeId] : [])])];
-}
-
-export function extensionIdFromManifestKey(key: string): string {
-  const digest = createHash("sha256").update(Buffer.from(key, "base64")).digest("hex").slice(0, 32);
-  return digest.replace(/[0-9a-f]/g, (character) => String.fromCharCode(97 + Number.parseInt(character, 16)));
-}
-
-export interface WebMcpCommand {
-  command: string;
-  args: readonly string[];
-  m9rHome: string;
-  brokerPort?: number;
-}
-
-export function resolveWebMcpRuntime(input: {
-  nodeCommand: string;
-  installedEngine?: string;
-  currentEngine?: string;
-  compiledMcp?: string;
-  sourceMcp?: string;
-  sourceNodeArgs?: readonly string[];
-}): Pick<WebMcpCommand, "command" | "args"> {
-  if (input.installedEngine) return { command: input.installedEngine, args: ["mcp"] };
-  if (input.currentEngine) return { command: input.currentEngine, args: ["mcp"] };
-  if (input.compiledMcp) return { command: input.nodeCommand, args: [input.compiledMcp] };
-  if (input.sourceMcp) return { command: input.nodeCommand, args: [...(input.sourceNodeArgs ?? []), input.sourceMcp] };
-  throw new Error("M9R's MCP entry point was not found beside this CLI or in the local M9R installation.");
-}
-
-export interface WebSetupInput {
-  detected: readonly DetectedAgent[];
-  selectedAgents: readonly string[];
-  engineCommand: string;
-  mcpArgs: readonly string[];
-  m9rHome: string;
-  configPaths: Partial<Record<DetectableAgentKind, string>>;
-  extensionPath: string;
-  browsers: readonly WebSetupBrowser[];
-  extensionId: string;
-}
-
-export interface WebSetupPlan {
-  selectedAgents: DetectableAgentKind[];
-  agentFiles: Array<{ agent: DetectableAgentKind; path: string; layout?: WebOpenCodeLayout }>;
-  extensionPath: string;
-  browsers: WebSetupBrowser[];
-  allowedExtensionIds: string[];
-  m9rHome: string;
-}
-
-function isAbsolutePath(value: string): boolean {
-  return value.startsWith("/") || /^[a-z]:[\\/]/i.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
-}
-
-const AGENT_LABELS: Record<DetectableAgentKind, string> = {
-  "claude-code": "Claude Code",
-  codex: "Codex",
-  opencode: "OpenCode",
-};
-
-export function selectWebSetupAgents(detected: readonly DetectedAgent[], requested?: readonly string[]): DetectableAgentKind[] {
-  const available = new Set(detected.map((agent) => agent.kind));
-  const selected = requested === undefined ? DETECTABLE_AGENT_KINDS.filter((kind) => available.has(kind)) : [...new Set(requested)];
-  for (const value of selected) {
-    if (!(DETECTABLE_AGENT_KINDS as readonly string[]).includes(value)) throw new Error(`Unknown agent "${value}". Choose claude-code, codex, or opencode.`);
-    const kind = value as DetectableAgentKind;
-    if (!available.has(kind)) throw new Error(`${AGENT_LABELS[kind]} was requested but not found on PATH.`);
-  }
-  if (selected.length === 0) throw new Error("No installed agents selected. Install Claude Code, Codex, or OpenCode, then run setup again.");
-  return selected as DetectableAgentKind[];
-}
-
 /** OpenCode 2.x moved local servers from `mcp.<name>` into `mcp.servers.<name>`. */
 export function webOpenCodeLayout(versionLine: string | undefined): WebOpenCodeLayout {
   const match = versionLine?.match(/(?:^|\s)v?(\d+)\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?/i);
   return match && Number(match[1]) >= 2 ? "servers" : "legacy";
-}
-
-export function buildClaudeMcpAddArgs(command: WebMcpCommand): string[] {
-  return [
-    "mcp", "add", "--scope", "user", "--transport", "stdio", "m9r",
-    "--env", `M9R_HOME=${command.m9rHome}`,
-    "--env", `M9R_WEB_BROKER_PORT=${command.brokerPort ?? 47821}`,
-    "--", command.command, ...command.args,
-  ];
 }
 
 export function buildClaudeMcpRemoveArgs(): string[] {
@@ -993,35 +889,6 @@ export function buildPowerShellInvocation(binary: string, args: readonly string[
   return `$ErrorActionPreference = 'Stop'; ${invocation}; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }`;
 }
 
-/** Human-readable equivalent of a native CLI argv vector for the setup preview. */
-export function formatCommandPreview(binary: string, args: readonly string[]): string {
-  return [binary, ...args].map((value) => /\s|["']/u.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value).join(" ");
-}
-
-export function planWebSetup(input: WebSetupInput): WebSetupPlan {
-  if (!isAbsolutePath(input.engineCommand) || !isAbsolutePath(input.m9rHome) || !isAbsolutePath(input.extensionPath)) throw new Error("The engine command, extension path, and M9R_HOME must be absolute paths.");
-  const selectedAgents = selectWebSetupAgents(input.detected, input.selectedAgents);
-  const detected = new Map(input.detected.map((agent) => [agent.kind, agent]));
-  const agentFiles = selectedAgents.map((agent) => {
-    const path = input.configPaths[agent];
-    if (!path || !isAbsolutePath(path)) throw new Error(`No absolute user config path was resolved for ${AGENT_LABELS[agent]}.`);
-    return {
-      agent,
-      path,
-      ...(agent === "opencode" ? { layout: webOpenCodeLayout(detected.get(agent)?.versionLine) } : {}),
-    };
-  });
-  if (!/^[a-p]{32}$/.test(input.extensionId)) throw new Error("The browser extension ID is invalid.");
-  return {
-    selectedAgents,
-    agentFiles,
-    extensionPath: input.extensionPath,
-    browsers: [...new Set(input.browsers)],
-    allowedExtensionIds: webExtensionAllowlist({ developmentId: input.extensionId }),
-    m9rHome: input.m9rHome,
-  };
-}
-
 /** Selects a non-destructive uninstall action from hashes, never by comparing or printing user config contents. */
 export function webConfigUninstallMode(input: {
   existedBefore: boolean;
@@ -1031,95 +898,6 @@ export function webConfigUninstallMode(input: {
   if (!input.installedHash || !input.currentHash) return "unchanged";
   if (input.currentHash !== input.installedHash) return "remove-managed-entry";
   return input.existedBefore ? "restore-backup" : "delete-created-file";
-}
-
-/** Update only files still matching M9R's prior hash; never claim or overwrite untracked/user-edited files. */
-export function webExtensionFileAction(input: {
-  currentHash: string | null;
-  installedHash: string | null;
-  desiredHash?: string | null;
-}): WebExtensionFileAction {
-  if (input.currentHash === null) return input.desiredHash ? "write" : "unchanged";
-  if (!input.installedHash || input.currentHash !== input.installedHash) return "preserve";
-  if (!input.desiredHash) return "delete";
-  return input.currentHash === input.desiredHash ? "unchanged" : "write";
-}
-
-export type ManagedWebExtensionSourceFile = { relativePath: string; desiredHash: string };
-export type ManagedWebExtensionInstalledFile = { relativePath: string; installedHash: string };
-export type ManagedWebExtensionRefreshPlan = {
-  relativePath: string;
-  desiredHash: string | null;
-  installedHash: string | null;
-  currentHash: string | null;
-  action: WebExtensionFileAction;
-};
-
-/** Plan an extension-only refresh without claiming or overwriting untracked/user-edited files. */
-export function planManagedWebExtensionRefresh(input: {
-  sourceFiles: readonly ManagedWebExtensionSourceFile[];
-  installedFiles: readonly ManagedWebExtensionInstalledFile[];
-  currentHashes: ReadonlyMap<string, string | null>;
-}): ManagedWebExtensionRefreshPlan[] {
-  const normalizeRelativePath = (raw: string): string => {
-    const path = raw.replace(/\\/g, "/");
-    const segments = path.split("/");
-    if (!path || path.startsWith("/") || /^[a-z]:/i.test(path) || segments.some((segment) => !segment || segment === "." || segment === "..")) {
-      throw new Error(`Unsafe managed extension relative path: ${raw}`);
-    }
-    return segments.join("/");
-  };
-  const installed = new Map<string, string>();
-  for (const file of input.installedFiles) {
-    const path = normalizeRelativePath(file.relativePath);
-    if (installed.has(path)) throw new Error(`Duplicate managed extension path: ${path}`);
-    installed.set(path, file.installedHash);
-  }
-  const seen = new Set<string>();
-  const plan: ManagedWebExtensionRefreshPlan[] = input.sourceFiles.map((file) => {
-    const relativePath = normalizeRelativePath(file.relativePath);
-    if (seen.has(relativePath)) throw new Error(`Duplicate extension source path: ${relativePath}`);
-    seen.add(relativePath);
-    if (!file.desiredHash) throw new Error(`Missing desired hash for extension source path: ${relativePath}`);
-    const currentHash = input.currentHashes.get(relativePath) ?? null;
-    const installedHash = installed.get(relativePath) ?? null;
-    const action = webExtensionFileAction({ currentHash, installedHash, desiredHash: file.desiredHash });
-    if (action === "delete") throw new Error(`Unexpected delete action for extension source path: ${relativePath}`);
-    return { relativePath, desiredHash: file.desiredHash, installedHash, currentHash, action };
-  });
-  // A packaged extension can remove a file between releases. Only remove it
-  // when the installed copy still matches the hash M9R recorded; changed or
-  // user-added files remain untouched and are no longer managed.
-  for (const [relativePath, installedHash] of installed) {
-    if (seen.has(relativePath)) continue;
-    const currentHash = input.currentHashes.get(relativePath) ?? null;
-    const action = webExtensionFileAction({ currentHash, installedHash, desiredHash: null });
-    plan.push({ relativePath, desiredHash: null, installedHash, currentHash, action });
-  }
-  return plan;
-}
-
-export function parseWebSetupList(raw: string, valid: readonly string[], label: string): string[] {
-  const values = [...new Set(raw.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
-  const invalid = values.find((value) => !valid.includes(value));
-  if (invalid) throw new Error(`Unknown ${label} "${invalid}". Choose ${valid.join(", ")}.`);
-  return values;
-}
-
-export function codexWebMcpBlock(command: WebMcpCommand): string {
-  const quote = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  return [
-    "# m9r-web-managed (maintained by M9R web setup)",
-    "[mcp_servers.m9r]",
-    `command = ${quote(command.command)}`,
-    `args = [${command.args.map(quote).join(", ")}]`,
-    "startup_timeout_sec = 30.0",
-    "",
-    "[mcp_servers.m9r.env]",
-    `M9R_HOME = ${quote(command.m9rHome)}`,
-    `M9R_WEB_BROKER_PORT = ${quote(String(command.brokerPort ?? 47821))}`,
-    `M9R_PROVIDER = ${quote("codex")}`,
-  ].join("\n");
 }
 
 interface TomlSection { title: string; start: number; end: number; headerStart: number }
@@ -1153,19 +931,6 @@ function managedCodexRange(text: string): { start: number; end: number } | null 
   const markerStart = prefix.lastIndexOf(marker);
   if (markerStart >= 0 && /^\s*$/.test(prefix.slice(markerStart + marker.length))) start = markerStart;
   return { start, end: Math.max(...owned.map((section) => section.end)) };
-}
-
-export function mergeCodexWebMcp(existing: string, command: WebMcpCommand): string {
-  const block = codexWebMcpBlock(command);
-  const owned = managedCodexRange(existing);
-  if (!owned) {
-    const separator = existing.length === 0 ? "" : existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
-    return `${existing}${separator}${block}\n`;
-  }
-  const before = existing.slice(0, owned.start);
-  const after = existing.slice(owned.end);
-  const separator = before.length > 0 && !before.endsWith("\n\n") ? "\n" : "";
-  return `${before}${separator}${block}\n${after}`;
 }
 
 export function removeCodexWebMcp(existing: string): string {
@@ -1282,31 +1047,6 @@ function objectProperty(node: JsoncNode, key: string): JsoncProperty | undefined
   return node.kind === "object" ? node.properties?.find((property) => property.key === key) : undefined;
 }
 
-function indentAt(source: string, offset: number): string {
-  const lineStart = source.lastIndexOf("\n", offset - 1) + 1;
-  return source.slice(lineStart, offset).match(/^\s*/)?.[0] ?? "";
-}
-
-function setJsoncProperty(source: string, node: JsoncNode, key: string, value: unknown): string {
-  if (node.kind !== "object" || node.closeOffset === undefined) throw new Error("OpenCode config parent is not an object; it was not changed.");
-  const existing = objectProperty(node, key);
-  const serialized = JSON.stringify(value, null, 2);
-  if (existing) return source.slice(0, existing.value.start) + serialized + source.slice(existing.value.end);
-  const properties = node.properties ?? [];
-  const parentIndent = indentAt(source, node.closeOffset);
-  const childIndent = `${parentIndent}  `;
-  const formatted = `\n${childIndent}${JSON.stringify(key)}: ${serialized}`;
-  if (properties.length === 0) {
-    return source.slice(0, node.closeOffset) + formatted + `\n${parentIndent}` + source.slice(node.closeOffset);
-  }
-  const last = properties[properties.length - 1]!;
-  if (last.commaStart !== undefined) {
-    const at = last.commaStart + 1;
-    return source.slice(0, at) + formatted + source.slice(at);
-  }
-  return source.slice(0, last.value.end) + `,${formatted}` + source.slice(last.value.end);
-}
-
 function jsoncArrayItemText(source: string, item: JsoncNode): string {
   return source.slice(item.start, item.end).trim();
 }
@@ -1325,16 +1065,6 @@ function removeOpenCodePluginEntry(source: string, root: JsoncNode, key: "plugin
     return source.slice(0, items[0]!.start) + source.slice(comma + 1);
   }
   return source.slice(0, items[index - 1]!.end) + source.slice(items[index]!.end);
-}
-
-/**
- * Reconcile the M9R plugin entry left by older installers. OpenCode now
- * auto-discovers files in the global plugins directory, so the active setup
- * must not add a fragile file path to `plugins`/`plugin`. Removing only our
- * old entry leaves every user plugin and comment untouched.
- */
-function addOpenCodeIdentityPluginEntry(source: string): string {
-  return removeOpenCodeIdentityPluginEntry(source);
 }
 
 /** Remove M9R's entry from both config spellings without touching user entries. */
@@ -1361,62 +1091,6 @@ function removeJsoncProperty(source: string, node: JsoncNode, key: string): stri
     return source.slice(0, separator) + source.slice(property.value.end);
   }
   return source.slice(0, property.keyStart) + source.slice(property.value.end);
-}
-
-function mcpTarget(node: JsoncNode, layout: WebOpenCodeLayout): { parent: JsoncNode; key: string } {
-  const mcpProperty = objectProperty(node, "mcp");
-  if (!mcpProperty) return { parent: node, key: "mcp" };
-  if (mcpProperty.value.kind !== "object") throw new Error("OpenCode config `mcp` must be an object; it was not changed.");
-  if (layout === "legacy") return { parent: mcpProperty.value, key: "m9r" };
-  const servers = objectProperty(mcpProperty.value, "servers");
-  if (!servers) return { parent: mcpProperty.value, key: "servers" };
-  if (servers.value.kind !== "object") throw new Error("OpenCode config `mcp.servers` must be an object; it was not changed.");
-  return { parent: servers.value, key: "m9r" };
-}
-
-/** Remove M9R's entry from the config spelling that is inactive for this OpenCode release. */
-function removeOpenCodeStaleMcpEntry(source: string, root: JsoncNode, activeLayout: WebOpenCodeLayout): string {
-  const mcp = objectProperty(root, "mcp")?.value;
-  if (!mcp || mcp.kind !== "object") return source;
-  if (activeLayout === "servers") return removeJsoncProperty(source, mcp, "m9r");
-  const servers = objectProperty(mcp, "servers")?.value;
-  return servers?.kind === "object" ? removeJsoncProperty(source, servers, "m9r") : source;
-}
-
-function openCodeEntry(command: WebMcpCommand): Record<string, unknown> {
-  return {
-    type: "local",
-    command: [command.command, ...command.args],
-    environment: { M9R_HOME: command.m9rHome, M9R_WEB_BROKER_PORT: String(command.brokerPort ?? 47821), M9R_PROVIDER: "opencode" },
-    // OpenCode does not treat a configured MCP server as on by default; omitting this leaves
-    // the server registered but never actually started, so none of its tools ever appear --
-    // confirmed live (the real symptom this fixes, not a defensive guess).
-    enabled: true,
-  };
-}
-
-export function mergeOpenCodeWebMcp(existing: string, layout: WebOpenCodeLayout, command: WebMcpCommand, includeIdentityPlugin = false): string {
-  let source = existing.trim() ? existing : "{}\n";
-  let root = parseJsonc(source);
-  if (root.kind !== "object") throw new Error("OpenCode config root must be an object; it was not changed.");
-  let mcp = objectProperty(root, "mcp");
-  if (!mcp) {
-    source = setJsoncProperty(source, root, "mcp", {});
-    root = parseJsonc(source);
-    mcp = objectProperty(root, "mcp");
-  }
-  if (!mcp || mcp.value.kind !== "object") throw new Error("OpenCode config `mcp` must be an object; it was not changed.");
-  if (layout === "servers" && !objectProperty(mcp.value, "servers")) {
-    source = setJsoncProperty(source, mcp.value, "servers", {});
-    root = parseJsonc(source);
-    mcp = objectProperty(root, "mcp");
-  }
-  if (!mcp || mcp.value.kind !== "object") throw new Error("OpenCode config `mcp` must be an object; it was not changed.");
-  const target = mcpTarget(root, layout);
-  source = setJsoncProperty(source, target.parent, target.key, layout === "servers" && target.key === "servers" ? { m9r: openCodeEntry(command) } : openCodeEntry(command));
-  source = removeOpenCodeStaleMcpEntry(source, parseJsonc(source), layout);
-  if (!includeIdentityPlugin) return source;
-  return addOpenCodeIdentityPluginEntry(source);
 }
 
 export function removeOpenCodeWebMcp(existing: string, layout: WebOpenCodeLayout, removeIdentityPlugin = false): string {

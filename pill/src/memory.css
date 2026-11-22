@@ -1,0 +1,153 @@
+@import "./design-system.css";
+
+/* Memory log window -- laid out as a page from m9r.dev: dark bezel, paper desk,
+   cream nav bar, one Haas headline, the Try/Join pill pair, and the site's
+   brushed retro window holding the notes on a white pane. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: var(--ds-bezel);
+  overflow: hidden;
+}
+
+#memory-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 14px 18px 20px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- nav */
+
+.memory-nav { flex: none; }
+.memory-brand { color: var(--ds-nav-ink); }
+.memory-nav-count { display: inline-flex; align-items: center; gap: 6px; }
+.memory-nav-glyph { font-size: 15px; line-height: 1; }
+
+/* ---------------------------------------------------------------- hero */
+
+.memory-hero {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 20px 4px 18px;
+}
+
+.memory-title {
+  margin: 9px 0 0;
+  font-size: 33px;
+}
+
+.memory-lede {
+  margin: 8px 0 0;
+  max-width: 320px;
+  font: 17px/1.3 var(--ds-font-serif);
+  letter-spacing: -0.011em;
+  color: var(--ds-ink-muted);
+}
+
+.memory-filters {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 15px;
+}
+.memory-filters .ds-pill-button { min-width: 112px; padding: 7px 22px 9px; font-size: 19px; line-height: 22px; }
+
+/* ---------------------------------------------------------------- window */
+
+.memory-window {
+  flex: 1;
+  min-height: 150px;
+}
+
+.memory-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+}
+
+.memory-list { display: flex; flex-direction: column; }
+
+.memory-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 14px 14px 16px;
+}
+.memory-entry + .memory-entry { box-shadow: inset 0 1px rgba(0, 0, 0, 0.08); }
+
+.memory-entry-body { flex: 1; min-width: 0; }
+
+.memory-text {
+  margin: 0;
+  font: 19px/1.22 var(--ds-font-serif);
+  letter-spacing: -0.014em;
+  color: #000;
+  overflow-wrap: anywhere;
+}
+
+.memory-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+/* Scraps sit a little crooked, like the ones pinned around the site's hero. */
+.memory-scope { transform: rotate(-1.5deg); }
+.memory-entry:nth-child(even) .memory-scope { transform: rotate(1.2deg); }
+
+.memory-date {
+  font: 11px/16.5px var(--ds-font-pixel);
+  letter-spacing: -0.176px;
+  color: var(--ds-ink-status);
+}
+
+.memory-forget { margin-top: 3px; opacity: 0.7; transition: opacity 0.15s; }
+.memory-entry:hover .memory-forget,
+.memory-forget:focus-visible { opacity: 1; }
+
+/* ---------------------------------------------------------------- empty */
+
+.memory-empty { padding: 28px 24px 32px; }
+
+.memory-empty-line {
+  margin: 0;
+  font: 34px/0.95 var(--ds-font-serif);
+  letter-spacing: -0.03em;
+  color: #000;
+}
+
+.memory-empty-note {
+  margin: 14px 0 0;
+  max-width: 280px;
+  font: 16px/1.35 var(--ds-font-serif);
+  color: var(--ds-ink-muted);
+}
+
+@media (max-height: 470px) {
+  .memory-hero { padding: 16px 4px 14px; }
+  .memory-lede { display: none; }
+  .memory-filters { margin-top: 12px; }
+  .memory-filters .ds-pill-button { padding: 5px 18px 7px; font-size: 18px; }
+  .memory-window .ds-window-toolbar { display: none; }
+}
+
+@media (max-width: 380px) {
+  #memory-root { padding-inline: 14px; }
+  .memory-title { font-size: 27px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .memory-forget { transition: none; }
+}

@@ -40,3 +40,19 @@ test("an interrupted stage operation remains uncertain and cannot be reclaimed",
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("pausing a task reconciles its unfinished native operation as uncertain without replaying it", () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-stage-operation-paused-"));
+  try {
+    const store = createLocalStore(root);
+    const identity = store.issueIdentity("codex", "codex", "session-one");
+    const task = store.addTask({ from: "you", to: "codex", goal: "Use stage", origin: "human_typed", idempotencyKey: "stage-paused" }).task;
+    const operation = { handle: "codex", sessionId: identity.sessionId, taskId: task.id, operationId: "mcp-call-paused", fingerprint: "d".repeat(64) };
+
+    assert.equal(store.claimStageOperation(operation).state, "claimed");
+    store.pauseTask(task.id);
+    assert.equal(createLocalStore(root).claimStageOperation(operation).state, "uncertain");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

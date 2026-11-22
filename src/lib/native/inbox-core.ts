@@ -1,9 +1,12 @@
+import type { A2AMessage, A2AMessageKind, A2AProgressKind } from "./multiplayer-contract";
+import type { MemoryEntry } from "./memory-log";
+
 /**
  * Task, inbox and injection-format core for the native front door (design sections 6, 7, 9 and 12).
  * Pure functions only: no file, network or clock access, so the same code runs in a hook, the Node and a test.
  *
  * Token discipline is a hard rule here: everything injected into an agent's context is capped, delta-only, and a
- * pointer (`get_task <id>`), never a payload.
+ * pointer to retained task evidence through m9r_working_context, never a full transcript.
  */
 
 /** The existing goal cap from the network spec. */
@@ -22,7 +25,7 @@ export const CAPS = {
   cardOthers: 5,
 } as const;
 
-export const TRUNCATION_MARKER = " [truncated: full text via get_task]";
+export const TRUNCATION_MARKER = " [truncated]";
 
 export type Approval = "not_needed" | "pending" | "approved" | "denied" | "expired";
 export type Origin = "human_typed" | "agent_initiated";
@@ -30,10 +33,30 @@ export type CoordinationCompletion = "pending" | "accepted" | "completed" | "fai
 
 /** Compact coordination metadata; task prose remains separate and is never duplicated into activity events. */
 export interface TaskCoordination {
-  intent: "request";
+  intent: "request" | "message";
   target: string;
+  conversationId?: string;
+  messageId?: string;
+  replyToMessageId?: string;
   dependencyTaskId?: string;
   completion: CoordinationCompletion;
+}
+
+/** Durable link from an inbox delivery back to its structured team conversation. */
+export interface TaskA2ALink {
+  conversationId: string;
+  messageId: string;
+  senderAgentId: string;
+  recipientAgentId: string;
+  replyDepth: number;
+  kind: A2AMessageKind;
+  summary: string;
+  taskId?: string;
+  replyToMessageId?: string;
+  progressFingerprint?: string;
+  progressKind?: A2AProgressKind;
+  /** Sanitized transport envelope retained so retries remain idempotent after owner-broker restart. */
+  wireMessage?: A2AMessage;
 }
 
 /**
@@ -161,13 +184,38 @@ export function transitionTaskReceipt(current: TaskReceipt | undefined, transiti
 
 /** A durable phase boundary for one request handled by the native desktop stage. */
 export type StageTimingPhase = "queue_wait" | "prepare" | "launch" | "action" | "close" | "stop"
-  | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "foreground-lease" | "background-dispatch"
-  | "provider-acceptance" | "first-visible-action" | "completion";
+  | "launch-preflight" | "stage-recovery"
+  | "sdk-load" | "host-connect" | "runtime-acquire" | "session-start" | "cursor-motion" | "cursor-position" | "cursor-visible" | "cursor-overlay" | "foreground-lease" | "background-dispatch"
+  | "window-capture" | "accessibility-read" | "target-resolution" | "input-dispatch" | "post-action-observation"
+  | "launch-discovery"
+  | "provider-acceptance" | "first-visible-action" | "completion" | "post-action-wrapup" | "inter-action-think";
+
+/**
+ * The single source of truth for every valid phase name, used by local-store's
+ * recordStageTiming to validate incoming events. A hand-duplicated literal list
+ * there previously had to be updated in lockstep with the type above and
+ * silently fell behind twice -- "post-action-wrapup" and "inter-action-think"
+ * were both valid StageTimingPhase values that recordStageTiming rejected
+ * outright, so every call recording them returned false and the event was
+ * dropped before ever reaching pendingStageTiming, with no error surfaced
+ * anywhere (timing writes are deliberately best-effort/silent). Deriving the
+ * validator from this one array instead of a second list closes that class of
+ * bug for any phase added from here on.
+ */
+export const ALL_STAGE_TIMING_PHASES: readonly StageTimingPhase[] = [
+  "queue_wait", "prepare", "launch", "action", "close", "stop",
+  "launch-preflight", "stage-recovery",
+  "sdk-load", "host-connect", "runtime-acquire", "session-start", "cursor-motion", "cursor-position", "cursor-visible", "cursor-overlay", "foreground-lease", "background-dispatch",
+  "window-capture", "accessibility-read", "target-resolution", "input-dispatch", "post-action-observation",
+  "launch-discovery",
+  "provider-acceptance", "first-visible-action", "completion", "post-action-wrapup", "inter-action-think",
+];
 
 /**
  * Timing is deliberately kept on the task record so a later result or audit can reconcile
  * the complete turn without depending on process stderr or a live broker. It contains no
- * task text, credentials, window identifiers, or desktop pixels.
+ * task text, credentials, window identifiers, or desktop pixels. Post-action observation
+ * measures a fresh capture for the agent; it does not claim the app accepted the action.
  */
 export interface StageTimingEvent {
   phase: StageTimingPhase;
@@ -176,7 +224,95 @@ export interface StageTimingEvent {
   durationMs: number;
   status: "ok" | "error";
   operationId?: string;
+  /** Runtime stage correlation label; it is an M9R-generated name, not a window or session id. */
+  stageName?: string;
+  /** Whether the driver reused a warm runtime/capture for this phase, when reported. */
+  cached?: boolean;
   detail?: string;
+}
+
+/** Bounded per-phase totals preserve whole-task latency evidence after raw events roll over. */
+export interface StageTimingAggregate {
+  count: number;
+  totalDurationMs: number;
+  maxDurationMs: number;
+  errorCount: number;
+}
+
+export type StageTimingSummary = Partial<Record<StageTimingPhase, StageTimingAggregate>>;
+
+export function addStageTimingToSummary(summary: StageTimingSummary, event: StageTimingEvent): StageTimingSummary {
+  const previous = summary[event.phase];
+  const validCount = Number.isSafeInteger(previous?.count) && (previous?.count ?? 0) >= 0;
+  const validTotal = Number.isFinite(previous?.totalDurationMs) && (previous?.totalDurationMs ?? -1) >= 0;
+  const validMax = Number.isFinite(previous?.maxDurationMs) && (previous?.maxDurationMs ?? -1) >= 0;
+  const validErrors = Number.isSafeInteger(previous?.errorCount) && (previous?.errorCount ?? 0) >= 0;
+  const count = validCount ? previous!.count : 0;
+  const previousTotal = validTotal ? previous!.totalDurationMs : 0;
+  const total = previousTotal + event.durationMs;
+  const boundedTotal = Math.min(Number.MAX_SAFE_INTEGER, Number.isFinite(total) ? total : Number.MAX_SAFE_INTEGER);
+  summary[event.phase] = {
+    count: Math.min(Number.MAX_SAFE_INTEGER, count + 1),
+    totalDurationMs: Math.round(boundedTotal * 100) / 100,
+    maxDurationMs: Math.max(validMax ? previous!.maxDurationMs : 0, event.durationMs),
+    errorCount: Math.min(Number.MAX_SAFE_INTEGER, (validErrors ? previous!.errorCount : 0) + (event.status === "error" ? 1 : 0)),
+  };
+  return summary;
+}
+
+export function summarizeStageTimingEvents(events: readonly StageTimingEvent[]): StageTimingSummary {
+  const summary: StageTimingSummary = {};
+  for (const event of events) addStageTimingToSummary(summary, event);
+  return summary;
+}
+
+/**
+ * The phases a timedStagePhase() call wraps end-to-end: each one spans the whole time a
+ * desktop-stage request spent in that phase, including every finer sub-phase recorded inside it
+ * (e.g. "action" already contains "input-dispatch", "accessibility-read", "cursor-motion", ...).
+ * Summing these six is real, non-overlapping M9R-side time; summing every StageTimingPhase would
+ * double-count every sub-phase against its own parent.
+ */
+export const TOP_LEVEL_STAGE_TIMING_PHASES: readonly StageTimingPhase[] = ["queue_wait", "prepare", "launch", "action", "close", "stop"];
+
+export interface TaskThinkTimeBreakdown {
+  /** Wall-clock span from task creation to task completion. */
+  totalElapsedMs: number;
+  /** Sum of the top-level (non-overlapping) stage-timing phases: real M9R dispatch/infra time. */
+  m9rInfraMs: number;
+  /** totalElapsedMs minus m9rInfraMs, floored at 0. Not a direct measurement -- the remainder
+   *  after subtracting every M9R-side phase we instrument. On a real task this is dominated by
+   *  the agent provider's own reasoning time between dispatched actions, which M9R does not (and
+   *  should not claim to) speed up; it can also include provider-side network/queueing time M9R
+   *  has no visibility into. Treat it as "time not accounted for by M9R's own pipeline," not as
+   *  a verified measurement of model think time specifically. */
+  inferredNonInfraMs: number;
+  /** m9rInfraMs as a share of totalElapsedMs, 0-100. */
+  m9rInfraSharePercent: number;
+}
+
+/**
+ * Splits a finished task's total wall-clock time into "M9R's own instrumented dispatch work" vs.
+ * "everything else" (overwhelmingly the agent provider's own think time on a real task). Returns
+ * null for a task with no completion timestamp yet (the total span is not closed) or where
+ * completion is recorded before creation (clock skew / malformed data -- never report a negative
+ * duration as if it were real).
+ */
+export function summarizeTaskThinkTime(input: { createdAt: string; completedAt: string | undefined; stageTimingSummary: StageTimingSummary | undefined }): TaskThinkTimeBreakdown | null {
+  if (!input.completedAt) return null;
+  const startedMs = Date.parse(input.createdAt);
+  const endedMs = Date.parse(input.completedAt);
+  if (!Number.isFinite(startedMs) || !Number.isFinite(endedMs) || endedMs < startedMs) return null;
+  const totalElapsedMs = endedMs - startedMs;
+  const summary = input.stageTimingSummary ?? {};
+  const m9rInfraMs = TOP_LEVEL_STAGE_TIMING_PHASES.reduce((total, phase) => total + (summary[phase]?.totalDurationMs ?? 0), 0);
+  const boundedInfraMs = Math.min(m9rInfraMs, totalElapsedMs);
+  return {
+    totalElapsedMs,
+    m9rInfraMs: Math.round(boundedInfraMs * 100) / 100,
+    inferredNonInfraMs: Math.round((totalElapsedMs - boundedInfraMs) * 100) / 100,
+    m9rInfraSharePercent: totalElapsedMs > 0 ? Math.round((boundedInfraMs / totalElapsedMs) * 10000) / 100 : 0,
+  };
 }
 
 /** Canonical inbox key: tolerate a single mention marker and provider-handle casing. */
@@ -195,6 +331,7 @@ export interface LogicalTaskContext {
   priorOutcome?: string;
   previousTaskId?: string;
   supersededByTaskId?: string;
+  remainingWork?: string[];
 }
 
 export interface Task {
@@ -206,6 +343,11 @@ export interface Task {
   goal: string;
   goalTruncated: boolean;
   logicalContext?: LogicalTaskContext;
+  /** Latest bounded agent-authored working snapshot; original evidence remains on task records. */
+  workingContext?: import("./task-working-context").WorkingContextRecord;
+  /** Bounded task-scoped provider reports. Missing counters/costs remain unknown. */
+  providerUsage?: { samples: import("./provider-usage-core").TaskProviderUsageSample[]; droppedSamples: number };
+  completion?: { status: "completed" | "incomplete"; remainingWork: string[]; summary: string; updatedAt: string };
   pointers: string[];
   origin: Origin;
   approval: Approval;
@@ -231,22 +373,39 @@ export interface Task {
   lifecycle?: TaskLifecycle;
   /** Provider-neutral delivery receipt; old state files may not have this field and are backfilled on mutation. */
   receipt?: TaskReceipt;
+  /** Verified M9R runtime build ids that actually executed one or more turns for this task. */
+  runtimeBuildIds?: string[];
   /** Working directory of the sender; used to pick the target's session when several are open. */
   cwd?: string;
   /** Session id (or unique prefix) the sender pinned, so a push never has to guess. */
   targetSession?: string;
   /** The sender's own session (a Codex thread id, say), so the answer can be pushed back to exactly that session. */
   fromSession?: string;
+  /** System-generated result reply for this task; prevents result messages from recursively creating replies. */
+  replyToTaskId?: string;
   /** Internal authorization lineage; never included in provider-facing task text. */
   parentTaskId?: string;
+  /** Set when one owner message addresses several agents at once; shared across every resulting per-recipient
+   * task so a later teammate delegation can recognize the recipient already has equivalent work in flight. */
+  broadcastId?: string;
   /** Compact A2A state used for dedupe/acknowledgement; full prose remains in `goal`. */
   coordination?: TaskCoordination;
+  /** Structured teammate-message identity, persisted with the durable inbox delivery. */
+  a2a?: TaskA2ALink;
   /** The session the task was shown in (its inbox delivery), so its answer is read from that session's transcript. */
   deliveredSession?: string;
   /** Set when the answer was pushed back into the sender's session. */
   answerPushedAt?: string;
+  /** Explicitly selected structured answer; retained so result retries cannot create another reply. */
+  resultReplyMessageId?: string;
   /** Durable, bounded phase timings for native desktop-stage requests. */
   stageTiming?: StageTimingEvent[];
+  /** Per-phase totals cover the entire task even when `stageTiming` raw details reach their cap. */
+  stageTimingSummary?: StageTimingSummary;
+  /** First event included in the durable summary. */
+  stageTimingSummaryStartedAt?: string;
+  /** True when a legacy capped raw history prevented backfilling the complete summary. */
+  stageTimingSummaryMayBeIncomplete?: boolean;
 }
 
 export interface TaskDelivery {
@@ -298,6 +457,14 @@ export interface NewTaskInput {
   fromSession?: string;
   /** Internal authorization lineage; trusted broker code derives this from an active owner-approved task. */
   parentTaskId?: string;
+  /** Set only for an M9R-generated result reply; the referenced task is the request being answered. */
+  replyToTaskId?: string;
+  /** Set only when one owner message addresses several agents at once; shared across each resulting task. */
+  broadcastId?: string;
+  /** Structured A2A context for the durable recipient inbox item. */
+  a2a?: TaskA2ALink;
+  /** Agent-to-agent informational message vs. delegated task request. */
+  coordinationIntent?: TaskCoordination["intent"];
 }
 
 /** Approximate token count; good enough to enforce a budget without a tokenizer dependency. */
@@ -369,32 +536,120 @@ export function newTask(input: NewTaskInput, ids: { id: string; seq: number }, n
     receipt: initialTaskReceipt(nowIso),
     ...(input.origin === "agent_initiated" ? {
       coordination: {
-        intent: "request" as const,
+        intent: input.coordinationIntent ?? "request",
         target: normalizeHandle(input.to),
+        ...(input.a2a ? {
+          conversationId: input.a2a.conversationId,
+          messageId: input.a2a.messageId,
+          ...(input.a2a.replyToMessageId ? { replyToMessageId: input.a2a.replyToMessageId } : {}),
+        } : {}),
         ...(input.parentTaskId ? { dependencyTaskId: input.parentTaskId } : {}),
         completion: "pending" as const,
+      },
+    } : {}),
+    ...(input.a2a ? {
+      a2a: {
+        ...input.a2a,
+        summary: redactSecrets(input.a2a.summary.trim()).slice(0, 280),
+        ...(input.a2a.wireMessage ? {
+          wireMessage: {
+            ...input.a2a.wireMessage,
+            summary: redactSecrets(input.a2a.wireMessage.summary.trim()).slice(0, 280),
+            ...(input.a2a.wireMessage.details ? {
+              details: Object.fromEntries(Object.entries(input.a2a.wireMessage.details).map(([key, value]) => [
+                key,
+                typeof value === "string" ? redactSecrets(value).slice(0, 2_000) : value,
+              ])),
+            } : {}),
+          },
+        } : {}),
       },
     } : {}),
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.targetSession ? { targetSession: input.targetSession } : {}),
     ...(input.fromSession ? { fromSession: input.fromSession } : {}),
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
+    ...(input.replyToTaskId ? { replyToTaskId: input.replyToTaskId } : {}),
+    ...(input.broadcastId ? { broadcastId: input.broadcastId } : {}),
   };
 }
 
 const RESULT_ITEMS = 3;
 const RESULT_CHARS = 400;
+const CONVERSATION_ITEMS = 30;
 
-/** Answers to tasks this agent sent, shown once at its next prompt. Empty when there are none (zero tokens). */
+/** Answers to tasks this agent sent, shown once at its next prompt or inbox recovery lookup. */
 export function renderResultsInjection(tasks: readonly Task[], handle: string, options: { includeTaskIds?: boolean } = {}): { text: string; ids: string[] } {
   const normalizedHandle = normalizeHandle(handle);
-  const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle && t.resultSummary && !t.resultShownAt).slice(0, RESULT_ITEMS);
+  const ready = tasks.filter((t) => normalizeHandle(t.from) === normalizedHandle
+    && !t.resultShownAt
+    && (t.resultSummary || (t.completion?.status === "incomplete" && t.completion.summary))).slice(0, RESULT_ITEMS);
   if (ready.length === 0) return { text: "", ids: [] };
   const includeTaskIds = options.includeTaskIds !== false;
-  const lines = ready.map((t) => includeTaskIds
-    ? `[${t.id} finished by @${t.to}] ${neutralizeBracketHeaders(clip(t.resultSummary ?? "", RESULT_CHARS).text)}`
-    : `Work finished by @${t.to}: ${neutralizeBracketHeaders(clip(t.resultSummary ?? "", RESULT_CHARS).text)}`);
+  const lines = ready.map((t) => {
+    const incomplete = t.completion?.status === "incomplete" && !t.resultSummary;
+    const summary = t.resultSummary ?? t.completion?.summary ?? "";
+    const safeSummary = neutralizeBracketHeaders(clip(summary, RESULT_CHARS).text);
+    if (t.a2a) {
+      return includeTaskIds
+        ? `[${t.id} peer reply from @${t.to}; conversation ${t.a2a.conversationId}; message ${t.a2a.messageId}] ${safeSummary}`
+        : `Peer reply from @${t.to}: ${safeSummary}`;
+    }
+    return includeTaskIds
+      ? `[${t.id} ${incomplete ? "incomplete report" : "finished"} by @${t.to}] ${safeSummary}`
+      : `${incomplete ? "Incomplete report" : "Work finished"} by @${t.to}: ${safeSummary}`;
+  });
   return { text: `M9R results (${ready.length})\n${lines.join("\n")}`, ids: ready.map((t) => t.id) };
+}
+
+/** Match an answer to a specific outgoing message, including structured replies
+ * that precede its formal task result. Conversation membership alone is not a reply. */
+export function isReplyToTask(candidate: Task, outgoing: Task, tasks: readonly Task[]): boolean {
+  if (normalizeHandle(candidate.from) !== normalizeHandle(outgoing.to)
+    || normalizeHandle(candidate.to) !== normalizeHandle(outgoing.from)) return false;
+  if (candidate.replyToTaskId === outgoing.id) return true;
+  if (!candidate.a2a || !outgoing.a2a || candidate.a2a.conversationId !== outgoing.a2a.conversationId) return false;
+  const byMessage = new Map(tasks.filter(task => task.a2a?.conversationId === outgoing.a2a!.conversationId)
+    .map(task => [task.a2a!.messageId, task]));
+  const seen = new Set<string>([candidate.a2a.messageId]);
+  let parent = candidate.a2a.replyToMessageId;
+  while (parent && !seen.has(parent)) {
+    if (parent === outgoing.a2a.messageId) return true;
+    seen.add(parent);
+    parent = byMessage.get(parent)?.a2a?.replyToMessageId;
+  }
+  return false;
+}
+
+/** Render only the A2A messages this exact identity can see, without advancing inbox cursors. */
+export function renderA2AConversation(
+  tasks: readonly Task[],
+  conversationId: string,
+  identity: { handle: string; sessionId: string },
+): { text: string; count: number; total: number } {
+  const handle = normalizeHandle(identity.handle);
+  const visible = tasks.filter((task) => task.a2a?.conversationId === conversationId
+    && (normalizeHandle(task.to) === handle
+      || (normalizeHandle(task.from) === handle && task.fromSession === identity.sessionId)))
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.seq - right.seq);
+  if (visible.length === 0) return { text: `No stored messages in conversation ${conversationId} are addressed to this agent or were sent by this session.`, count: 0, total: 0 };
+  const messages = visible.slice(-CONVERSATION_ITEMS);
+  const lines = messages.map((task) => {
+    const link = task.a2a!;
+    const reply = link.replyToMessageId ? ` reply-to ${link.replyToMessageId}` : "";
+    const details = link.wireMessage?.details;
+    const detailText = details && Object.keys(details).length > 0
+      ? `\n  Details: ${neutralizeBracketHeaders(clip(JSON.stringify(details), RESULT_CHARS).text)}`
+      : "";
+    const outcome = task.resultSummary ? `\n  Result: ${neutralizeBracketHeaders(clip(task.resultSummary, RESULT_CHARS).text)}` : "";
+    return `- [${link.kind}; ${link.messageId}${reply}; @${task.from} → @${task.to}; ${task.lifecycle?.state ?? "queued"}] ${neutralizeBracketHeaders(link.summary)}${detailText}${outcome}`;
+  });
+  const omitted = visible.length - messages.length;
+  return {
+    text: `M9R conversation ${conversationId} (${messages.length} of ${visible.length} visible messages${omitted ? `; showing the most recent ${CONVERSATION_ITEMS}` : ""}):\n${lines.join("\n")}`,
+    count: messages.length,
+    total: visible.length,
+  };
 }
 
 /** Same key means the same task: a repeated send must not create or deliver a second one. */
@@ -490,8 +745,12 @@ export function renderInboxInjection(tasks: readonly Task[], cursor: number, opt
     // a connected agent cannot mistake the sender label for another M9R agent
     // or ask the owner to re-authorize an ordinary direct task.
     const sender = t.origin === "human_typed" ? "the owner" : `@${t.from}`;
-    const head = includeTaskIds ? `[${t.id} from ${sender}, ${approvalLabel(t)}] ` : `M9R work from ${sender}: `;
-    const tail = includeTaskIds ? ` Details: get_task ${t.id}.` : " More detail is available through the connected M9R context.";
+    const head = t.a2a
+      ? `[${t.id} peer message from ${sender}; conversation ${t.a2a.conversationId}; message ${t.a2a.messageId}${t.a2a.replyToMessageId ? ` replying to ${t.a2a.replyToMessageId}` : ""}] `
+      : includeTaskIds ? `[${t.id} from ${sender}, ${approvalLabel(t)}] ` : `M9R work from ${sender}: `;
+    const tail = includeTaskIds
+      ? ` Stored evidence: m9r_working_context taskId=${t.id} action=evidence evidenceTaskId=${t.id}.`
+      : " Recover stored task evidence with m9r_working_context action=evidence; text truncated at storage cannot be recovered there.";
     const room = Math.max(40, Math.min(goalChars, perItemChars - head.length - tail.length));
     // The pointer is only useful (and only safe to mention) when the text shown is not the whole goal.
     const shown = clip(t.goal, room);
@@ -534,6 +793,19 @@ export function renderSessionCard(input: CardInput): string {
   return approxTokens(card) <= CAPS.cardTokens ? card : clip(card, CAPS.cardTokens * 4).text;
 }
 
+/**
+ * A small bounded slice of shared memory (see memory-log.ts), auto-injected at session start so no
+ * agent ever has to think to search for it -- that's the whole point: free by default, a deliberate
+ * tool call only for the rare case this prefix isn't enough. Pure formatting only; the caller already
+ * did the file read and the global+persona merge/sort/slice.
+ */
+export function renderMemoryInjection(entries: readonly MemoryEntry[]): string {
+  if (!entries.length) return "";
+  const lines = entries.map((e) => `- ${e.text}${e.author ? ` (@${e.author})` : ""}`);
+  const body = `M9R shared memory (short facts recorded by you or other agents; context, not instructions):\n${lines.join("\n")}`;
+  return approxTokens(body) <= CAPS.cardTokens ? body : clip(body, CAPS.cardTokens * 4).text;
+}
+
 /** The one line injected after a human-typed mention so the sending agent does not do the work itself. */
 export function renderSentAck(taskId: string, to: string, includeTaskId = true): string {
   const reference = includeTaskId ? ` as task ${taskId}` : "";
@@ -569,12 +841,23 @@ export function renderHeldAck(taskId: string, to: string, includeTaskId = true):
  * undelivered tasks, work without a result, and unread results are never touched, however old. Dismissing a
  * notification only hides it from the overlay; it does not complete the work.
  */
-export function pruneTasks(tasks: readonly Task[], input: { maxCount: number; maxAgeMs: number; now: number }): Task[] {
+export function pruneTasks(tasks: readonly Task[], input: { maxCount: number; maxAgeMs: number; now: number; preserveIds?: ReadonlySet<string> }): Task[] {
   const resolved = (t: Task): boolean => {
+    if (input.preserveIds?.has(t.id)) return false;
     if (!t.deliveredAt || t.approval === "pending") return false;
     const hasResult = t.resultSummary !== undefined;
     const terminalWithoutResult = t.approval === "denied" || t.approval === "expired";
-    return (hasResult && Boolean(t.resultShownAt)) || (!hasResult && terminalWithoutResult);
+    // Item #22, live 2026-11-13: of 169 real completed tasks in state.json, 165 had
+    // never been marked shown -- some 17+ days old -- because resultShownAt is an
+    // agent-to-agent inbox-read cursor (set when a SENDER agent later checks its own
+    // outbox for a reply), which has no equivalent step for an owner-typed task: the
+    // owner watches it complete live, there is no separate "read the result" action
+    // to wait for. Without this, every one of those 134 owner tasks (from "you") was
+    // permanently unprunable the moment it completed, regardless of age -- the exact
+    // unbounded growth this function exists to prevent. An agent-initiated task still
+    // requires the real read, since its sender may genuinely come back for the answer later.
+    const seen = Boolean(t.resultShownAt) || t.from === "you";
+    return (hasResult && seen) || (!hasResult && terminalWithoutResult);
   };
   const prunable = (t: Task): boolean => resolved(t) && input.now - Date.parse(t.createdAt) > input.maxAgeMs;
   const kept = tasks.filter((t) => !prunable(t));

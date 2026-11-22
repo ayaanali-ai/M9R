@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -209,16 +209,43 @@ function outcomeResponse(kind: ApprovalKind, outcome: Outcome, params: Record<st
  * app-server` running, still holding its threads: the next server then cannot resume them ("already has an active
  * writer"). Kill the whole tree there.
  */
-function killProcessTree(child: ChildProcessWithoutNullStreams): void {
+function killProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (process.platform === "win32" && child.pid) {
-    try {
-      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-      return;
-    } catch {
-      /* already gone, or taskkill unavailable: fall through to a plain kill */
-    }
+    // Do not block the broker's event loop while Windows walks the process
+    // tree. The timeout belongs to taskkill itself, and the outer fallback is
+    // also bounded in case process creation or teardown stops responding.
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallbackTimer);
+        resolve();
+      };
+      const fallbackTimer = setTimeout(() => {
+        try { child.kill(); } catch { /* already exited */ }
+        finish();
+      }, 3_500);
+      try {
+        execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+          windowsHide: true,
+          timeout: 3_000,
+          maxBuffer: 1_024,
+        }, (error) => {
+          if (error) {
+            /* already gone, or taskkill unavailable: fall through to a plain kill */
+            try { child.kill(); } catch { /* already exited */ }
+          }
+          finish();
+        });
+      } catch {
+        try { child.kill(); } catch { /* already exited */ }
+        finish();
+      }
+    });
   }
   try { child.kill(); } catch { /* already exited */ }
+  return Promise.resolve();
 }
 
 /**
@@ -497,15 +524,24 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
         })
       : Promise.resolve();
     // A hung server never acknowledges the interrupt; free the session anyway so the next turn is not blocked.
+    let forceTimer: NodeJS.Timeout | undefined;
     const forceUnblock = new Promise<void>((resolveUnblock) => {
-      const timer = setTimeout(() => {
+      forceTimer = setTimeout(() => {
         if (session.queue && !session.queue.isClosed) console.error(`[codex-app-server] ${session.handle.sessionId} did not acknowledge the interrupt within ${CANCEL_FORCE_CLOSE_MS / 1000}s; force-closing its event queue.`);
         session.queue?.close();
         resolveUnblock();
       }, CANCEL_FORCE_CLOSE_MS);
-      timer.unref?.();
+      forceTimer.unref?.();
     });
-    await Promise.race([interrupt, forceUnblock]);
+    try {
+      await Promise.race([interrupt, forceUnblock]);
+    } finally {
+      // The normal interrupt acknowledgement wins almost immediately. The
+      // fallback timer must not remain armed: if it fires during the next
+      // prompt on this persistent session it would close that new turn's
+      // queue and surface as a false "ended without a completion event".
+      if (forceTimer) clearTimeout(forceTimer);
+    }
   }
 
   async respondToPermission(input: { session: AgentSessionHandle; requestId: string; approved: boolean }): Promise<void> {
@@ -537,11 +573,13 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
     }
     state.client.fail("The Codex app-server was shut down.");
     if (state.child.exitCode === null && !state.child.killed) {
-      killProcessTree(state.child);
-      await new Promise<void>((resolveExit) => {
-        const timeout = setTimeout(resolveExit, 5_000);
-        state.child.once("exit", () => { clearTimeout(timeout); resolveExit(); });
+      const childExited = new Promise<void>((resolveExit) => {
+        if (state.child.exitCode !== null || state.child.signalCode !== null) return resolveExit();
+        const finish = () => { clearTimeout(timeout); resolveExit(); };
+        const timeout = setTimeout(finish, 5_000);
+        state.child.once("exit", finish);
       });
+      await Promise.all([killProcessTree(state.child), childExited]);
     }
     this.servers.delete(handle.serverId);
   }
@@ -643,6 +681,25 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
               }));
             });
           }
+        } else if (started) {
+          // Any item kind other than commandExecution/fileChange -- notably Codex's
+          // own item kind for calling an MCP server tool, which is exactly how M9R's
+          // desktop-dispatch tools (m9r_stage_action, m9r_computer_action, ...) are
+          // invoked -- fell through both branches above with no event at all. That
+          // silently dropped every "tool" event for a Codex turn whose actions are
+          // MCP tool calls rather than shell commands or file edits, which is why
+          // first-visible-action/inter-action-think never recorded for such a turn
+          // despite the dispatch itself succeeding. Emit a best-effort generic
+          // activity instead of discarding the item, regardless of its exact kind
+          // string, which this protocol does not document locally.
+          const name = typeof item.name === "string" && item.name.trim()
+            ? item.name
+            : typeof item.tool === "string" && item.tool.trim()
+              ? item.tool
+              : typeof item.title === "string" && item.title.trim()
+                ? item.title
+                : item.type;
+          session.queue?.push(this.activity(session, `${item.type}.started`, "started", text(name, 512)));
         }
         return;
       }

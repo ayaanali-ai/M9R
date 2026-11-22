@@ -15,6 +15,8 @@ import { createWebBrokerClient } from "./web-broker-client";
 import { brokerKeyPath, ownerPipePath } from "./web-broker-paths";
 import { prepareTaskStageNotice } from "./task-stage-notice";
 import { sessionHasUnfinishedDelivery } from "./task-delivery-pump";
+import { shouldReusePausedTask, isLogicalContinuation, logicalTaskHandoff, COMPLETION_DISCIPLINE } from "./logical-task-context";
+import type { Task } from "./inbox-core";
 
 class DeferredDelivery extends Error {
   readonly sessionId: string;
@@ -43,6 +45,20 @@ export type DeliveryOutcome =
   | { state: "failed"; reason: string }
   | { state: "deferred"; reason: string }
   | { state: "skipped"; reason: string };
+
+/** The most recent paused owner task Codex itself left behind in this folder, if any -- the
+ * same lookup managed-provider-owner.ts's pausedOwnerTask() does for its own provider turns.
+ * Codex was never given this: buildQueueMessage() only ever sends the raw goal text, so a
+ * paused task's remainingWork/priorOutcome was computed and stored but never actually reached
+ * Codex, and the next message started it completely cold -- relaunching from scratch instead of
+ * continuing, which is why a multi-step task looked like it "gave up" after step one. */
+function pausedCodexTask(store: LocalStore, taskId: string, taskCwd: string | undefined): Task | undefined {
+  return store.tasksFor("codex")
+    .filter((candidate) => candidate.origin === "human_typed" && candidate.id !== taskId && !candidate.retiredAt
+      && candidate.receipt?.state === "paused" && !candidate.logicalContext?.supersededByTaskId
+      && (!candidate.cwd || normCwd(candidate.cwd) === normCwd(taskCwd ?? "")))
+    .sort((a, b) => b.seq - a.seq)[0];
+}
 
 /** A task launched by M9R itself can inherit ~/.m9r/bin as process.cwd(); that is install state, never a project. */
 function projectCwdForTask(store: LocalStore, cwd: string | undefined): string | undefined {
@@ -78,7 +94,7 @@ export async function deliverToCodex(store: LocalStore, taskId: string, deps: De
 }
 
 async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: DeliveryDeps, wasDispatched: () => boolean): Promise<DeliveryOutcome> {
-  const task = store.getTask(taskId);
+  let task = store.getTask(taskId);
   if (!task) return { state: "skipped", reason: "no such task" };
   if (task.to !== "codex") return { state: "skipped", reason: "not addressed to codex" };
   if (!canQueue(task)) return { state: "skipped", reason: "waiting for approval" };
@@ -87,13 +103,27 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
   // an unknown sender folder too, so those tasks can use the current live Codex identity.
   const taskCwd = projectCwdForTask(store, task.cwd);
 
+  // prepareLogicalTaskContext() is idempotent (a task that already has a logicalContext is
+  // returned unchanged), so this is safe to call on every delivery attempt, including retries.
+  if (task.origin === "human_typed" && !task.logicalContext) {
+    const previous = shouldReusePausedTask(task.goal) ? pausedCodexTask(store, taskId, taskCwd) : undefined;
+    const withContext = store.prepareLogicalTaskContext(taskId, previous?.id, isLogicalContinuation(task.goal));
+    if (withContext) task = withContext;
+  }
+  // Give Codex what managed-provider-owner.ts already gives every other provider: the prior
+  // paused turn's remaining work and outcome, plus explicit instruction that ending the turn is
+  // not completion. Without this, buildQueueMessage()'s raw goal text alone left Codex with no
+  // signal that a pause here is recoverable, so it never continued -- and the next task started
+  // from zero, re-launching whatever it had already opened instead of picking up from there.
+  const queueMessage = (t: Task) => (t.logicalContext ? logicalTaskHandoff(t) + "\n\n" + COMPLETION_DISCIPLINE + "\n\n" : "") + buildQueueMessage(t);
+
   const attempts = task.delivery?.attempts ?? 1;
   const fail = (reason: string): DeliveryOutcome => {
     store.setDelivery(taskId, { state: wasDispatched() ? "uncertain" : "failed", attempts, error: reason });
     return { state: "failed", reason };
   };
   const queueMessageFor = async (sessionId: string): Promise<string | null> => {
-    if (!deps.requireTargetIdentity) return buildQueueMessage(task);
+    if (!deps.requireTargetIdentity) return queueMessage(task);
     const token = store.identityTokenFor("codex", sessionId);
     if (!token) return null;
     if (!store.bindTaskToSession(taskId, token)) {
@@ -102,9 +132,11 @@ async function deliverClaimedToCodex(store: LocalStore, taskId: string, deps: De
       throw new Error("This task's session ownership is ambiguous; no additional prompt was pushed.");
     }
     // Authentication and task binding are supplied through the trusted hook
-    // context; the real user turn contains only the owner's task.
+    // context; the real user turn contains only the owner's task (plus, same as
+    // the unauthenticated branch above, the owner's own prior-turn continuation
+    // data -- never chat transcript or routing explanation).
     store.setDelivery(taskId, { state: "sending", threadId: sessionId, correlation: "internal-context" });
-    return buildQueueMessage(task);
+    return queueMessage(task);
   };
   const everySession = deps.requireTargetIdentity ? store.sessionsWithIdentity("codex") : store.sessionsFor("codex");
 
@@ -197,7 +229,13 @@ export function collectCodexResults(store: LocalStore, deps: Pick<DeliveryDeps, 
       state: "queued", threadId, queuedAt: new Date().toISOString(), error: undefined,
     });
     if (result.done) {
-      store.setResult(task.id, resultSummary(task.id, result.message));
+      // Codex's own explicit "done" marker in the rollout is itself the
+      // confirmation that would otherwise come from a structured m9r_result
+      // call. Without passing it through here, setResult's no-report default
+      // (added 2026-11-01, task-completion-contract.ts) treated every one of
+      // these as an unconfirmed outcome -- a Codex answer could never reach
+      // "completed", only ever "uncertain", regardless of what it actually said.
+      store.setResult(task.id, resultSummary(task.id, result.message), { status: "completed", remainingWork: [] });
       collected += 1;
     }
   }

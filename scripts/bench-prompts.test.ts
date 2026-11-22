@@ -16,6 +16,8 @@ test("no prompt contains the answer, and every prompt carries its own token and 
       for (const condition of CONDITIONS) {
         for (const role of rolesFor(condition)) {
           const text = prompt(task, condition, role);
+          assert.doesNotMatch(text, /m9r_web_(?:open|read|click|type|do|scroll)/, `${task}/${condition}/${role} must not advertise retired browser tools`);
+          assert.match(text, /m9r_computer_observe/);
           for (const secret of secrets) assert.ok(!text.includes(secret), `${task}/${condition}/${role} leaks ${secret}`);
           assert.ok(text.includes(`tok-${role}`), `${task}/${condition}/${role} has its token`);
           assert.ok(text.includes(base), `${task}/${condition}/${role} has the site address`);

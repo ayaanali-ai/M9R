@@ -64,8 +64,23 @@ function normalizeArtifacts(entries) {
   return sorted;
 }
 
-function buildIdFor(artifacts) {
+const NON_DETERMINISTIC_SEA_ARTIFACTS = new Set(["m9r-engine.exe", "m9r-web-broker.exe"]);
+
+function legacyBuildIdFor(artifacts) {
   return createHash("sha256").update(JSON.stringify(Object.entries(artifacts))).digest("hex");
+}
+
+function buildIdFor(artifacts, source = { sourceCommit: "unknown", sourceDirty: true }) {
+  // Node SEA embeds a small amount of path/build metadata in the generated
+  // executable. Those bytes can differ when the same source is assembled in a
+  // different staging directory, even though the runtime's logical inputs are
+  // identical. Keep the per-file hashes in the manifest for exact integrity
+  // verification, but derive the release identity from the source provenance
+  // and the deterministic artifact set so rebuilds remain promotable.
+  const stableArtifacts = Object.entries(artifacts)
+    .filter(([path]) => !NON_DETERMINISTIC_SEA_ARTIFACTS.has(path))
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  return createHash("sha256").update(JSON.stringify({ source, artifacts: stableArtifacts })).digest("hex");
 }
 
 export function writeRuntimeBuildManifest(
@@ -79,7 +94,7 @@ export function writeRuntimeBuildManifest(
     || typeof source.sourceDirty !== "boolean") {
     throw new Error("Runtime build source provenance is invalid.");
   }
-  const manifest = { schemaVersion: 1, buildId: buildIdFor(artifacts), builtAt, artifacts, source };
+  const manifest = { schemaVersion: 1, buildId: buildIdFor(artifacts, source), builtAt, artifacts, source };
   writeFileSync(join(root, RUNTIME_BUILD_INFO_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
@@ -96,7 +111,17 @@ export function verifyRuntimeBuildManifest(root, { exact = false } = {}) {
     throw new Error("Runtime build manifest has an invalid schema.");
   }
   const artifacts = normalizeArtifacts(Object.entries(manifest.artifacts));
-  if (buildIdFor(artifacts) !== manifest.buildId) throw new Error("Runtime build manifest digest does not match its artifact list.");
+  const source = manifest.source && typeof manifest.source === "object"
+    && typeof manifest.source.sourceCommit === "string"
+    && typeof manifest.source.sourceDirty === "boolean"
+    ? manifest.source
+    : { sourceCommit: "unknown", sourceDirty: true };
+  // Accept one-generation legacy manifests so a generated runtime can be
+  // rebuilt and atomically replaced after the identity algorithm upgrade.
+  // New manifests are always written with the stable source-derived identity.
+  if (buildIdFor(artifacts, source) !== manifest.buildId && legacyBuildIdFor(artifacts) !== manifest.buildId) {
+    throw new Error("Runtime build manifest digest does not match its artifact list.");
+  }
 
   const actualPaths = [];
   for (const [path, expectedHash] of Object.entries(artifacts)) {

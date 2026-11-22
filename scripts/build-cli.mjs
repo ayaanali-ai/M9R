@@ -11,9 +11,11 @@ import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, cpSync, read
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import ts from "typescript";
 import { buildSync } from "esbuild";
 import { publishGeneratedDirectory } from "./engine-build-transaction.mjs";
+import { validateCliRelativeImports } from "./cli-import-validation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cliDir = resolve(repoRoot, "cli");
@@ -24,6 +26,22 @@ const finalOutDir = resolve(process.env.M9R_CLI_OUTPUT_DIR || resolve(cliDir, "d
 const outDir = resolve(dirname(finalOutDir), `.dist-stage-${process.pid}-${randomUUID()}`);
 
 const SHEBANG = "#!/usr/bin/env node\n";
+
+function buildMarker() {
+  // A wall-clock timestamp inside cli/dist becomes part of every SEA
+  // executable and makes byte-identical source produce a different runtime
+  // identity on every build.  The source commit already changes whenever a
+  // clean release build is allowed to change, so use it as the freshness
+  // marker as well as the reproducibility anchor.  Keep a stable fallback for
+  // package consumers that build outside a Git checkout.
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  const commit = !result.error && result.status === 0 ? String(result.stdout).trim() : "";
+  return /^[a-f0-9]{40}$/i.test(commit) ? `git:${commit.toLowerCase()}` : "unversioned";
+}
 
 function transpile(tsSource) {
   return ts.transpileModule(tsSource, {
@@ -292,16 +310,26 @@ function build() {
 
   // Native front door (setup, uninstall, send). Modules import each other as "./x", which ESM
   // needs as "./x.js"; every module this list ships must be listed here or the CLI breaks at runtime.
-  for (const name of ["atomic-file", "agent-chrome", "agent-chrome-cli", "agent-chrome-input", "windows-desktop-stage", "cua-driver-host", "cua-stage-driver", "foreground-input-lease", "desktop-input-errors", "stage-errors", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "multiplayer-action-policy", "multiplayer-task-context", "multiplayer-runtime", "universal-intent-resolver", "workflow-preferences", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "claude-delivery", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "logical-task-context", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "provider-session-reconciliation", "multiplayer-contract", "multiplayer-presence", "multiplayer-run-coordinator", "multiplayer-a2a", "multiplayer-surface", "multiplayer-target-identity", "multiplayer-mutation-scheduler", "multiplayer-dispatch-fence", "runtime-readiness", "latency-telemetry", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-state", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "opencode-executable", "web-native-input-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers"]) {
+  for (const name of ["public-media", "agent-input-stream", "owner-work-mode", "native-control-region", "atomic-file", "browser-space-ledger", "windows-desktop-stage", "process-liveness", "cua-driver-host", "cua-stage-driver", "agent-cursor-overlay-host", "foreground-input-lease", "desktop-input-errors", "stage-errors", "stage-save-as", "task-desktop-stage", "task-stage-actions", "task-stage-apps", "windows-installed-apps", "task-stage-notice", "computer-use-contract", "computer-use-router", "multiplayer-action-policy", "multiplayer-task-context", "multiplayer-runtime", "universal-intent-resolver", "workflow-preferences", "observation-modality-ledger", "computer-use-mcp", "provider-usage-core", "mention-core", "inbox-core", "approval-core", "risk-core", "approval-commands", "feed-core", "feed-writer", "memory-hint-core", "memory-command", "task-execution-context", "task-delivery-pump", "codex-delivery-core", "codex-liveness", "codex-delivery", "codex-watch-core", "codex-watch", "claude-registry", "claude-delivery", "identity-core", "mcp-connection-core", "mcp-connection-env", "mcp-runtime-path", "local-store", "logical-task-context", "agent-credential-store", "runtime-install-transaction", "runtime-build-identity", "engine-update-core", "update-lifecycle-core", "update-lifecycle", "provider-update-compatibility-core", "provider-update-lifecycle-core", "provider-update-monitor", "provider-update-route-actions", "provider-session-reconciliation", "multiplayer-contract", "multiplayer-cursor-chatter", "multiplayer-presence", "multiplayer-run-coordinator", "multiplayer-a2a", "multiplayer-surface", "multiplayer-target-identity", "multiplayer-mutation-scheduler", "multiplayer-dispatch-fence", "runtime-readiness", "latency-telemetry", "web-broker-paths", "web-broker-runtime", "owner-pipe", "web-broker-core", "turn-scheduler-core", "web-broker-server", "web-broker-client", "web-ui-bridge", "desktop-pill-state", "desktop-pill-presence", "web-authority-core", "web-authority-store", "web-authority-cli", "web-setup-core", "opencode-model-core", "opencode-plugin-refresh", "opencode-executable", "legacy-browser-extension-cleanup-core", "web-powers-core", "page-notes-core", "page-notes-store", "network-core-client", "network-core-mcp-tools", "vendor-launch-core", "claude-session-id-core", "live-session-core", "session-activity-core", "project-room", "cloud-memory", "hosted-agent-session-core", "opencode-session-core", "opencode-cli-core", "mcp-stdio-supervisor", "install-core", "onboarding-steps", "native-commands", "mcp-server", "m9r-prompt-markers", "multiplayer-inbox-delivery"]) {
     const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
     const js = transpile(source)
-      .replace(/from\s+["']\.\/([a-z-]+)["']/g, 'from "./$1.js"')
+      .replace(/from\s+["']\.\/([a-z0-9-]+)["']/g, 'from "./$1.js"')
       .replace(/["']\.\/m9r-prompt-markers["']/g, '"./m9r-prompt-markers.js"')
       .replace(/["']\.\.\/bridge\/governed-agent-tools["']/g, '"./governed-agent-tools.js"')
       .replace(/["']@\/lib\/memory-distill-core["']/g, '"./memory-distill-core.js"')
       .replace(/["']\.\.\/adapter-contract["']/g, '"./adapter-contract.js"')
       .replace(/["']\.\.\/agent-detection-core["']/g, '"./agent-detection-core.js"');
     writeFileSync(resolve(outDir, `${name}.js`), js);
+  }
+  // The brokered JS program is imported by computer-use-mcp and is kept in a
+  // separate pass so the legacy native module allowlist remains reviewable.
+  for (const name of ["computer-use-program"]) {
+    const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
+    writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z0-9-]+)["']/g, 'from "./$1.js"'));
+  }
+  for (const name of ["computer-use-recovery", "computer-use-latency", "task-completion-contract", "task-working-context", "observation-payload", "hook-handler"]) {
+    const source = readFileSync(resolve(repoRoot, `src/lib/native/${name}.ts`), "utf8");
+    writeFileSync(resolve(outDir, `${name}.js`), transpile(source).replace(/from\s+["']\.\/([a-z0-9-]+)["']/g, 'from "./$1.js"'));
   }
   const localPresenceHeartbeatTs = readFileSync(resolve(repoRoot, "src/lib/native/local-presence-heartbeat.ts"), "utf8");
   writeFileSync(resolve(outDir, "local-presence-heartbeat.js"), transpile(localPresenceHeartbeatTs));
@@ -316,17 +344,10 @@ function build() {
     platform: "node",
     format: "cjs",
     target: "node22",
-  define: { "import.meta.url": "__m9rBrokerUrl" },
+    define: { "import.meta.url": "__m9rBrokerUrl" },
   banner: { js: 'const __m9rBrokerUrl = require("node:url").pathToFileURL(__filename).href;' },
     tsconfig: resolve(repoRoot, "tsconfig.json"),
     logLevel: "silent",
-  });
-  cpSync(resolve(repoRoot, "extensions/browser"), resolve(outDir, "extension"), {
-    recursive: true,
-    filter(source) {
-      const relative = source.slice(resolve(repoRoot, "extensions/browser").length).replaceAll("\\", "/");
-      return !/(^|\/)(store-assets|test-page|node_modules|\.git)(\/|$)/.test(relative);
-    },
   });
 
   const missionParticipantIdsTs = readFileSync(resolve(repoRoot, "src/lib/mission/mission-participant-ids.ts"), "utf8");
@@ -525,7 +546,6 @@ function build() {
   //    then prepend the shebang so it runs as a bin.
   const entryTs = readFileSync(resolve(repoRoot, "scripts/m9r-cli.ts"), "utf8");
   let entryJs = transpile(entryTs)
-    .replace(/['"]\.\.\/src\/lib\/native\/agent-chrome-cli['"]/g, '"./agent-chrome-cli.js"')
     .replace(/['"]\.\.\/src\/lib\/native\/windows-desktop-stage['"]/g, '"./windows-desktop-stage.js"')
     .replace(/['"]\.\.\/src\/lib\/native\/cua-stage-driver['"]/g, '"./cua-stage-driver.js"')
     .replace(/['"]\.\.\/src\/lib\/native\/task-desktop-stage['"]/g, '"./task-desktop-stage.js"')
@@ -640,7 +660,7 @@ function build() {
 
   // Leaf modules that several compiled files import through the app's `@/` alias. Without this pass the packaged CLI
   // crashes on start with ERR_MODULE_NOT_FOUND ("Cannot find package '@/lib'").
-  for (const [source, name] of [["src/lib/native/m9r-compatibility.ts", "m9r-compatibility"], ["src/lib/native/broker-update-record.ts", "broker-update-record"], ["src/lib/terminal-config.ts", "terminal-config"], ["packages/web-protocol-placeholder/src/index.ts", "web-protocol-placeholder"]]) {
+  for (const [source, name] of [["src/lib/native/m9r-compatibility.ts", "m9r-compatibility"], ["src/lib/native/broker-update-record.ts", "broker-update-record"], ["src/lib/native/broker-startup-core.ts", "broker-startup-core"], ["src/lib/terminal-config.ts", "terminal-config"], ["packages/web-protocol-placeholder/src/index.ts", "web-protocol-placeholder"]]) {
     writeFileSync(resolve(outDir, `${name}.js`), transpile(readFileSync(resolve(repoRoot, source), "utf8")));
   }
   for (const file of readdirSync(outDir)) {
@@ -649,6 +669,7 @@ function build() {
     const before = readFileSync(path, "utf8");
     const after = before
       .replace(/["'](?:@\/lib\/native|(?:\.\.\/)+src\/lib\/native)\/m9r-compatibility["']/g, '"./m9r-compatibility.js"')
+      .replace(/["'](?:@\/lib\/native|(?:\.\.\/)+src\/lib\/native)\/broker-startup-core["']/g, '"./broker-startup-core.js"')
       .replace(/["'](?:@\/lib\/native|(?:\.\.\/)+src\/lib\/native)\/agent-credential-store["']/g, '"./agent-credential-store.js"')
       .replace(/["']\.\/native\/agent-credential-store["']/g, '"./agent-credential-store.js"')
       .replace(/["']@\/lib\/terminal-config["']/g, '"./terminal-config.js"')
@@ -657,19 +678,19 @@ function build() {
   }
 
   // A running resident/bridge process has no way to know a rebuild happened
-  // out from under it -- confirmed live tonight: a process that had been
-  // running for hours after several rebuilds kept silently executing its
-  // original stale code with zero signal, and the only way to notice was
-  // manually diffing process start times against git history. Stamping the
-  // build time here is what buildFreshnessCheck() (oathlock-cli-core.ts)
-  // compares its own startup-captured value against on every poll cycle.
-  writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString() }, null, 2) + "\n");
+  // out from under it. The marker is intentionally source-derived rather than
+  // wall-clock-derived: it still changes on every clean source release, while
+  // repeated builds of the same source remain byte-identical for reproducible
+  // SEA artifacts and stable runtime identities.
+  writeFileSync(resolve(outDir, "build-info.json"), JSON.stringify({ builtAt: buildMarker() }, null, 2) + "\n");
+
+  validateCliRelativeImports(outDir);
 
   // Validate every generated executable entrypoint before publishing. A
   // missing generated module must fail this build, not the subsequent SEA
   // packaging or a user's first provider/desktop command. No verification
   // bundle ships; this is only a dependency-graph check.
-  for (const entry of ["m9r.js", "m9r-mcp.js", "dev-mcp-server.js", "native-commands.js"]) {
+  for (const entry of ["m9r.js", "m9r-mcp.js", "dev-mcp-server.js", "native-commands.js", "multiplayer-runtime.js", "codex-watch.js"]) {
     buildSync({ entryPoints: [resolve(outDir, entry)], bundle: true,
       platform: "node", format: "esm", write: false, logLevel: "warning",
       // The CLI has a fallback import for source checkouts; packaged builds

@@ -1,25 +1,94 @@
 // The island: DOM shell, sizing animation, mark placement, mouse handling, window collapse.
 
-import { Tracked, Spring, clamp } from "../core/anim";
+import { Tracked, Spring, clamp, CLOSE_MS } from "../core/anim";
 import {
-  EXPANDED_CORNER, NOTCH_W, PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
-  botGlowColor, botGlowOpacity, botPosition, islandSize,
+  PANEL_W, ROUNDED_CORNER, VIEW_LAYOUTS,
+  MEDIA_TONE, botGlowColor, botGlowOpacity, botPosition, islandSize,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
+import { brief, speak, stopSpeaking } from "../core/voice";
+import { displayName, plainStep } from "../core/humanize";
 import { browserSpeechEnv } from "../core/speech";
 import { State, type PillSnapshot } from "../core/state";
 import type { Decision, FileDropHandlers, PillTransport } from "../core/transport";
-import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
+import { buildHeader, buildSettings, buildViews, type ViewActions, type ViewHost } from "../views/views";
+import { buildSidebar, type SidebarHost } from "../views/sidebar";
+import { buildIdentity } from "../views/identity";
+import { buildAgentDrum, type AgentDrum } from "../views/agent-drum";
 import { providerLogo } from "../views/provider";
 import { h, svg } from "../views/dom";
-import { squirclePath } from "../core/squircle";
 import { IslandStateMachine } from "./fsm";
 
 /** Margin around the island that still counts as "over it" (the host uses the same value for click-through). */
 const HIT_MARGIN = 14;
 
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
+/** Room around the island for the edge glow's halo. */
+const GLOW_PAD = 40;
+const LIP_W = 288;
+const LIP_H = 32;
+const MIN_OPEN_W = 310;
+const MIN_OPEN_H = 230;
+const DEFAULT_OPEN_W = 704;
+const DEFAULT_OPEN_H = 432;
+
+/** Size of the outward flare at the top corners of the neck (and of the compact pill's ears). */
+const NECK_FLARE = 15;
+/** Height window (above the compact height) over which the bottom corners and the ears blend between compact and open. */
+const BLEND_H = 30;
+
+const unit = (v: number) => Math.min(1, Math.max(0, v));
+
+/**
+ * One continuous outline for every size, compact through open.
+ *
+ * Compact (reach 0) degenerates to the flat-topped capsule -- its outward top
+ * arches are drawn by archLeft/archRight just outside this box (see applyArches).
+ * Open grows the narrow neck (the lip) above the wider panel.
+ *
+ * This used to switch between two separate paths at `height > LIP_H + 1`, with the
+ * bottom radius jumping 15 -> 28 there. Below ~55px the open path's side walls also
+ * ran backwards (`V height - 28` sat above the shoulder), so the outline crossed
+ * itself. Opening springs through that band in a frame or two. Closing eases into
+ * it slowly, so a close spent many frames showing a self-crossing outline and then
+ * snapped -- the "glitch at the end of the close". Every value below is now a
+ * continuous function of (width, height) and is clamped so the outline never
+ * crosses itself.
+ */
+function notchShapePath(width: number, height: number): string {
+  const lip = Math.min(LIP_W, width);
+  const reach = Math.max(0, (width - lip) / 2);
+  const expansion = unit((height - LIP_H) / 100);
+  const bottom = Math.min(15 + 13 * unit((height - LIP_H) / BLEND_H), height / 2);
+  const flare = Math.min(14, reach * 0.4);
+  // Room between the top edge and where the bottom corners begin; the shoulder and its corner must fit inside it.
+  const room = Math.max(0, height - bottom);
+  const corner = Math.min(24, reach * 0.45, room / 2);
+  const shoulderY = Math.max(0, Math.min(15 + 12 * expansion, room - corner));
+  const neckY = Math.min(NECK_FLARE, shoulderY);
+  const topInset = Math.max(0, reach - NECK_FLARE);
+  const topRight = width - topInset;
+  return [
+    `M ${topInset} 0 Q ${reach} 0 ${reach} ${neckY}`,
+    `Q ${reach} ${shoulderY} ${reach - flare} ${shoulderY}`,
+    `H ${corner} Q 0 ${shoulderY} 0 ${shoulderY + corner}`,
+    `V ${height - bottom} Q 0 ${height} ${bottom} ${height}`,
+    `H ${width - bottom} Q ${width} ${height} ${width} ${height - bottom}`,
+    `V ${shoulderY + corner} Q ${width} ${shoulderY} ${width - corner} ${shoulderY}`,
+    `H ${width - reach + flare} Q ${width - reach} ${shoulderY} ${width - reach} ${neckY}`,
+    `Q ${width - reach} 0 ${topRight} 0 Z`,
+  ].join(" ");
+}
+
+/** Your voice first, then your music, then an agent that needs you, then one that's working; otherwise no glow. */
+function edgeTone(): { color: string; live: boolean; ambient: boolean } | null {
+  if (State.listening || State.speaking) return { color: "#FFFFFF", live: true, ambient: false };
+  if (State.media?.playing) return { color: MEDIA_TONE[State.media.source], live: false, ambient: false };
+  if (State.tasks.some((t) => t.state === "approval")) return { color: botGlowColor("approval"), live: true, ambient: false };
+  if (State.tasks.some((t) => t.runState === "working")) return { color: botGlowColor("working"), live: true, ambient: true };
+  return null;
+}
 
 export class Island {
   readonly fsm = new IslandStateMachine();
@@ -32,19 +101,28 @@ export class Island {
   private viewsEl!: HTMLElement;
   private markEl!: HTMLElement;
   private markGlow!: HTMLElement;
+  private edgeGlow!: SVGSVGElement;
+  private glowShape!: SVGGElement;
+  private glowIsland!: SVGPathElement;
+  private archLeft!: SVGSVGElement;
+  private archRight!: SVGSVGElement;
   private miniGrid!: HTMLElement;
   private countdown!: HTMLElement;
   private wakeStrip!: HTMLElement;
-  /** Hitodama-style flared ears: separate siblings so the island's clip never cuts them off. */
-  private archLeft!: SVGSVGElement;
-  private archRight!: SVGSVGElement;
 
   private header!: ViewHost;
+  private sidebar!: SidebarHost;
+  private agentDrum!: AgentDrum;
+  private identityHost!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
+  private settingsHost!: ViewHost;
+  private settingsOverlayEl!: HTMLElement;
 
-  private width = new Tracked(NOTCH_W);
+  private width = new Tracked(LIP_W);
   private height = new Tracked(0);
   private radius = new Tracked(ROUNDED_CORNER);
+  private openWidth = DEFAULT_OPEN_W;
+  private openHeight = DEFAULT_OPEN_H;
   private markCx = new Spring(46);
   private markCy = new Spring(16);
   private markSize = new Spring(10);
@@ -61,10 +139,12 @@ export class Island {
   private homeCollapseAt: number | null = null;
   private lastSyncedView: IslandViewName | null = null;
   private markKey = "";
+  private screenGlowKey = "";
 
   constructor(root: HTMLElement, transport: PillTransport) {
     this.root = root;
     this.transport = transport;
+    this.loadOpenSize();
     this.build();
     this.wireFsm();
     this.wireInput();
@@ -75,17 +155,145 @@ export class Island {
     });
   }
 
+  private loadOpenSize() {
+    const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+    const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
+    try {
+      const savedWidth = Number(localStorage.getItem("notch-preview-w"));
+      const savedHeight = Number(localStorage.getItem("notch-preview-h"));
+      this.openWidth = clamp(savedWidth > 0 ? savedWidth : DEFAULT_OPEN_W, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+      this.openHeight = clamp(savedHeight > 0 ? savedHeight : DEFAULT_OPEN_H, MIN_OPEN_H, maxHeight);
+    } catch {
+      this.openWidth = Math.min(DEFAULT_OPEN_W, maxWidth);
+      this.openHeight = Math.min(DEFAULT_OPEN_H, maxHeight);
+    }
+  }
+
+  /** Size before the last maximize; null while not maximized. */
+  private preMaximize: { w: number; h: number } | null = null;
+
+  /** Set by a periodic check_for_update poll; null means nothing to offer. */
+  private updateAvailableVersion: string | null = null;
+
+  private pollForUpdate() {
+    if (!this.transport.capabilities?.update || !this.transport.checkForUpdate) return;
+    const check = () => {
+      void this.transport.checkForUpdate!().then((version) => {
+        if (version === this.updateAvailableVersion) return;
+        this.updateAvailableVersion = version;
+        this.sidebar?.sync();
+      });
+    };
+    check();
+    setInterval(check, 30 * 60 * 1000);
+  }
+
+  /** Fill the whole pill window (the native window is the hard ceiling), or restore the previous size. */
+  private toggleMaximize() {
+    if (this.preMaximize) {
+      this.openWidth = this.preMaximize.w;
+      this.openHeight = this.preMaximize.h;
+      this.preMaximize = null;
+    } else {
+      this.preMaximize = { w: this.openWidth, h: this.openHeight };
+      this.openWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+      this.openHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
+    }
+    this.islandEl.classList.toggle("maximized", this.preMaximize !== null);
+    if (State.mode === "expanded") this.animateGeometry(false);
+    this.dirty = true;
+    this.ensureRunning();
+    State.notify();
+  }
+
+  private wireResize(container: HTMLElement) {
+    for (const handle of container.querySelectorAll<HTMLElement>(".resize-handle")) {
+      const edge = handle.dataset.edge;
+      let start: { x: number; y: number; w: number; h: number } | null = null;
+      const persist = () => {
+        if (!start) return;
+        start = null;
+        try {
+          localStorage.setItem("notch-preview-w", String(Math.round(this.openWidth)));
+          localStorage.setItem("notch-preview-h", String(Math.round(this.openHeight)));
+        } catch { /* resizing still works when storage is unavailable */ }
+      };
+      handle.addEventListener("pointerdown", (event) => {
+        if (State.mode !== "expanded") return;
+        event.preventDefault();
+        event.stopPropagation();
+        start = { x: event.clientX, y: event.clientY, w: this.openWidth, h: this.openHeight };
+        if (this.preMaximize) { this.preMaximize = null; this.islandEl.classList.remove("maximized"); }
+        handle.setPointerCapture(event.pointerId);
+        this.islandEl.classList.add("resizing");
+      });
+      handle.addEventListener("pointermove", (event) => {
+        if (!start) return;
+        const dx = event.clientX - start.x;
+        const dy = event.clientY - start.y;
+        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
+        if (edge === "left" || edge === "right" || edge === "corner") {
+          const sign = edge === "left" ? -1 : 1;
+          this.openWidth = clamp(start.w + sign * 2 * dx, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+        }
+        if (edge === "bottom" || edge === "corner") this.openHeight = clamp(start.h + dy, MIN_OPEN_H, maxHeight);
+        this.width.jump(this.openWidth);
+        this.height.jump(this.openHeight);
+        this.applyGeometry();
+        this.dirty = true;
+        this.ensureRunning();
+      });
+      handle.addEventListener("pointerup", persist);
+      handle.addEventListener("pointercancel", persist);
+      handle.addEventListener("lostpointercapture", () => {
+        this.islandEl.classList.remove("resizing");
+        persist();
+      });
+      handle.addEventListener("keydown", (event) => {
+        if (State.mode !== "expanded" || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 20 : 8;
+        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
+        if (event.key === "ArrowLeft") this.openWidth = clamp(this.openWidth - step, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+        if (event.key === "ArrowRight") this.openWidth = clamp(this.openWidth + step, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
+        if (event.key === "ArrowUp") this.openHeight = clamp(this.openHeight - step, MIN_OPEN_H, maxHeight);
+        if (event.key === "ArrowDown") this.openHeight = clamp(this.openHeight + step, MIN_OPEN_H, maxHeight);
+        this.width.jump(this.openWidth);
+        this.height.jump(this.openHeight);
+        this.applyGeometry();
+        this.dirty = true;
+        this.ensureRunning();
+        try {
+          localStorage.setItem("notch-preview-w", String(Math.round(this.openWidth)));
+          localStorage.setItem("notch-preview-h", String(Math.round(this.openHeight)));
+        } catch { /* keyboard resizing remains available */ }
+      });
+    }
+  }
+
   // ── DOM ──────────────────────────────────────────────────────────
 
   private build() {
     const actions: ViewActions = {
       setView: (v) => this.setView(v),
       collapse: () => this.collapse(),
+      focusWindow: (focused) => this.transport.focusWindow?.(focused),
       setFocus: (id) => {
         State.setFocus(id);
         Sound.play("blip");
       },
-      decide: (d) => this.decide(d),
+      openIdentity: (id) => {
+        if (id) State.setFocus(id);
+        State.identityOpen = true;
+        State.notify();
+      },
+      closeIdentity: () => {
+        State.identityOpen = false;
+        State.notify();
+      },
+      decide: (d, approvalId) => this.decide(d, approvalId),
       send: (text) => this.transport.send(text),
       canAllowForADay: () => this.transport.capabilities?.allowForADay === true,
       dictation: this.transport.capabilities?.dictation
@@ -94,12 +302,19 @@ export class Island {
       saveMemory: this.transport.capabilities?.saveMemory && this.transport.saveMemory ? (text) => this.transport.saveMemory!(text) : undefined,
       dismissTask: this.transport.capabilities?.dismissTask && this.transport.dismissTask ? (taskId) => this.transport.dismissTask!(taskId) : undefined,
       selectModel: this.transport.selectModel ? (handle, model, effort) => this.transport.selectModel!(handle, model, effort) : undefined,
+      setOwnerWorkMode: this.transport.setOwnerWorkMode ? (mode) => this.transport.setOwnerWorkMode!(mode) : undefined,
       linking: this.transport.capabilities?.linkSessions && this.transport.listSessions && this.transport.linkSession
         ? { list: (handle) => this.transport.listSessions!(handle), link: (offer, session) => this.transport.linkSession!(offer, session) }
         : undefined,
       toggleSound: () => {
         State.settings.soundEnabled = !State.settings.soundEnabled;
         Sound.setEnabled(State.settings.soundEnabled);
+        this.transport.saveSettings?.(State.settings);
+        State.notify();
+      },
+      updateSettings: (patch) => {
+        Object.assign(State.settings, patch);
+        if (patch.voiceEnabled === false) stopSpeaking();
         this.transport.saveSettings?.(State.settings);
         State.notify();
       },
@@ -110,6 +325,16 @@ export class Island {
         State.notify();
       },
       blip: () => Sound.play("blip"),
+      toggleMaximize: () => this.toggleMaximize(),
+      isMaximized: () => this.preMaximize !== null,
+      updateAvailable: this.transport.capabilities?.update ? () => this.updateAvailableVersion : undefined,
+      applyUpdate: this.transport.capabilities?.update && this.transport.applyUpdate
+        ? () => { void this.transport.applyUpdate!(this.updateAvailableVersion!); }
+        : undefined,
+      toggleSettings: () => {
+        State.settingsOpen = !State.settingsOpen;
+        State.notify();
+      },
     };
 
     this.wakeStrip = h("div", { id: "wake-strip" });
@@ -119,12 +344,37 @@ export class Island {
     this.countdown = h("div", { id: "countdown" });
 
     this.header = buildHeader(actions);
+    // Agent identity lives at the top, centred (Muse's avatar slot), as a drum of every agent.
+    this.agentDrum = buildAgentDrum(actions);
+    this.header.el.append(this.agentDrum.el);
+    this.sidebar = buildSidebar(actions);
+    this.pollForUpdate();
     this.views = buildViews(actions, () => this.animateGeometry(false));
     this.viewsEl = h("div", { id: "views" });
     for (const v of this.views.values()) this.viewsEl.append(v.el);
-    this.contentEl = h("div", { id: "content" }, this.header.el, this.viewsEl);
+    this.identityHost = buildIdentity(actions);
+    const body = h("div", { id: "body" }, this.sidebar.el, this.viewsEl, this.identityHost.el);
+    this.settingsHost = buildSettings(actions, () => { State.settingsOpen = false; State.notify(); });
+    this.settingsOverlayEl = h("div", { class: "settings-overlay", onclick: (e: Event) => {
+      if (e.target === this.settingsOverlayEl) { State.settingsOpen = false; State.notify(); }
+    } }, this.settingsHost.el);
+    this.contentEl = h("div", { id: "content" }, this.header.el, body, this.settingsOverlayEl);
 
     this.clipEl = h("div", { id: "island-clip" }, this.contentEl);
+    const resizeHandles = h("div", { id: "resize-handles", "aria-label": "Resize conversation panel" },
+      ...(["left", "right", "bottom", "corner"] as const).map((edge) => h("div", {
+        class: `resize-handle ${edge}`,
+        role: "separator",
+        tabindex: "0",
+        "aria-label": `Resize ${edge}`,
+        "data-edge": edge,
+      })),
+    );
+    this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown, resizeHandles);
+    this.wireResize(resizeHandles);
+
+    // The collapsed pill's top corners arch outward into the surrounding window margin,
+    // which the island's own clip path can't reach (see notchShapePath's flat top above).
     this.archLeft = svg("M 0 0 L 24 0 L 24 24 L 23 24 C 23 10 13.5 0 0 0 Z", 0, { fill: "var(--notch-ear, #000)" });
     this.archRight = svg("M 24 0 L 0 0 L 0 24 L 1 24 C 1 10 10.5 0 24 0 Z", 0, { fill: "var(--notch-ear, #000)" });
     for (const arch of [this.archLeft, this.archRight]) {
@@ -134,18 +384,43 @@ export class Island {
       arch.style.left = "50%";
       arch.style.pointerEvents = "none";
     }
-    this.islandEl = h("div", { id: "island" }, this.clipEl, this.markGlow, this.markEl, this.miniGrid, this.countdown);
 
-    this.root.append(this.wakeStrip, this.islandEl, this.archLeft, this.archRight);
+    // Behind the island: the island's own outline is a clip path, which would cut off any glow drawn on it.
+    const ns = "http://www.w3.org/2000/svg";
+    this.edgeGlow = document.createElementNS(ns, "svg");
+    this.edgeGlow.id = "edge-glow";
+    this.edgeGlow.setAttribute("aria-hidden", "true");
+    this.glowShape = document.createElementNS(ns, "g");
+    this.glowIsland = document.createElementNS(ns, "path");
+    this.glowShape.append(this.glowIsland);
+    // The rainbow paint: a full spectrum across the silhouette, set flowing by a hue sweep in CSS.
+    const defs = document.createElementNS(ns, "defs");
+    const grad = document.createElementNS(ns, "linearGradient");
+    grad.id = "edge-rainbow";
+    grad.setAttribute("x1", "0");
+    grad.setAttribute("y1", "0");
+    grad.setAttribute("x2", "1");
+    grad.setAttribute("y2", "0");
+    ["#FF5F6D", "#FFB347", "#F9F871", "#47E891", "#4FC3FF", "#8B6CFF", "#FF5FD2", "#FF5F6D"].forEach((color, i, all) => {
+      const stop = document.createElementNS(ns, "stop");
+      stop.setAttribute("offset", `${(i / (all.length - 1)) * 100}%`);
+      stop.setAttribute("stop-color", color);
+      grad.append(stop);
+    });
+    defs.append(grad);
+    this.edgeGlow.append(defs, this.glowShape);
+    this.root.append(this.wakeStrip, this.edgeGlow, this.islandEl, this.archLeft, this.archRight);
     this.applyGeometry();
   }
 
-  private deciding = false;
+  // Keyed by approval id, not a single flag: inline cards in the shared chat can show several
+  // approvals at once, and deciding one must never block or get confused with another.
+  private deciding = new Set<string>();
 
-  private async decide(d: "allow" | "deny" | "allow_day") {
-    const req = State.pendingApproval;
-    if (!req || this.deciding) return;
-    this.deciding = true;
+  private async decide(d: "allow" | "deny" | "allow_day", approvalId?: string) {
+    const req = approvalId ? State.approvals.find((a) => a.id === approvalId) ?? null : State.pendingApproval;
+    if (!req || this.deciding.has(req.id)) return;
+    this.deciding.add(req.id);
     const decision: Decision = d;
     State.setDecisionError(req.id, null);
     try {
@@ -156,14 +431,17 @@ export class Island {
       Sound.play("error");
       return;
     } finally {
-      this.deciding = false;
+      this.deciding.delete(req.id);
     }
     // Keep the approval until the transport accepts the owner's decision.
-    State.resolveApproval(req.id);
+    State.resolveApproval(req.id, decision);
     if (State.approvals.length === 0) {
       State.isPinned = false;
       this.fsm.pinned = false;
-      this.setView(State.defaultView());
+      // The approval was docked above the chat composer: answering it leaves you in the chat
+      // (as in Muse), rather than bouncing to another page.
+      if (State.view !== "prompt") this.setView(State.defaultView());
+      else State.notify();
     } else {
       State.notify();
     }
@@ -185,16 +463,29 @@ export class Island {
       const asking = State.approvals.find((a) => a.id === newApprovals[0]);
       if (asking) State.setFocus(asking.agent);
       State.isPinned = true;
-      this.alert("approval");
-    } else if (State.approvals.length === 0 && State.view === "approval") {
+      // Approvals fold into the one main chat as inline cards; open straight into it.
+      this.alert("prompt");
+      const who = State.tasks.find((t) => t.id === asking?.agent);
+      if (asking && who) {
+        const what = asking.title.trim().replace(/[.!]+$/, "");
+        speak(`${displayName(who)} needs your OK${what ? ` to ${what.charAt(0).toLowerCase()}${what.slice(1)}` : ""}.`);
+      }
+    } else if (State.approvals.length === 0 && State.isPinned) {
+      // Resolved from elsewhere (another client, or a day-long allow) rather than this
+      // pill's own decide(): drop the forced-open pin, but never yank the owner out of
+      // "prompt" if they're mid-conversation -- only decide() itself picks a new view.
       State.isPinned = false;
       this.dropPin();
-      this.setView(State.defaultView());
     } else if (newFinished.length > 0 && State.approvals.length === 0 && !typing) {
       // A finished task opens its card out of the drum; it never interrupts an approval or a message being typed.
       State.setFocus(newFinished[newFinished.length - 1]);
       Sound.play("approve");
       this.alert("finished");
+      const done = State.focusTask;
+      if (done) {
+        const what = plainStep(done, done.task ?? done.steps.at(-1));
+        speak(`${displayName(done)} is done. ${brief(what)}.`);
+      }
     } else if (newReplies.length > 0 && this.fsm.state === "hidden") {
       this.reveal();
     } else if (State.mode === "hidden" && State.tasks.some((t) => t.state === "working")) {
@@ -220,7 +511,9 @@ export class Island {
           if (!this.wasInIsland) this.fsm.mouseLeft();
           break;
         case "home":
-          this.expand(State.defaultView());
+          // Reopening the lip returns to the current surface. Startup selects
+          // conversation, while Home and Settings remain available in-header.
+          this.expand(State.view);
           if (!this.wasInIsland) this.fsm.mouseLeft();
           break;
         case "intro":
@@ -236,6 +529,15 @@ export class Island {
     this.fsm.launch();
   }
 
+  private blurTimer: number | null = null;
+
+  private cancelBlur() {
+    if (this.blurTimer != null) {
+      window.clearTimeout(this.blurTimer);
+      this.blurTimer = null;
+    }
+  }
+
   // ── Mode / view ──────────────────────────────────────────────────
 
   private setMode(mode: IslandMode) {
@@ -247,11 +549,27 @@ export class Island {
       if (State.view === "finished") State.view = State.defaultView();
     }
     State.mode = mode;
-    if (mode === "expanded") Sound.play("open");
+    if (mode === "expanded") {
+      Sound.play("open");
+      // The mark holds still while collapsed (see updateMark). Start the open from the same
+      // resting pose the collapsed mode used to leave it in, so the opening is unchanged.
+      const rest = botPosition(prev, State.view, this.height.value);
+      this.markCx.set(rest.cx);
+      this.markCy.set(rest.cy);
+      this.markSize.set(rest.diameter);
+      this.cancelBlur();
+    }
     if (prev === "expanded") {
       Sound.play("close");
       State.isPinned = false;
-      this.transport.focusWindow?.(false);
+      // Dropping focus flips the native window's focusable style. Doing that on the first
+      // frame of the close could hitch the WebView right as the shrink began. It only has
+      // to happen before the user types elsewhere, so wait until the close curve finishes.
+      this.cancelBlur();
+      this.blurTimer = window.setTimeout(() => {
+        this.blurTimer = null;
+        if (State.mode !== "expanded") this.transport.focusWindow?.(false);
+      }, CLOSE_MS + 20);
     }
     this.updateWindowCollapsed();
     this.animateGeometry(modeOrder(mode) < modeOrder(prev));
@@ -324,8 +642,10 @@ export class Island {
   // ── Geometry ─────────────────────────────────────────────────────
 
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length, this.views.get("prompt")?.draftHeight);
-    const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
+    const { w, h } = State.mode === "expanded"
+      ? { w: this.openWidth, h: this.openHeight }
+      : islandSize(State.mode, State.view, State.chatHistory.length, this.views.get("prompt")?.draftHeight);
+    const r = State.mode === "expanded" ? 28 : 15;
     return { w, h, r };
   }
 
@@ -349,14 +669,26 @@ export class Island {
     const r = this.radius.value;
     this.islandEl.style.width = `${w}px`;
     this.islandEl.style.height = `${hh}px`;
+    this.islandEl.classList.toggle("expanded", State.mode === "expanded");
     this.islandEl.style.borderRadius = `0 0 ${r}px ${r}px`;
-    this.islandEl.style.clipPath = `path('${squirclePath(w, hh, { br: r, bl: r })}')`;
+    const outline = notchShapePath(w, hh);
+    this.islandEl.style.clipPath = `path('${outline}')`;
     this.islandEl.style.transform = `translateX(-50%)`;
-    this.applyArches(w, r);
+    this.applyContentBox(w);
+    this.applyArches(w, r, hh);
+    // The glow is a blurred copy of the whole silhouette (island and both ears) sitting behind it, so the light
+    // follows the ears' curve too instead of stopping where they begin.
+    const gw = w + 2 * r + 2 * GLOW_PAD;
+    const gh = hh + GLOW_PAD;
+    this.edgeGlow.setAttribute("width", `${gw}`);
+    this.edgeGlow.setAttribute("height", `${gh}`);
+    this.edgeGlow.setAttribute("viewBox", `0 0 ${gw} ${gh}`);
+    this.glowShape.setAttribute("transform", `translate(${GLOW_PAD + r} 0)`);
+    this.glowIsland.setAttribute("d", outline);
     this.miniGrid.style.left = `${w - 40 - 14.5}px`;
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
 
-    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    const rect = { x: (this.panelWidth() - w) / 2, y: 0, w, h: hh };
     const p = this.pushedRect;
     if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
@@ -364,23 +696,71 @@ export class Island {
     }
   }
 
-  /** Keep the two outward-curving top ears aligned as the pill springs between sizes. */
-  private applyArches(w: number, r: number) {
-    this.archLeft.style.display = r > 0 ? "" : "none";
-    this.archRight.style.display = r > 0 ? "" : "none";
-    if (r <= 0) return;
-    this.archLeft.setAttribute("width", `${r}`);
-    this.archLeft.setAttribute("height", `${r}`);
-    this.archLeft.style.transform = `translateX(${-(w / 2 + r)}px)`;
-    this.archRight.setAttribute("width", `${r}`);
-    this.archRight.setAttribute("height", `${r}`);
-    this.archRight.style.transform = `translateX(${w / 2}px)`;
+  /** Horizontal offset of the content (and the mark) inside the island. */
+  private contentShift(w: number): number {
+    return (w - this.openWidth) / 2;
+  }
+
+  private contentBoxKey = "";
+
+  /** The content is always laid out at the open panel's size, centred, and the island's
+   * outline only crops it. It used to be `inset: 0`, so every frame of an open or close
+   * resized it, and the whole chat/drum/view tree reflowed at an in-between size. Opening
+   * hid that because the content was still fading in. Closing starts with the content
+   * fully visible, so you watched it squash and rewrap while it faded. Now it stays put
+   * and only a compositor transform moves it. */
+  private applyContentBox(w: number) {
+    const key = `${this.openWidth}x${this.openHeight}`;
+    if (key !== this.contentBoxKey) {
+      this.contentBoxKey = key;
+      const s = this.contentEl.style;
+      s.inset = "0 auto auto 0";
+      s.width = `${this.openWidth}px`;
+      s.height = `${this.openHeight}px`;
+    }
+    this.contentEl.style.transform = `translateX(${this.contentShift(w)}px)`;
+  }
+
+  /** Keep the two outward-curving top ears on the neck's top corners as the pill changes size.
+   *
+   * Compact: the neck is the whole island, so the ears sit just outside its edges as before.
+   * Open: notchShapePath draws the same flare inline at the neck's corners. The ears now
+   * follow the neck corner (x = reach) instead of the island's outer edge, so through a
+   * close the inline flare and the ear are the same shape in the same place. The ear fades
+   * only after the inline flare has fully formed (reach >= NECK_FLARE), so the handoff
+   * can't show a gap or a pop. Previously the ears stayed on the panel's outer edge, up to
+   * 15px away from the neck they were meant to continue, while they faded.
+   * They also scale with height below the compact height, so retracting to hidden no longer
+   * leaves two full-size ears hanging over an island of zero height. */
+  private applyArches(w: number, r: number, hh: number) {
+    const reach = Math.max(0, (w - Math.min(LIP_W, w)) / 2);
+    const fade = 1 - unit(Math.max((reach - NECK_FLARE) / 10, (hh - LIP_H - BLEND_H) / BLEND_H));
+    const size = Math.min(r, NECK_FLARE) * unit(hh / LIP_H);
+    const visible = fade > 0 && size > 0.01;
+    this.archLeft.style.opacity = `${fade}`;
+    this.archRight.style.opacity = `${fade}`;
+    this.archLeft.style.display = visible ? "" : "none";
+    this.archRight.style.display = visible ? "" : "none";
+    if (!visible) return;
+    this.archLeft.setAttribute("width", `${size}`);
+    this.archLeft.setAttribute("height", `${size}`);
+    // Each ear overlaps the island by a pixel: edge to edge they left a hairline seam the glow showed through.
+    this.archLeft.style.transform = `translateX(${-(w / 2) + reach - size + 1}px)`;
+    this.archRight.setAttribute("width", `${size}`);
+    this.archRight.setAttribute("height", `${size}`);
+    this.archRight.style.transform = `translateX(${w / 2 - reach - 1}px)`;
   }
 
   private islandRect(): { x: number; y: number; w: number; h: number } {
     const w = this.width.value;
     const hh = this.height.value;
-    return { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    return { x: (this.panelWidth() - w) / 2, y: 0, w, h: hh };
+  }
+
+  /** The native window is wider than the old 720px design canvas. Hit testing
+   * must use the real WebView width or the lip becomes clickable only to one side. */
+  private panelWidth(): number {
+    return Math.max(1, window.innerWidth || document.documentElement.clientWidth || PANEL_W);
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ─────
@@ -487,7 +867,7 @@ export class Island {
       // Clicking the empty part of the header folds the island away, even while an approval waits (it stays pending and
       // its badge stays on the agent). Buttons, tabs and fields keep their own clicks.
       const target = e.target as HTMLElement;
-      if (target.closest("#header") && !target.closest("button")) this.collapse();
+      if (target.closest("#header") && !target.closest("button") && !target.closest(".agent-drum")) this.collapse();
     });
 
     window.addEventListener("keydown", (e) => {
@@ -541,7 +921,11 @@ export class Island {
   }
 
   private frame = (nowMs: number) => {
-    const dt = Math.min(0.05, (nowMs - this.lastFrame) / 1000);
+    // ensureRunning stamps lastFrame with performance.now(), which is later than this frame's rAF timestamp, so the
+    // first frame of a fresh run used to get a slightly negative dt (springs stepped backwards, curves held still).
+    // Treat that first frame as one nominal frame.
+    const elapsed = (nowMs - this.lastFrame) / 1000;
+    const dt = elapsed > 0 ? Math.min(0.05, elapsed) : 1 / 60;
     this.lastFrame = nowMs;
 
     this.width.step(dt, nowMs);
@@ -580,19 +964,27 @@ export class Island {
   };
 
   private updateMark() {
-    const p = botPosition(State.mode, State.view, this.height.value);
-    this.markCx.target = p.cx;
-    this.markCy.target = p.cy;
-    this.markSize.target = p.diameter;
+    const expanded = State.mode === "expanded";
+    // Expanded content is laid out at the open size (applyContentBox), so the mark is too.
+    const p = botPosition(State.mode, State.view, expanded ? this.openHeight : this.height.value);
+    // Collapsed modes never show the mark (opacity 0). Retargeting it there made it spring
+    // across the shrinking island toward the top-left while it faded -- part of the messy
+    // close. It now stays with the content it belongs to while it fades out.
+    if (expanded) {
+      this.markCx.target = p.cx;
+      this.markCy.target = p.cy;
+      this.markSize.target = p.diameter;
+    }
     this.markEl.style.opacity = p.opacity > 0 ? "1" : "0";
 
-    if (State.mode === "expanded" && p.opacity > 0) {
+    if (expanded && p.opacity > 0) {
       const d = p.diameter;
       const color = botGlowColor(State.effectiveState);
+      const shift = this.markShift();
       this.markGlow.style.display = "block";
       this.markGlow.style.width = `${d * 2.2}px`;
       this.markGlow.style.height = `${d * 2.2}px`;
-      this.markGlow.style.left = `${this.markCx.value - d * 1.1}px`;
+      this.markGlow.style.left = `${shift + this.markCx.value - d * 1.1}px`;
       this.markGlow.style.top = `${this.markCy.value - d * 1.1}px`;
       this.markGlow.style.background = `radial-gradient(circle, ${color} 0%, transparent 62%)`;
       this.markGlow.style.opacity = String(botGlowOpacity(State.effectiveState));
@@ -601,11 +993,17 @@ export class Island {
     }
   }
 
+  /** While closing (and collapsed) the mark rides with the pinned content as it fades, rather
+   * than with the island's moving left edge. Opening keeps its original island-relative flight. */
+  private markShift(): number {
+    return State.mode === "expanded" ? 0 : this.contentShift(this.width.value);
+  }
+
   private placeMark() {
     const d = this.markSize.value;
     this.markEl.style.width = `${d}px`;
     this.markEl.style.height = `${d}px`;
-    this.markEl.style.left = `${this.markCx.value - d / 2}px`;
+    this.markEl.style.left = `${this.markShift() + this.markCx.value - d / 2}px`;
     this.markEl.style.top = `${this.markCy.value - d / 2}px`;
   }
 
@@ -632,8 +1030,16 @@ export class Island {
 
     this.contentEl.style.opacity = expanded ? "1" : "0";
     this.contentEl.style.pointerEvents = expanded ? "auto" : "none";
+    this.contentEl.inert = !expanded;
 
     this.header.sync();
+    this.settingsOverlayEl.classList.toggle("on", State.settingsOpen);
+    if (State.settingsOpen) this.settingsHost.sync();
+    this.sidebar.sync();
+    this.agentDrum.sync();
+    this.identityHost.el.classList.toggle("on", State.identityOpen && State.tasks.length > 0);
+    this.identityHost.el.inert = !State.identityOpen;
+    if (State.identityOpen) this.identityHost.sync();
     for (const [name, view] of this.views) {
       const on = name === State.view;
       view.el.classList.toggle("on", on);
@@ -644,12 +1050,31 @@ export class Island {
     if (this.lastSyncedView !== State.view) {
       const wasChat = this.lastSyncedView === "prompt";
       this.lastSyncedView = State.view;
-      if (State.view === "prompt") {
-        this.transport.focusWindow?.(true);
-        window.setTimeout(() => this.views.get("prompt")?.focus?.(), 120);
-      } else if (wasChat) {
+      if (State.view !== "prompt" && wasChat) {
         this.transport.focusWindow?.(false);
       }
+    }
+
+    // The notch's own edge: one colour at a time, the most immediate thing wins.
+    // Rainbow is always on, but anything that's about you (your voice, your music, an agent needing you) still takes over.
+    const style = State.settings.glowStyle;
+    const edge = State.mode === "hidden" || style === "off" ? null : edgeTone();
+    const rainbow = State.mode !== "hidden" && style === "rainbow" && (!edge || edge.ambient);
+    this.edgeGlow.classList.toggle("on", !!edge || rainbow);
+    this.edgeGlow.classList.toggle("rainbow", rainbow);
+    this.edgeGlow.classList.toggle("live", !rainbow && !!edge?.live);
+    const edgeColor = State.settings.glowColor ?? edge?.color ?? "#FFFFFF";
+    if (edge && !rainbow) this.edgeGlow.style.setProperty("--edge", edgeColor);
+    const screenGlow = {
+      visible: State.mode !== "hidden" && (!!edge || rainbow),
+      style: rainbow ? "rainbow" as const : "status" as const,
+      color: edgeColor,
+      live: !rainbow && !!edge?.live,
+    };
+    const screenGlowKey = JSON.stringify(screenGlow);
+    if (screenGlowKey !== this.screenGlowKey) {
+      this.screenGlowKey = screenGlowKey;
+      this.transport.setScreenGlow?.(screenGlow);
     }
 
     // The focused agent's mark; rebuilt only when it changes.

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { connect } from "node:net";
 import { requestOwnerPipe, startOwnerPipe } from "@/lib/native/owner-pipe";
-import { ownerPipePath } from "@/lib/native/web-broker-paths";
+import { brokerKeyPath, ownerPipePath } from "@/lib/native/web-broker-paths";
+import { runNativeCommand, type NativeIo } from "@/lib/native/native-commands";
+import type { WebUiBridge } from "@/lib/native/web-ui-bridge";
 import { createWebAuthority } from "@/lib/native/web-authority-core";
 import { startWebBroker } from "@/lib/native/web-broker-server";
 import { createWebBrokerClient } from "@/lib/native/web-broker-client";
@@ -73,7 +75,7 @@ async function http(port: number, key: string, path: string, method = "GET", bod
   });
 }
 
-test("owner mutations use the authenticated loopback API while the local pipe allows only scoped agent task writes", async () => {
+test("owner mutations require the protected owner credential over HTTP or the local pipe", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-owner-pipe-"));
   const authority = createWebAuthority({ ownerId: "alice" });
   try {
@@ -83,6 +85,10 @@ test("owner mutations use the authenticated loopback API while the local pipe al
       assert.equal((await http(broker.port, key, "/web/mode", "POST", { mode: "hands-off" })).status, 200);
       const mode = await requestOwnerPipe<{ ok: boolean; error?: string }>(ownerPipePath(root), { method: "POST", path: "/web/mode", body: { mode: "watch" } });
       assert.equal(mode?.ok, false, "a raw local pipe call must not change the room mode");
+      const authorized = await requestOwnerPipe<{ ok: boolean }>(ownerPipePath(root), { method: "POST", path: "/web/mode", body: { mode: "watch" }, ownerKey: key });
+      assert.equal(authorized?.ok, true, "the protected owner credential authorizes local controls without loopback HTTP");
+      const wrongKey = await requestOwnerPipe<{ ok: boolean }>(ownerPipePath(root), { method: "POST", path: "/web/mode", body: { mode: "hands-off" }, ownerKey: "wrong-key" });
+      assert.equal(wrongKey?.ok, false);
 
       const requested = authority.requestGrant({ grantee: { owner: "bob", agent: "codex" }, origin: "https://example.test", actions: ["read"] });
       assert.equal(requested.ok, true);
@@ -122,6 +128,51 @@ test("AWARE membership and disclosure mutations require the authenticated owner 
       await broker.close();
     }
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the pill CLI authenticates all owner mutations without putting the credential into UI messages or output", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-pill-owner-key-"));
+  const key = "owner-test-secret".repeat(3);
+  const messages: unknown[] = [], output: string[] = [];
+  const ui = { attachBroker: () => undefined, onActivity: () => undefined,
+    handleExtensionMessage: (message: unknown) => { messages.push(message); return true; } } as unknown as WebUiBridge;
+  const broker = await startWebBroker({ key, port: 0, ownerPipePath: ownerPipePath(root), ui });
+  const io: NativeIo = { homeDir: root, env: { M9R_HOME: root }, out: line => output.push(line), err: line => output.push(line) };
+  try {
+    assert.equal(await runNativeCommand("pill-send", ["hello"], io), 1, "missing credentials fail before dispatch");
+    assert.equal(messages.length, 0);
+    writeFileSync(brokerKeyPath(root), key);
+    for (const [command, args] of [["pill-send", ["hello"]], ["pill-decide", ["approval-1", "allow"]],
+      ["pill-note", ["a useful note"]], ["pill-model", ["codex", "reported-model"]], ["pill-work-mode", ["working"]]] as const) {
+      assert.equal(await runNativeCommand(command, [...args], io), 0, command);
+    }
+    assert.equal(messages.length, 5);
+    assert.doesNotMatch(JSON.stringify({ messages, output }), /owner-test-secret/);
+    writeFileSync(brokerKeyPath(root), "wrong-key");
+    assert.equal(await runNativeCommand("pill-send", ["must not dispatch"], io), 1);
+    assert.equal(messages.length, 5);
+  } finally { await broker.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("latency diagnostics are readable through the local owner pipe and not the public HTTP route", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-owner-pipe-latency-"));
+  const key = "k".repeat(32);
+  const authority = createWebAuthority({ ownerId: "alice" });
+  const broker = await startWebBroker({ key, port: 0, ownerPipePath: ownerPipePath(root), authority });
+  try {
+    const local = await requestOwnerPipe<{ ok: boolean; summary?: { sampleCount: number; phases: Record<string, unknown> } }>(ownerPipePath(root), {
+      method: "GET", path: "/web/diagnostics/latency",
+    });
+    assert.equal(local?.ok, true);
+    assert.equal(typeof local?.summary?.sampleCount, "number");
+    assert.equal(typeof local?.summary?.phases, "object");
+    const publicResponse = await http(broker.port, key, "/web/diagnostics/latency");
+    assert.equal(publicResponse.status, 404, "latency summaries never become a public broker endpoint");
+    assert.doesNotMatch(JSON.stringify(publicResponse.body), /\"summary\"\s*:/, "the public response must not contain the owner-only latency summary");
+  } finally {
+    await broker.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

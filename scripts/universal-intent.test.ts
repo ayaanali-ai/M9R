@@ -2,12 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveUniversalIntent } from "../src/lib/native/universal-intent-resolver";
 
+test("universal intent resolves window, tab, file, menu and search operations without app scripts", () => {
+  for (const [text, action] of [["Minimize this window", "window_control"], ["Resize the window", "window_control"],
+    ["Move this window left", "window_control"], ["Close the browser tab", "browser_tab"], ["Focus the current window", "focus"],
+    ["Open C:\\Documents\\report.txt", "file"], ["Choose Export in the menu", "menu"], ["Search for the app", "search"]]) {
+    assert.equal(resolveUniversalIntent(text).action, action, text);
+  }
+});
+
 test("screen questions bind the live desktop and preserve no-submit/no-advance boundaries", () => {
   const intent = resolveUniversalIntent("Look at my screen, answer the question, but do not submit or advance.");
   assert.equal(intent.surface, "desktop");
   assert.equal(intent.action, "observe");
   assert.equal(intent.mode, "explain");
-  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: false });
+  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: false, allowNavigationCommit: false });
   assert.deepEqual(intent.preferredObservation, "desktop");
   assert.deepEqual(intent.plan.map((step) => step.kind), ["bind-foreground", "observe-structure"]);
   assert.equal(intent.fallbackPolicy.currentForegroundFirst, true);
@@ -19,7 +27,7 @@ test("navigating to a URL grants the Enter keystroke that commits it, without op
   assert.equal(intent.surface, "browser");
   assert.equal(intent.action, "navigate");
   assert.equal(intent.mode, "prepare");
-  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: true });
+  assert.deepEqual(intent.constraints, { allowAdvance: false, allowSubmit: false, allowNavigationCommit: true });
 });
 
 test("browser requests select an exact existing tab before structure and visual fallback", () => {

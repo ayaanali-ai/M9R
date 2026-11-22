@@ -1,9 +1,7 @@
 /**
- * Web broker core (spike, docs: M9R_DEMO_BUILD_PLAN_2026-09-23.md Phase 1-2). Pure logic, no sockets: an agent's
- * browser command goes in through submit(), the connected extension does the work and answers through
- * onExtensionMessage(). Two things live here so they cannot be bypassed by the transport: per-tab claims and
- * fair, scope-aware turns for conflicting writers; and the presence label the overlay draws, derived from the
- * command that really ran rather than reported by the agent.
+ * Shared broker coordination and legacy page-action policy. Current browser/app
+ * input is dispatched through the native desktop stage; this module's former
+ * extension message transport is not registered by the production broker.
  */
 
 import { createHash } from "node:crypto";
@@ -60,6 +58,9 @@ export interface WebRequest {
   expectedMutationRevision?: number;
   /** Independent semantic-region epoch for field/form mutations. */
   expectedRegionRevision?: number;
+  expectedBrowserInstanceId?: string;
+  expectedTabId?: string;
+  work?: { taskId: string; workId: string; planRevision: number };
 }
 
 export interface WebResponse {
@@ -68,6 +69,7 @@ export interface WebResponse {
   error?: string;
   /** Stable refusal category for a mutation-fence or transport gate. */
   code?: string;
+  dispatchState?: "not-dispatched" | "dispatched" | "unknown";
   /** Current broker mutation epoch for this tab after the action. */
   mutationRevision?: number;
   /** Accessible name or nearest visible text of the target (the page title for page-level actions), max 80 chars. */
@@ -133,6 +135,7 @@ export type RoomMode = "watch" | "ask" | "hands-off";
 export const ROOM_MODES: readonly RoomMode[] = ["watch", "ask", "hands-off"];
 
 export interface StageApprovalRequest {
+  signal?: AbortSignal;
   agent: string;
   provider: string;
   sessionId: string;
@@ -170,6 +173,7 @@ export interface WebBrokerDeps {
   send(message: unknown): boolean;
   /** CDP input owns one pointer/focus per tab: serialize every writer through a tab lane. */
   oneWriterPerTab?: boolean;
+  trustDeliveryReceipts?: boolean;
   /** Current room mode; absent means every risky action asks (the original behavior). */
   roomMode?(): RoomMode;
   ownerId?: string;
@@ -1071,6 +1075,9 @@ export function createWebBroker(deps: WebBrokerDeps) {
       url: request.url,
       selector: request.selector,
       text: request.text,
+      ...(request.work ? { work: request.work } : {}),
+      ...(request.expectedBrowserInstanceId ? { expectedBrowserInstanceId: request.expectedBrowserInstanceId } : {}),
+      ...(request.expectedTabId ? { expectedTabId: request.expectedTabId } : {}),
       ...(request.endSelector ? { endSelector: request.endSelector } : {}),
       ...(request.args ? { args: request.args } : {}),
       ...powerFields,
@@ -1276,6 +1283,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
    * and resolves true only on an explicit owner approve. Deny and timeout both resolve false.
    */
   function requestStageApproval(request: StageApprovalRequest): Promise<boolean> {
+    if (request.signal?.aborted) return Promise.resolve(false);
     if (stopState.state === "stopped") return Promise.resolve(false);
     const id = newId();
     const createdAt = now();
@@ -1324,6 +1332,16 @@ export function createWebBroker(deps: WebBrokerDeps) {
         resolveDecision(decision === "approve");
       },
     });
+    const cancel = () => {
+      if (!approvals.delete(id)) return;
+      clearTimeout(timer);
+      audit("action.denied", `${risk}: canceled`);
+      resolveDecision(false);
+      emit({ kind: "approvals-changed" });
+    };
+    request.signal?.addEventListener("abort", cancel, { once: true });
+    void decided.then(() => request.signal?.removeEventListener("abort", cancel));
+    if (request.signal?.aborted) cancel();
     advanceFeed();
     emit({ kind: "approval", id, agent: request.agent, provider: request.provider, step: request.step });
     void decided.then(() => emit({ kind: "approvals-changed" }));
@@ -1333,7 +1351,7 @@ export function createWebBroker(deps: WebBrokerDeps) {
   function onExtensionMessage(raw: unknown): void {
     if (!raw || typeof raw !== "object") return;
     const message = raw as {
-      type?: string; id?: string; ok?: boolean; data?: unknown; error?: string; origin?: string; url?: string;
+      type?: string; id?: string; ok?: boolean; data?: unknown; error?: string; origin?: string; url?: string; dispatchState?: string;
       noticeId?: unknown; tab?: unknown; agent?: unknown; provider?: unknown; sessionId?: unknown; rendered?: unknown;
     };
     if (message.type === "notice-ack") {
@@ -1439,7 +1457,13 @@ export function createWebBroker(deps: WebBrokerDeps) {
         if (room) (response as WebResponse).room = room;
       }
     }
-    if (entry.mutation) {
+    if (deps.trustDeliveryReceipts && message.dispatchState === "not-dispatched" && !response.ok) {
+      response.dispatchState = "not-dispatched";
+      if (entry.mutation && !entry.mutation.release(response.error ?? "The browser refused before dispatch.")) {
+        response.dispatchState = "unknown";
+        response.code = "mutation-outcome-uncertain";
+      }
+    } else if (entry.mutation) {
       const readback = response.ok
         ? entry.mutation.commit({ status: "applied", ...(response.label ? { detail: response.label } : {}) })
         : entry.mutation.abort(response.error ?? "the browser reported a failure", { status: "uncertain" });

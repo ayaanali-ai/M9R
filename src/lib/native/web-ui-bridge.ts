@@ -18,6 +18,7 @@ import { presenceStateForUi, snapshotFromRecords } from "./multiplayer-presence"
 import type { ManagedProviderModelApply } from "./managed-provider-contract";
 import type { ProviderModelSelection } from "./provider-model-core";
 import type { ProviderModelUiState } from "./provider-model-picker";
+import { isOwnerWorkMode, type OwnerWorkMode } from "./owner-work-mode";
 
 // ---------------------------------------------------------------------------------------------------------------
 // Plain-words narration
@@ -187,10 +188,11 @@ export interface UiCollaboration {
   headline: string;
 }
 /** `desktopPill` is present (true) only while the desktop pill is running, so the in-page pill can step aside. */
-export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; collaboration?: UiCollaboration; models?: ProviderModelUiState; desktopPill?: true }
+export interface UiState { type: "ui-state"; agents: UiAgent[]; thread: UiThreadEntry[]; approvals: UiApproval[]; collaboration?: UiCollaboration; models?: ProviderModelUiState; desktopPill?: true; ownerWorkMode?: OwnerWorkMode }
 
 export interface UiPageContext { url?: string; title?: string; selection?: string }
 export type UiInbound =
+  | { type: "ui-work-mode"; mode: OwnerWorkMode }
   | { type: "ui-command"; text: string; context: UiPageContext; requestId?: string }
   | { type: "ui-approve" | "ui-deny"; id: string }
   | { type: "ui-stop"; agent: string }
@@ -199,13 +201,17 @@ export type UiInbound =
   | { type: "ui-select-model"; handle: string; model?: string | null; effort?: string | null }
   | { type: "ui-subscribe" };
 
-export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note", "ui-select-model", "ui-subscribe"]);
+export const UI_MESSAGE_TYPES: ReadonlySet<string> = new Set(["ui-work-mode", "ui-command", "ui-approve", "ui-deny", "ui-stop", "ui-stop-all", "ui-save-note", "ui-select-model", "ui-subscribe"]);
 export const MAX_COMMAND_CHARS = 4_000;
 /** Same cap as the m9r_note tool, so a note saved from the pill is one an agent could have written. */
 export const MAX_NOTE_CHARS = 2_000;
 export const MAX_SELECTION_CHARS = 2_000;
 export const THREAD_LIMIT = 200;
-const SAY_CHARS = 4_000;
+// Keep the pill bounded without applying the activity-copy limit to an entire
+// provider reply. The old 4,000-character cap was a visible message truncation
+// bug, not a transport safety boundary.
+const SAY_CHARS = 32_768;
+const STREAM_IDLE_FLUSH_MS = 600;
 
 export function isUiMessage(raw: unknown): boolean {
   return !!raw && typeof raw === "object" && typeof (raw as { type?: unknown }).type === "string" && UI_MESSAGE_TYPES.has((raw as { type: string }).type);
@@ -226,6 +232,7 @@ export function parseUiMessage(raw: unknown): UiInbound | null {
       return typeof m.id === "string" && m.id.length > 0 && m.id.length <= 128 ? { type: m.type, id: m.id } : null;
     case "ui-save-note":
       return typeof m.text === "string" && m.text.trim() && m.text.length <= MAX_NOTE_CHARS ? { type: "ui-save-note", text: m.text.trim() } : null;
+    case "ui-work-mode": return isOwnerWorkMode(m.mode) ? { type: "ui-work-mode", mode: m.mode } : null;
     case "ui-select-model": {
       const validId = (value: unknown): value is string | null | undefined => value === undefined || value === null || (typeof value === "string" && value.trim().length > 0 && value.length <= 160 && !/[\u0000-\u001f\u007f]/.test(value));
       if (typeof m.handle !== "string" || !/^@?[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(m.handle) || !validId(m.model) || !validId(m.effort)) return null;
@@ -268,9 +275,15 @@ export function isStopCommand(text: string): boolean {
     .split(/\s+/)
     .filter(Boolean);
   if (words.length === 0) return false;
-  const filler = new Set(["all", "everyone", "everything", "agents", "now", "please", "pls", "ok", "okay", "right", "immediately", "asap", "it", "them"]);
+  const filler = new Set(["all", "everyone", "everything", "agents", "now", "please", "pls", "ok", "okay", "right", "immediately", "asap", "it", "them",
+    // Connective/intensifier words a dictated stop command carries without naming a
+    // different target ("just stop", "I need you to stop", "seriously, stop now").
+    // Safe to treat as filler: they can only help a match when every other word in
+    // the message is "stop"/"halt" already, so a real instruction with any actual
+    // content word ("stop the video") still correctly fails below.
+    "just", "literally", "seriously", "really", "actually", "i", "ive", "need", "want", "you", "to", "said", "told", "gotta", "have", "yeah"]);
   const remaining = words.filter((w) => !filler.has(w));
-  return remaining.length > 0 && remaining.every((w) => w === "stop" || w === "halt" || (w === "kill" && words.includes("all")));
+  return remaining.length > 0 && remaining.every((w) => w === "stop" || w === "stopping" || w === "halt" || (w === "kill" && words.includes("all")));
 }
 
 export type OwnerControl = { kind: "pause" | "resume"; handle?: string };
@@ -370,7 +383,9 @@ export interface SessionsPort {
    * not "genuinely finished". Computed fresh on every snapshot from live task state, not baked in at exit time, so it
    * clears itself the moment the answer actually lands. */
   snapshot(): Array<{ handle: string; provider: string; folder: string; status: SessionStatus; doing: string; waitingOn?: string }>;
-  deliver(handle: string, text: string, taskId?: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
+  /** broadcastId: shared across every recipient of one multi-agent owner message, so a later teammate
+   * delegation can recognize the recipient already has equivalent work in flight. */
+  deliver(handle: string, text: string, taskId?: string, broadcastId?: string): { ok: true; mode: "sent" | "interrupted" | "started" | "restarted-worker" } | { ok: false; error: string };
   /** Pause one active provider turn without closing M9R task state. */
   stop(handle: string): boolean;
   /** Pause active turns while keeping M9R task state available for follow-up. */
@@ -408,7 +423,7 @@ const TOOL_WORDS: Record<string, string> = {
   m9r_result: "Reporting back",
 };
 
-export function createWebUiBridge(options: { now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; colorFor?: (handle: string) => string; saveNote?: (text: string) => { ok: boolean; error?: string }; modelState?: () => ProviderModelUiState | undefined; selectModel?: (handle: string, selection: ProviderModelSelection) => Promise<ManagedProviderModelApply> | ManagedProviderModelApply } = {}) {
+export function createWebUiBridge(options: { ownerWorkMode?: () => OwnerWorkMode; setOwnerWorkMode?: (mode: OwnerWorkMode) => void; now?: () => number; debounceMs?: number; newId?: () => string; onChange?: () => void; colorFor?: (handle: string) => string; saveNote?: (text: string) => { ok: boolean; error?: string }; modelState?: () => ProviderModelUiState | undefined; selectModel?: (handle: string, selection: ProviderModelSelection) => Promise<ManagedProviderModelApply> | ManagedProviderModelApply } = {}) {
   const now = options.now ?? Date.now;
   const debounceMs = options.debounceMs ?? 100;
   const newId = options.newId ?? (() => randomUUID());
@@ -425,8 +440,10 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
   const approvalText = new Map<string, { agent: string; provider: string; text: string }>();
   const actionEntries = new Map<string, UiThreadEntry>();
   const typedValues = new Map<string, Array<{ value: string; expiresAt: number }>>();
-  /** The currently streamed bubble for each agent. A final result replaces this bubble in place. */
-  const liveSay = new Map<string, { entry: UiThreadEntry; lastFragment: string; lastAt: number; raw?: string }>();
+  /** A provider turn is assembled off-screen; its canonical result replaces the
+   * buffered stream as one complete bubble. The idle timer is only a recovery
+   * path for providers that stop emitting without a result. */
+  const liveSay = new Map<string, { entry?: UiThreadEntry; lastFragment: string; lastAt: number; raw: string; flushTimer?: ReturnType<typeof setTimeout> }>();
   // The native pill retries only with the same private request id. Keep a
   // bounded short-lived receipt so a lost owner-pipe response cannot inject
   // the same conversational turn twice. This id never enters the UI thread.
@@ -476,6 +493,35 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     if (thread.length > THREAD_LIMIT) thread.splice(0, thread.length - THREAD_LIMIT);
     changed();
     return full;
+  }
+
+  function flushLiveSay(runKey: string): UiThreadEntry | undefined {
+    const streaming = liveSay.get(runKey);
+    if (!streaming || !streaming.raw.trim()) return streaming?.entry;
+    if (streaming.flushTimer) {
+      clearTimeout(streaming.flushTimer);
+      streaming.flushTimer = undefined;
+    }
+    const text = redact(streaming.raw.trim()).slice(0, SAY_CHARS);
+    if (streaming.entry) {
+      streaming.entry.text = text;
+      changed();
+    } else {
+      streaming.entry = push({ kind: "say", agent: runKey.split("\0", 1)[0]!, provider: providerOf(runKey.split("\0", 1)[0]!), to: "you", text });
+    }
+    return streaming.entry;
+  }
+
+  function scheduleLiveSayFlush(runKey: string): void {
+    const streaming = liveSay.get(runKey);
+    if (!streaming || streaming.flushTimer) return;
+    streaming.flushTimer = setTimeout(() => {
+      const current = liveSay.get(runKey);
+      if (!current) return;
+      current.flushTimer = undefined;
+      if (now() - current.lastAt >= STREAM_IDLE_FLUSH_MS) flushLiveSay(runKey);
+      else scheduleLiveSayFlush(runKey);
+    }, STREAM_IDLE_FLUSH_MS);
   }
 
   function pushWeb(item: Omit<FeedWebActivityInput, "at">): void {
@@ -542,7 +588,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       return { id: p.id, agent: p.actor, provider: known?.provider ?? providerOf(p.actor), text: redact(`${text}${p.origin ? ` on ${hostOf(p.origin) ?? p.origin}` : ""}`) };
     });
     const models = options.modelState?.();
-    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, collaboration, ...(models ? { models } : {}), ...(desktopPill ? { desktopPill: true as const } : {}) };
+    return { type: "ui-state", agents, thread: thread.map((e) => ({ ...e })), approvals, collaboration, ...(options.ownerWorkMode ? { ownerWorkMode: options.ownerWorkMode() } : {}), ...(models ? { models } : {}), ...(desktopPill ? { desktopPill: true as const } : {}) };
   }
 
   /** Bounded identity/content fingerprint used only to suppress no-op UI frames. */
@@ -556,6 +602,7 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       collaboration: state.collaboration ? [state.collaboration.headline, state.collaboration.activeCount, state.collaboration.overflowCount, state.collaboration.agents.map((agent) => [agent.agentId, agent.state, agent.cursor.mode, agent.cursor.visible, agent.summary ?? ""])] : null,
       models: state.models ? state.models.agents.map((agent) => [agent.handle, agent.provider, agent.generation, agent.availability, agent.currentModel ?? "", agent.currentEffort ?? "", agent.selectedModel ?? "", agent.selectedEffort ?? "", agent.models.map((model) => [model.id, model.label, model.description ?? "", model.efforts?.map((effort) => [effort.id, effort.label]) ?? null])]) : null,
       desktopPill: state.desktopPill === true,
+      ownerWorkMode: state.ownerWorkMode,
     });
   }
 
@@ -627,32 +674,47 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
           // Raw stream chunks carry their own spacing and may be a single
           // character ("M", "9", "R") or a mid-word piece ("Tube"). Trimming
           // or overlap-matching them drops letters, so append them verbatim.
+          // Do not publish each chunk to the pill: providers commonly emit one
+          // token/word per event, which made the composer visibly type. The
+          // complete provider result is published once below; the idle timer is
+          // only a bounded fallback for a stream that never closes.
           if (!event.text) return;
           const streaming = liveSay.get(runKey);
           if (streaming) {
-            streaming.raw = (streaming.raw ?? streaming.entry.text) + event.text;
-            streaming.entry.text = redact(streaming.raw.trim()).slice(0, SAY_CHARS);
+            streaming.raw += event.text;
             streaming.lastFragment = event.text;
             streaming.lastAt = now();
-            changed();
+            scheduleLiveSayFlush(runKey);
             return;
           }
           if (!event.text.trim()) return;
-          const entry = push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: event.text.trim().slice(0, SAY_CHARS) });
-          liveSay.set(runKey, { entry, lastFragment: event.text, lastAt: now(), raw: event.text });
+          liveSay.set(runKey, { lastFragment: event.text, lastAt: now(), raw: event.text });
           while (liveSay.size > 64) liveSay.delete(liveSay.keys().next().value!);
+          scheduleLiveSayFlush(runKey);
           return;
         }
         const text = event.text.trim();
         if (!text) return;
         const current = liveSay.get(runKey);
+        if (current && !current.entry && current.raw) {
+          // A non-delta say closes a buffered stream. Treat it as the canonical
+          // message instead of first rendering the partial stream and then a
+          // second bubble.
+          if (current.flushTimer) clearTimeout(current.flushTimer);
+          current.flushTimer = undefined;
+          current.raw = text;
+          current.lastFragment = text;
+          current.lastAt = now();
+          flushLiveSay(runKey);
+          return;
+        }
         if (current && now() - current.lastAt <= SAY_MERGE_WINDOW_MS) {
           // One provider turn owns one stable bubble, even when stream chunks
           // arrive slowly or another agent emits a message between them.
           // Providers may send cumulative snapshots, exact replays, or token
           // fragments; merge those forms without turning each into a new bubble.
-          if (current.lastFragment === text || current.entry.text === text) return;
-          const existing = current.entry.text;
+          if (current.lastFragment === text || current.entry?.text === text) return;
+          const existing = current.entry?.text ?? "";
           let merged: string;
           if (text.startsWith(existing)) merged = text;
           else if (existing.startsWith(text)) return;
@@ -679,14 +741,15 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
               ? `${left}${needsSpace ? " " : ""}${right}`
               : `${left}${paragraphBreak ? "\n\n" : " "}${right}`;
           }
-          current.entry.text = redact(merged).slice(0, SAY_CHARS);
+          if (!current.entry) current.entry = push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: merged });
+          else current.entry.text = redact(merged).slice(0, SAY_CHARS);
           current.lastFragment = text;
           current.lastAt = now();
           changed();
           return;
         }
         const entry = push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: text.slice(0, SAY_CHARS) });
-        liveSay.set(runKey, { entry, lastFragment: text, lastAt: now() });
+        liveSay.set(runKey, { entry, lastFragment: text, lastAt: now(), raw: text });
         while (liveSay.size > 64) liveSay.delete(liveSay.keys().next().value!);
         return;
       }
@@ -700,19 +763,33 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
       case "result": {
         doing.delete(event.handle);
         blocked.delete(event.handle);
-        if (event.isError) system(`@${event.handle} stopped with an error: ${event.text.slice(0, 300) || "no details"}`, event.handle);
+        if (event.isError) {
+          for (const [key, pending] of liveSay) {
+            if (key === event.handle || key.startsWith(`${event.handle}\0`)) {
+              if (pending.flushTimer) clearTimeout(pending.flushTimer);
+              liveSay.delete(key);
+            }
+          }
+          system(`@${event.handle} stopped with an error: ${event.text.slice(0, 300) || "no details"}`, event.handle);
+        }
         else {
           const text = event.text.trim();
           const runKey = event.runId ? `${event.handle}\0${event.runId}` : event.handle;
           const streamed = liveSay.get(runKey);
           const lastOwn = [...thread].reverse().find((e) => e.agent === event.handle && e.kind === "say");
+          if (streamed?.flushTimer) {
+            clearTimeout(streamed.flushTimer);
+            streamed.flushTimer = undefined;
+          }
           if (text && streamed) {
             // Provider stream fragments are already one live bubble. The
             // canonical result is its close, not a second message; replacing
             // it also handles the common case where the final wording differs
             // from the last streamed fragment.
-            streamed.entry.text = redact(text).slice(0, SAY_CHARS);
-            changed();
+            streamed.raw = text;
+            streamed.lastFragment = text;
+            streamed.lastAt = now();
+            flushLiveSay(runKey);
           } else if (text && (event.runId || !lastOwn || redact(text).trim() !== lastOwn.text.trim())) {
             push({ kind: "say", agent: event.handle, provider: event.provider, to: "you", text: text.slice(0, SAY_CHARS) });
           } else changed();
@@ -726,7 +803,10 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
         return;
       case "state":
         if (event.status === "starting" || event.status === "working") {
-          for (const key of liveSay.keys()) if (key === event.handle || key.startsWith(`${event.handle}\0`)) liveSay.delete(key);
+          for (const [key, pending] of liveSay) if (key === event.handle || key.startsWith(`${event.handle}\0`)) {
+            if (pending.flushTimer) clearTimeout(pending.flushTimer);
+            liveSay.delete(key);
+          }
         }
         changed();
         return;
@@ -809,8 +889,12 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     }
     lastAddressed = targets;
     if (everyone) system(`Sent to ${targets.join(", ")}`);
+    // One owner message addressing several agents creates one task per recipient; tag them all with
+    // the same broadcastId so a later teammate delegation recognizes a recipient already has this
+    // same request in flight, instead of queuing a second, independent task for it.
+    const broadcastId = targets.length > 1 ? randomUUID() : undefined;
     for (const handle of targets) {
-      const result = sessions!.deliver(handle, composeAgentMessage(message.text, message.context, targets, handle, known));
+      const result = sessions!.deliver(handle, composeAgentMessage(message.text, message.context, targets, handle, known), undefined, broadcastId);
       if (!result.ok) system(`Couldn't reach @${handle}: ${result.error}`, handle);
       else if (result.mode === "interrupted") system(`Interrupted @${handle} with your new message.`, handle);
       else if (result.mode === "restarted-worker") system(`Stopped @${handle}'s current run and started again with your new message.`, handle);
@@ -823,6 +907,11 @@ export function createWebUiBridge(options: { now?: () => number; debounceMs?: nu
     const message = parseUiMessage(raw);
     if (!message) return true;
     switch (message.type) {
+      case "ui-work-mode":
+        if (!options.setOwnerWorkMode) return false;
+        try { options.setOwnerWorkMode(message.mode); system(message.mode === "working" ? "I'm Working: foreground turns need your approval." : "Agents Free: agents may use foreground input."); }
+        catch { system("The work mode could not be saved. Foreground access was not changed."); }
+        return true;
       case "ui-subscribe":
         if (reply) {
           sink = reply;

@@ -21,6 +21,7 @@ export const ICONS = {
   // chevron.right
   chevronRight: "M9 5.5 15.5 12 9 18.5",
   chevronLeft: "M15 5.5 8.5 12 15 18.5",
+  chevronDown: "M5.5 9 12 15.5 18.5 9",
   // checkmark
   check: "M5 12.5 9.5 17 19 7.5",
   // arrow.up (send)
@@ -47,4 +48,34 @@ export const ICONS = {
   search: "M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM15.2 15.2 20 20",
   // brain (reasoning level badge)
   brain: "M9 3.5a3 3 0 0 0-3 2.6A3.2 3.2 0 0 0 3.5 9.3a3.3 3.3 0 0 0 .9 2.3 3.4 3.4 0 0 0 1.1 4.9A3.3 3.3 0 0 0 9 20.5c1.1 0 2-.5 2.3-1.2V4.7C11 3.9 10.1 3.5 9 3.5zm6 0a3 3 0 0 1 3 2.6 3.2 3.2 0 0 1 2.5 3.2 3.3 3.3 0 0 1-.9 2.3 3.4 3.4 0 0 1-1.1 4.9A3.3 3.3 0 0 1 15 20.5c-1.1 0-2-.5-2.3-1.2V4.7c.3-.8 1.2-1.2 2.3-1.2z",
+  // list.bullet (identity panel: Activity tab)
+  list: "M4 6h2v2H4V6zm4 0h12v2H8V6zM4 11h2v2H4v-2zm4 0h12v2H8v-2zm-4 5h2v2H4v-2zm4 0h12v2H8v-2z",
+  // checkmark.shield (identity panel: Approvals history tab)
+  shieldCheck: "M12 2.5 19.5 5.5v6c0 5-3.2 8.3-7.5 10-4.3-1.7-7.5-5-7.5-10v-6L12 2.5zm3.9 6.3-1.3-1.3-3.4 3.4-1.6-1.6-1.3 1.3 2.9 2.9 4.7-4.7z",
+  // paperclip (identity panel: Identity tab)
+  paperclip: "M16.5 6.5v8.3a3.8 3.8 0 1 1-7.6 0V6.2a2.4 2.4 0 1 1 4.8 0v7.6a1 1 0 1 1-2 0V7h-1.4v6.8a2.4 2.4 0 1 0 4.8 0V6.2a3.8 3.8 0 1 0-7.6 0v8.6a5.2 5.2 0 1 0 10.4 0V6.5h-1.4z",
+  // envelope (identity panel: Inbox tab)
+  mail: "M3 6h18v12H3V6zm1.9 1.9v.4l7.1 5.3 7.1-5.3v-.4H4.9zm14.2 2.3-6.2 4.6a1.6 1.6 0 0 1-1.8 0l-6.2-4.6v7h14.2v-7z",
+  // pencil (edit avatar/name badge)
+  pencil: "M15.7 3.3 20.7 8.3 9.6 19.4 3.5 20.5 4.6 14.4 15.7 3.3zm-1.4 2.8-9 9-.6 3 3-.6 9-9-2.4-2.4z",
+  // heart.fill (identity panel: SOUL/MEMORY tile corner)
+  heart: "M12 20.3 4.6 13c-2.1-2.1-2.1-5.5 0-7.6a5.3 5.3 0 0 1 7.4 0 5.3 5.3 0 0 1 7.4 0c2.1 2.1 2.1 5.5 0 7.6L12 20.3z",
+  // square.and.pencil (sidebar: new chat)
+  compose: "M4 4h9v1.8H5.8v12.4h12.4V11H20v9H4V4zm13.3-.6 2.3 2.3-7.9 7.9H9.4v-2.3l7.9-7.9zm3.4-.9 1.6 1.6-1.4 1.4-1.6-1.6 1.4-1.4z",
+  // sidebar.left (sidebar collapse/expand toggle)
+  // Muse rail set: outline strokes, drawn with svg(path, size, { stroke: 1.8 }).
+  railChat: "M12 4c-4.7 0-8.5 3.2-8.5 7.2 0 2 .9 3.8 2.5 5.1L5.3 20l4.2-1.9c.8.2 1.6.3 2.5.3 4.7 0 8.5-3.2 8.5-7.2S16.7 4 12 4z",
+  railSearch: "M10.8 17.6a6.8 6.8 0 1 0 0-13.6 6.8 6.8 0 0 0 0 13.6zM15.8 15.8 20 20",
+  railSpaces: "M7 3.5h10a1.5 1.5 0 0 1 1.5 1.5v14A1.5 1.5 0 0 1 17 20.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5zM9 3.5v17M11.5 8h4.5M11.5 11.5h4.5",
+  railBulb: "M9.2 17.5h5.6M10 20.5h4M12 3.5a6 6 0 0 0-3.6 10.8c.5.4.8 1 .8 1.6v1.6h5.6v-1.6c0-.6.3-1.2.8-1.6A6 6 0 0 0 12 3.5z",
+  railGoals: "M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM8.2 12.2l2.6 2.6 5-5.6",
+  railNew: "M5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4zM12 8v8M8 12h8",
+  railMenu: "M5 9h14M5 15h14",
+  railSoundOn: "M4 9.5h3l4.5-4v13l-4.5-4H4zM15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11",
+  railSoundOff: "M4 9.5h3l4.5-4v13l-4.5-4H4zM16 9.5l5 5M21 9.5l-5 5",
+  railMaximize: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
+  railRestore: "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5",
+  railMinimize: "M5 12h14",
+  sidebar:"M4 4.5h16v15H4v-15zm1.8 1.8v11.4h4V6.3h-4zm5.8 0v11.4h6.6V6.3H11.6z",
+  reply: "M10.3 7.2V4L4 10.3l6.3 6.3v-3.3c4.4 0 7.5 1.4 9.7 4.5-.9-4.4-3.5-8.8-9.7-9.6z",
 } as const;

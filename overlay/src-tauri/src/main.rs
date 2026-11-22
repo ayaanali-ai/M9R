@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -83,10 +83,15 @@ impl HoldToTalkState {
     }
 }
 
-/// The engine child the overlay started, so quitting the overlay stops it too.
+/// Tells spawn_broker_watchdog's background thread to stop polling/restarting the broker. The overlay
+/// never started the broker or m9r-engine as its own children -- those are an intentional background
+/// service (the broker is launched by its own Windows Scheduled Task specifically so it survives
+/// independent of this pill process, serving MCP for every agent session) -- so this flag only affects
+/// this process's own watchdog thread, nothing else keeps running or stops because of it.
 static BROKER_WATCHDOG_STOPPING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) const PILL: &str = "pill";
+const SCREEN_GLOW: &str = "screen-glow";
 /// The full-window Clonk-style app, a real OS window (decorations, taskbar entry, resizable) --
 /// unlike the pill, closing it must never shut down the engine or the pill overlay.
 const APP_WINDOW: &str = "app";
@@ -102,8 +107,10 @@ const TOP_MARGIN: f64 = 0.0;
 // wake handle), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
 
 /// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
-const NEXT_W: f64 = 720.0;
-const NEXT_H: f64 = 320.0;
+const NEXT_W: f64 = 1440.0;
+const NEXT_H: f64 = 900.0;
+const NOTCH_LIP_W: f64 = 288.0;
+const NOTCH_LIP_H: f64 = 32.0;
 /// Margin around the island that still counts as over it, matching the UI.
 const HIT_MARGIN: f64 = 14.0;
 
@@ -158,9 +165,15 @@ struct IslandRect {
 }
 
 impl IslandRect {
+    fn startup_lip(window_width: f64) -> Self {
+        let w = NOTCH_LIP_W.min(window_width * 0.95);
+        Self { x: (window_width - w) / 2.0, y: 0.0, w, h: NOTCH_LIP_H }
+    }
+
     /// A rectangle the UI reports must be finite, non-negative, and inside the window; anything else is ignored.
-    fn checked(x: f64, y: f64, w: f64, h: f64) -> Option<IslandRect> {
-        let sane = [x, y, w, h].iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 && x >= -1.0 && y >= -1.0 && x + w <= NEXT_W + 1.0 && y + h <= NEXT_H + 1.0;
+    fn checked(x: f64, y: f64, w: f64, h: f64, window_width: f64, window_height: f64) -> Option<IslandRect> {
+        let sane = [x, y, w, h].iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 && x >= -1.0 && y >= -1.0
+            && x + w <= window_width + 1.0 && y + h <= window_height + 1.0;
         sane.then_some(IslandRect { x, y, w, h })
     }
 
@@ -231,8 +244,13 @@ fn spawn_heartbeat(app: AppHandle) {
 
 /// The island reports where it is drawn, in logical pixels from the window's top-left.
 #[tauri::command]
-fn pill_set_rect(x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
-    let rect = IslandRect::checked(x, y, width, height).ok_or("island rectangle is outside the window")?;
+fn pill_set_rect(window: WebviewWindow, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let size = window.inner_size().map_err(|e| e.to_string())?;
+    let window_width = size.width as f64 / scale;
+    let window_height = size.height as f64 / scale;
+    let rect = IslandRect::checked(x, y, width, height, window_width, window_height)
+        .ok_or_else(|| format!("pill hit area ({x}, {y}, {width}, {height}) is outside the {window_width} × {window_height} logical window at scale {scale}"))?;
     NEXT.lock().unwrap().rect = rect;
     Ok(())
 }
@@ -269,15 +287,29 @@ fn open_microphone_settings() -> Result<(), String> {
 fn spawn_click_through_watcher(app: AppHandle) {
     std::thread::spawn(move || {
         let mut ignoring: Option<bool> = None;
+        let mut toggle_failed = false;
         loop {
-            std::thread::sleep(Duration::from_millis(16));
+            // A 16 ms poll did the same window/cursor queries ~62 times a second even
+            // when the pointer was nowhere near the pill. 50 ms keeps hit testing
+            // responsive while cutting those idle wakeups by about 68%.
+            std::thread::sleep(Duration::from_millis(50));
             let Some(window) = app.get_webview_window(PILL) else { continue };
             let rect = NEXT.lock().unwrap().rect;
-            let (Ok(cursor), Ok(pos), Ok(scale)) = (window.cursor_position(), window.outer_position(), window.scale_factor()) else { continue };
+            let (Ok(cursor), Ok(pos), Ok(scale)) = (window.cursor_position(), window.inner_position(), window.scale_factor()) else { continue };
             let inside = rect.hit(HIT_MARGIN, (cursor.x - pos.x as f64) / scale, (cursor.y - pos.y as f64) / scale);
             if ignoring != Some(!inside) {
-                ignoring = Some(!inside);
-                let _ = window.set_ignore_cursor_events(!inside);
+                match window.set_ignore_cursor_events(!inside) {
+                    Ok(()) => {
+                        ignoring = Some(!inside);
+                        toggle_failed = false;
+                    }
+                    Err(error) => {
+                        if !toggle_failed {
+                            eprintln!("M9R pill: could not change click-through: {error}");
+                            toggle_failed = true;
+                        }
+                    }
+                }
             }
         }
     });
@@ -292,15 +324,6 @@ fn feed_path() -> PathBuf {
         PathBuf::from(std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default()).join(".m9r")
     });
     home.join("feed.json")
-}
-
-/// The web broker writes this separately from the native feed. If M9R_FEED is overridden for a local preview/test,
-/// keep the companion activity file beside that override; the production default is ~/.m9r/web-activity.json.
-fn web_activity_path() -> PathBuf {
-    feed_path()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("web-activity.json")
 }
 
 /// The owner broker's redacted desktop-pill snapshot. The pill reads this
@@ -327,7 +350,28 @@ struct Saved {
     sound_enabled: Option<bool>,
     sound_volume: Option<f64>,
     auto_close_interval: Option<f64>,
+    /// Appearance preferences for the desktop's full-screen, click-through edge light.
+    glow_style: Option<String>,
+    glow_color: Option<String>,
 }
+
+#[derive(Clone, Serialize)]
+struct ScreenGlowSnapshot {
+    revision: u64,
+    visible: bool,
+    style: String,
+    color: String,
+    live: bool,
+}
+
+impl Default for ScreenGlowSnapshot {
+    fn default() -> Self {
+        Self { revision: 0, visible: false, style: "status".into(), color: "#FFFFFF".into(), live: false }
+    }
+}
+
+#[derive(Default)]
+struct ScreenGlowState(Mutex<ScreenGlowSnapshot>);
 
 fn saved_path(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("window.json"))
@@ -356,6 +400,32 @@ fn save_position(app: &AppHandle, cx: i32, y: i32) {
 /// Puts the pill at the top centre of the primary monitor, or where the user last left it if that spot is still on a screen.
 fn place(window: &WebviewWindow, saved: &Saved) {
     place_with(window, saved, COLLAPSED_W);
+}
+
+fn place_next_pill(window: &WebviewWindow, saved: &Saved) {
+    let saved_point = saved.cx.zip(saved.y);
+    let monitor = window.available_monitors().unwrap_or_default().into_iter().find(|monitor| {
+        let pos = monitor.position();
+        let size = monitor.size();
+        saved_point.is_some_and(|(x, y)| x >= pos.x && x < pos.x + size.width as i32
+            && y >= pos.y && y < pos.y + size.height as i32)
+    }).or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
+        return;
+    };
+    let area = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let width = ((NEXT_W * scale).round() as u32).min(area.size.width);
+    let height = ((NEXT_H * scale).round() as u32).min(area.size.height);
+    let left = area.position.x;
+    let top = area.position.y;
+    let center = saved_point.map_or(left + area.size.width as i32 / 2, |(x, _)| x);
+    let desired_top = saved_point.map_or(top + (TOP_MARGIN * scale).round() as i32, |(_, y)| y);
+    let x = (center - width as i32 / 2).clamp(left, left + (area.size.width - width) as i32);
+    let y = desired_top.clamp(top, top + (area.size.height - height) as i32);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    let _ = window.set_size(tauri::PhysicalSize::new(width, height));
 }
 
 fn place_with(window: &WebviewWindow, saved: &Saved, width: f64) {
@@ -394,12 +464,6 @@ fn resize_pill(window: WebviewWindow, width: f64, height: f64) -> Result<(), Str
     window.set_position(PhysicalPosition::new(cx - new_w / 2, pos.y)).map_err(|e| e.to_string())
 }
 
-/// A view-only merge of the native feed and separately persisted web activity.
-#[tauri::command]
-fn read_feed() -> Option<String> {
-    read_view_feed(&feed_path(), &web_activity_path())
-}
-
 /// Read only a broker-published, versioned pill state envelope. Returning the
 /// inner state JSON keeps the Tauri command transport simple while the broker
 /// remains the sole writer and owner of provider/UI state.
@@ -418,6 +482,7 @@ fn read_pill_state() -> Option<String> {
     value.get("state").map(serde_json::Value::to_string)
 }
 
+#[cfg(test)]
 fn read_view_feed(native_path: &Path, web_path: &Path) -> Option<String> {
     let native = fs::read_to_string(native_path).ok();
     let web = fs::read_to_string(web_path).ok();
@@ -425,6 +490,7 @@ fn read_view_feed(native_path: &Path, web_path: &Path) -> Option<String> {
 }
 
 /// Compose sources only in memory for the renderer. This never writes back to feed.json, which remains native-only.
+#[cfg(test)]
 fn merge_view_feed(native_text: Option<&str>, web_text: Option<&str>) -> Option<String> {
     if native_text.is_none() && web_text.is_none() {
         return None;
@@ -590,9 +656,30 @@ fn broker_health_ok() -> bool {
     text.starts_with("HTTP/1.1 200") && text.contains("\"ok\":true")
 }
 
-/// Stops then starts the owner-launched broker task -- a plain `/Run` on an already-"running" task record
+/// True if any `m9r-web-broker.exe` process is still alive. There is supposed to be exactly one such
+/// process system-wide (it is the singleton owner-launched broker), so matching by image name here --
+/// unlike `m9r-engine.exe`, which legitimately runs several roles at once and must never be bulk-killed
+/// by name -- does not risk taking down an unrelated process.
+#[cfg(windows)]
+fn broker_image_still_running() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut query = Command::new("tasklist");
+    query.args(["/FI", "IMAGENAME eq m9r-web-broker.exe", "/FO", "CSV", "/NH"]).creation_flags(CREATE_NO_WINDOW);
+    match query.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).to_lowercase().contains("m9r-web-broker.exe"),
+        // Could not even ask the process table; do not assume it is gone.
+        Err(_) => true,
+    }
+}
+
+/// Stops then starts the owner-launched broker task. A plain `/Run` on an already-"running" task record
 /// is a no-op when the process is wedged but the scheduler still thinks it's up, so the stuck process must
-/// be ended first.
+/// be ended first -- and `/End` is only a request to the scheduler, not proof the process actually exited
+/// (it can stop the task's own wrapper while the real `m9r-web-broker.exe` survives, orphaned, still holding
+/// the port). Confirmed live on 2026-11-10: the scheduled task's last-run time moved while the broker stayed
+/// the same pre-existing process. This now verifies the exit instead of assuming it, and force-stops the
+/// exact lingering image before ever calling `/Run` again, rather than risking a second broker on the port.
 fn restart_broker_task() {
     #[cfg(windows)]
     {
@@ -601,7 +688,28 @@ fn restart_broker_task() {
         let mut end = Command::new("schtasks");
         end.args(["/End", "/TN", BROKER_TASK_NAME]).creation_flags(CREATE_NO_WINDOW);
         let _ = end.output();
-        std::thread::sleep(Duration::from_secs(2));
+
+        // Poll for the real process to disappear instead of trusting `/End` after a fixed sleep.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while broker_image_still_running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        if broker_image_still_running() {
+            eprintln!("M9R: '{BROKER_TASK_NAME}' survived /End; force-stopping the lingering m9r-web-broker.exe image before restart");
+            let mut kill = Command::new("taskkill");
+            kill.args(["/IM", "m9r-web-broker.exe", "/F"]).creation_flags(CREATE_NO_WINDOW);
+            let _ = kill.output();
+            let kill_deadline = Instant::now() + Duration::from_secs(5);
+            while broker_image_still_running() && Instant::now() < kill_deadline {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if broker_image_still_running() {
+                eprintln!("M9R: m9r-web-broker.exe is still running after a forced stop; refusing to start a second instance on the same port");
+                return;
+            }
+        }
+
         let mut run = Command::new("schtasks");
         run.args(["/Run", "/TN", BROKER_TASK_NAME]).creation_flags(CREATE_NO_WINDOW);
         match run.output() {
@@ -632,112 +740,6 @@ fn engine_call(engine: &PathBuf, args: &[&str]) -> Result<String, String> {
 
 fn plain_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-fn engine_stage_call_with_input(engine: &PathBuf, args: &[String], input: Option<String>) -> Result<serde_json::Value, String> {
-    let mut cmd = Command::new(engine);
-    cmd.args(args)
-        .env("M9R_DESKTOP_PILL_OWNER_ACTION", "1")
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    if let Some(input) = input {
-        use std::io::Write;
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(input.as_bytes()) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.to_string());
-            }
-        }
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.stdout.len() > 4 * 1024 * 1024 {
-        return Err("The desktop stage response exceeded the safe local UI size.".into());
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    if !out.status.success() {
-        return Err(format!("{}{}", stdout, String::from_utf8_lossy(&out.stderr)).trim().to_string());
-    }
-    let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|_| "The desktop stage command returned invalid JSON.".to_string())?;
-    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err("The desktop stage command did not confirm success.".into());
-    }
-    Ok(value)
-}
-
-/// Local pill actions reuse the same stage registry and Windows checks as `m9r web stage`.
-#[tauri::command]
-async fn desktop_stage_action(
-    action: String,
-    name: Option<String>,
-    x: Option<u32>,
-    y: Option<u32>,
-    pid: Option<u32>,
-    window_id: Option<String>,
-    text: Option<String>,
-    direction: Option<String>,
-    from_x: Option<u32>,
-    from_y: Option<u32>,
-    to_x: Option<u32>,
-    to_y: Option<u32>,
-) -> Result<serde_json::Value, String> {
-    let needs_name = matches!(action.as_str(), "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent");
-    let needs_xy = matches!(action.as_str(), "cursor" | "click" | "scroll");
-    let needs_attach = action == "attach";
-    let needs_text = action == "type";
-    let needs_direction = action == "scroll";
-    let needs_drag = action == "drag";
-    if !matches!(action.as_str(), "list" | "create" | "activate" | "return" | "capture" | "cursor" | "windows" | "attach" | "click" | "type" | "scroll" | "drag" | "allow-agent" | "allow-control" | "revoke-agent") {
-        return Err("Unsupported desktop stage action".into());
-    }
-    if needs_name != name.is_some() || name.as_deref().is_some_and(|value| !plain_id(value))
-        || needs_xy != (x.is_some() && y.is_some()) || x.is_some() != y.is_some()
-        || needs_attach != pid.is_some() || needs_attach != window_id.is_some()
-        || window_id.as_deref().is_some_and(|value| !valid_window_id(value))
-        || needs_text != text.is_some() || text.as_deref().is_some_and(|value| value.chars().count() > 500)
-        || needs_direction != direction.is_some() || direction.as_deref().is_some_and(|value| value != "up" && value != "down")
-        || needs_drag != (from_x.is_some() && from_y.is_some() && to_x.is_some() && to_y.is_some())
-        || (!needs_drag && (from_x.is_some() || from_y.is_some() || to_x.is_some() || to_y.is_some()))
-        || [x, y, from_x, from_y, to_x, to_y].into_iter().flatten().any(|value| value > 99_999)
-        || pid.is_some_and(|value| value == 0) {
-        return Err("Invalid desktop stage action arguments".into());
-    }
-    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
-    let engine_action = if action == "attach" { "attach-window" } else { action.as_str() };
-    let mut args = vec!["web".to_string(), "stage".to_string(), engine_action.to_string()];
-    if let Some(name) = name { args.push(name); }
-    if let (Some(x), Some(y)) = (x, y) { args.extend([x.to_string(), y.to_string()]); }
-    if needs_attach {
-        args.extend([pid.unwrap().to_string(), window_id.unwrap()]);
-    }
-    if needs_text {
-        args.push("--stdin-json".into());
-    }
-    if let Some(direction) = direction { args.push(direction); }
-    if let (Some(from_x), Some(from_y), Some(to_x), Some(to_y)) = (from_x, from_y, to_x, to_y) {
-        args.extend([from_x.to_string(), from_y.to_string(), to_x.to_string(), to_y.to_string()]);
-    }
-    args.push("--json".into());
-    let input = text.map(|text| serde_json::json!({ "text": text }).to_string());
-    tauri::async_runtime::spawn_blocking(move || engine_stage_call_with_input(&engine, &args, input))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-fn valid_window_id(value: &str) -> bool {
-    let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).ok()
-    } else {
-        value.parse::<u64>().ok()
-    };
-    parsed.is_some_and(|handle| handle > 0)
 }
 
 /// Sessions M9R knows for one agent (`@codex`, `@claude`, ...), for the pill's link picker.
@@ -840,6 +842,14 @@ async fn select_model(handle: String, model: Option<String>, effort: Option<Stri
     }).await.map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn set_owner_work_mode(mode: String) -> Result<String, String> {
+    if mode != "working" && mode != "agents-free" { return Err("Invalid owner work mode".into()); }
+    let engine = find_engine().ok_or("The M9R engine was not found.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["pill-work-mode", &mode]))
+        .await.map_err(|error| error.to_string())?
+}
+
 /// Approves or denies a broker-owned pill approval. The broker UI contract
 /// intentionally has no `allow for a day` route; that legacy grant remains
 /// available only through the compatibility feed path.
@@ -874,6 +884,59 @@ fn parse_mentions(text: &str) -> (Vec<String>, String) {
     (handles, kept.join(" "))
 }
 
+/// Checks for a signed, newer M9R release. Never applies anything -- this only answers the
+/// pill's "Update available" button with a verified version comparison (see engine-update-core.ts).
+#[tauri::command]
+async fn check_for_update() -> Result<String, String> {
+    let engine = find_engine().ok_or("The M9R engine was not found. Run setup again.")?;
+    tauri::async_runtime::spawn_blocking(move || engine_call(&engine, &["update", "check"]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn plain_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Applies a verified update the pill already offered via check_for_update. Re-runs the exact
+/// installer that was itself hashed as part of the currently-installed release (persisted to
+/// M9R_HOME/tools by install-m9r.ps1), with -Yes standing in for the consent this button's own
+/// "Update available" screen already collected. Detached so it survives this process being
+/// stopped and relaunched by that same script, the same way it handles a normal install.
+#[tauri::command]
+async fn apply_update(version: String) -> Result<(), String> {
+    if !plain_version(&version) {
+        return Err("Bad version".into());
+    }
+    let installer = m9r_home().join("tools").join("install-m9r.ps1");
+    if !installer.is_file() {
+        return Err("No local installer was found to apply this update. Reinstall M9R from a current release first.".into());
+    }
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ])
+    .arg(&installer)
+    .args(["-Version", &version, "-Yes"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW: this installer
+        // stops and relaunches the overlay itself, so the update must not be a child of
+        // the process it is about to stop.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200 | 0x0800_0000);
+    }
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Saves a fact or decision to the shared project memory agents read at session start (`m9r note`).
 #[tauri::command]
 async fn save_memory(text: String) -> Result<String, String> {
@@ -902,14 +965,89 @@ async fn dismiss_task(task_id: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+fn valid_glow_color(value: &str) -> bool {
+    value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Keep the presentation window on the pill's primary display, click-through, and non-activating.
+/// The window is hidden while the pill is hidden or a full-screen app owns that display.
+fn apply_screen_glow_window(app: &AppHandle, desired: &ScreenGlowSnapshot) -> Result<(), String> {
+    let glow = app.get_webview_window(SCREEN_GLOW).ok_or("the screen-glow window is not registered")?;
+    let pill = app.get_webview_window(PILL).ok_or("the pill window is not registered")?;
+    let pill_visible = pill.is_visible().unwrap_or(false);
+    let pill_hwnd = pill.hwnd().map(|handle| handle.0 as isize).unwrap_or(0);
+    if !desired.visible || !pill_visible || fullscreen_app_in_front(pill_hwnd) {
+        glow.hide().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let monitor = pill.primary_monitor().map_err(|error| error.to_string())?
+        .ok_or("Windows did not report the pill's primary monitor")?;
+    let position = monitor.position();
+    let size = monitor.size();
+    glow.set_position(PhysicalPosition::new(position.x, position.y)).map_err(|error| error.to_string())?;
+    glow.set_size(PhysicalSize::new(size.width, size.height)).map_err(|error| error.to_string())?;
+    glow.set_focusable(false).map_err(|error| error.to_string())?;
+    glow.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
+    glow.set_always_on_top(true).map_err(|error| error.to_string())?;
+    glow.show().map_err(|error| error.to_string())?;
+    // Keep the interactive pill above the transparent frame without activating it.
+    let _ = pill.set_always_on_top(true);
+    Ok(())
+}
+
+#[tauri::command]
+fn read_screen_glow(state: State<'_, ScreenGlowState>) -> Result<ScreenGlowSnapshot, String> {
+    state.0.lock().map(|snapshot| snapshot.clone()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_screen_glow(
+    app: AppHandle,
+    state: State<'_, ScreenGlowState>,
+    visible: bool,
+    style: String,
+    color: String,
+    live: bool,
+) -> Result<(), String> {
+    if style != "status" && style != "rainbow" {
+        return Err("Edge glow style must be status or rainbow.".into());
+    }
+    if !valid_glow_color(&color) {
+        return Err("Edge glow color must be a six-digit hexadecimal color.".into());
+    }
+    let snapshot = {
+        let mut current = state.0.lock().map_err(|error| error.to_string())?;
+        if current.visible != visible || current.style != style || current.color != color || current.live != live {
+            current.revision = current.revision.saturating_add(1);
+            current.visible = visible;
+            current.style = style;
+            current.color = color;
+            current.live = live;
+        }
+        current.clone()
+    };
+    apply_screen_glow_window(&app, &snapshot)?;
+    app.emit_to(SCREEN_GLOW, "screen-glow-update", snapshot).map_err(|error| error.to_string())
+}
+
 /// Persists the pill's own settings (sound, auto-close delay) beside its saved window
 /// position, so they survive a restart without depending on any provider session.
 #[tauri::command]
-fn save_settings(app: AppHandle, sound_enabled: bool, sound_volume: f64, auto_close_interval: f64) -> Result<(), String> {
+fn save_settings(app: AppHandle, sound_enabled: bool, sound_volume: f64, auto_close_interval: f64,
+    glow_style: String, glow_color: Option<String>) -> Result<(), String> {
+    if glow_style != "status" && glow_style != "rainbow" && glow_style != "off" {
+        return Err("Edge glow style must be status, rainbow, or off.".into());
+    }
+    if glow_color.as_deref().is_some_and(|color| !valid_glow_color(color)) {
+        return Err("Edge glow color must be null or a six-digit hexadecimal color.".into());
+    }
     let mut saved = load_saved(&app);
     saved.sound_enabled = Some(sound_enabled);
     saved.sound_volume = Some(sound_volume);
     saved.auto_close_interval = Some(auto_close_interval);
+    saved.glow_style = Some(glow_style);
+    saved.glow_color = glow_color;
     let path = saved_path(&app).ok_or("No app config directory is available.")?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -926,6 +1064,8 @@ fn load_settings(app: AppHandle) -> Result<serde_json::Value, String> {
         "soundEnabled": saved.sound_enabled,
         "soundVolume": saved.sound_volume,
         "autoCloseInterval": saved.auto_close_interval,
+        "glowStyle": saved.glow_style,
+        "glowColor": saved.glow_color,
     }))
 }
 
@@ -1025,9 +1165,15 @@ fn spawn_fullscreen_watcher(app: AppHandle) {
             if fullscreen && !hidden_for_fullscreen {
                 hidden_for_fullscreen = true;
                 let _ = window.hide();
+                if let Ok(snapshot) = app.state::<ScreenGlowState>().0.lock().map(|state| state.clone()) {
+                    let _ = apply_screen_glow_window(&app, &snapshot);
+                }
             } else if !fullscreen && hidden_for_fullscreen {
                 hidden_for_fullscreen = false;
                 let _ = window.show();
+                if let Ok(snapshot) = app.state::<ScreenGlowState>().0.lock().map(|state| state.clone()) {
+                    let _ = apply_screen_glow_window(&app, &snapshot);
+                }
             }
         }
     });
@@ -1042,6 +1188,9 @@ fn toggle_pill(app: &AppHandle) {
             let _ = w.hide();
         } else {
             let _ = w.show();
+        }
+        if let Ok(snapshot) = app.state::<ScreenGlowState>().0.lock().map(|state| state.clone()) {
+            let _ = apply_screen_glow_window(app, &snapshot);
         }
     }
 }
@@ -1168,54 +1317,14 @@ fn has_open_app_argument(args: &[String]) -> bool {
     args.iter().any(|arg| arg == OPEN_APP_ARGUMENT)
 }
 
+/// Exits this pill overlay process only. The broker/engine keep running in the background for other
+/// agent sessions -- that is intentional, not a bug (see BROKER_WATCHDOG_STOPPING's own comment) -- and
+/// startDesktopOverlay's own retry loop (desktop-pill-presence.ts) checks this heartbeat removal and
+/// deliberately does not relaunch the pill after this call, so an intentional quit stays quit.
 fn shutdown_pill(app: &AppHandle) {
     let _ = fs::remove_file(heartbeat_path());
     stop_engine();
     app.exit(0);
-}
-
-/// Watches both source files (a quarter-second poll: no extra dependency) and emits a merged view when either changes.
-fn spawn_feed_watcher(app: AppHandle) {
-    std::thread::spawn(move || {
-        let native_path = feed_path();
-        let web_path = web_activity_path();
-        let mut last_native: Option<(SystemTime, u64)> = None;
-        let mut last_web: Option<(SystemTime, u64)> = None;
-        let mut last_change_at = Instant::now();
-        let mut stale_reported = false;
-        loop {
-            let native = file_stamp(&native_path);
-            let web = file_stamp(&web_path);
-            let native_changed = native != last_native;
-            let any_changed = native_changed || web != last_web;
-            last_native = native;
-            last_web = web;
-
-            if native_changed && native.is_some() {
-                last_change_at = Instant::now();
-                if stale_reported {
-                    stale_reported = false;
-                    let _ = app.emit("engine-ok", ());
-                }
-            }
-            if any_changed {
-                if let Some(view) = read_view_feed(&native_path, &web_path) {
-                    let _ = app.emit("feed", view);
-                } else {
-                    let _ = app.emit("feed-missing", ());
-                }
-            } else if native.is_some() && !stale_reported && last_change_at.elapsed() > Duration::from_secs(20) {
-                // Web activity does not keep the native engine healthy: only native feed writes reset this timer.
-                stale_reported = true;
-                let _ = app.emit("engine-stale", ());
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    });
-}
-
-fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
-    fs::metadata(path).ok().map(|meta| (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()))
 }
 
 /// Shared by the hold-to-talk hotkey, however it was detected (currently only the raw Ctrl+Alt
@@ -1264,11 +1373,12 @@ fn main() {
                 })
                 .build(),
         )
+        .manage(ScreenGlowState::default())
         // The canonical pill is broker-state based. Do not expose the old
         // merged-feed, provider-session linking, or compatibility decision
         // commands to the production window; those paths could resurrect
         // historical provider/session state after a restart.
-        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, pill_decide, save_memory, desktop_stage_action, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, set_owner_work_mode, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings, read_screen_glow, set_screen_glow, check_for_update, apply_update])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.
@@ -1277,6 +1387,11 @@ fn main() {
                 return Ok(());
             }
             let window = app.get_webview_window(PILL).expect("pill window");
+            if let Some(screen_glow) = app.get_webview_window(SCREEN_GLOW) {
+                let _ = screen_glow.set_focusable(false);
+                let _ = screen_glow.set_ignore_cursor_events(true);
+                let _ = screen_glow.hide();
+            }
             // Never take keyboard focus: clicking the pill must not pull you out of the terminal you were typing in.
             let _ = window.set_focusable(false);
             let _ = window.set_always_on_top(true);
@@ -1287,13 +1402,16 @@ fn main() {
             ctrl_alt_hold::spawn(app.handle().clone());
             if next_mode() {
                 // The one-pill UI is the root of the single canonical frontend bundle.
-                let _ = window.set_size(LogicalSize::new(NEXT_W, NEXT_H));
                 let _ = window.set_ignore_cursor_events(true);
+                place_next_pill(&window, &load_saved(app.handle()));
+                if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+                    // The visible lip can receive its first click before WebView reports geometry.
+                    NEXT.lock().unwrap().rect = IslandRect::startup_lip(size.width as f64 / scale);
+                }
                 match "http://tauri.localhost/index.html".parse() {
                     Ok(url) => { let _ = window.navigate(url); }
                     Err(e) => eprintln!("M9R: could not open the one-pill UI ({e})"),
                 }
-                place_with(&window, &load_saved(app.handle()), NEXT_W);
                 spawn_click_through_watcher(app.handle().clone());
             } else {
                 place(&window, &load_saved(app.handle()));
@@ -1316,7 +1434,10 @@ fn main() {
             let open = MenuItem::with_id(app, "open-app", "Open M9R", true, None::<&str>)?;
             let show = MenuItem::with_id(app, "toggle", &format!("Show / hide pill ({TOGGLE_HOTKEY_LABEL})"), true, None::<&str>)?;
             let dnd = CheckMenuItem::with_id(app, "dnd", "Do not disturb", true, false, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            // Labeled "Close Pill," not "Quit": this only exits the pill overlay process. The
+            // broker/engine background service keeps running for other agent sessions by design
+            // (see shutdown_pill's own comment) -- "Quit" would wrongly imply it stops everything.
+            let quit = MenuItem::with_id(app, "quit", "Close Pill", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &show, &dnd, &quit])?;
             let mut tray = TrayIconBuilder::new().tooltip("M9R").menu(&menu);
             if let Some(icon) = app.default_window_icon() {
@@ -1334,7 +1455,6 @@ fn main() {
             .build(app)?;
 
             spawn_heartbeat(app.handle().clone());
-            spawn_feed_watcher(app.handle().clone());
             spawn_broker_watchdog();
             spawn_fullscreen_watcher(app.handle().clone());
             // Best effort: if something else already holds this chord, the tray menu's "Show / hide" still works.
@@ -1377,8 +1497,54 @@ fn main() {
 }
 
 #[cfg(test)]
+mod screen_glow_tests {
+    use super::{valid_glow_color, Saved, ScreenGlowSnapshot};
+
+    #[test]
+    fn edge_glow_color_accepts_only_rgb_hex_values() {
+        assert!(valid_glow_color("#ffffff"));
+        assert!(valid_glow_color("#A1b2C3"));
+        assert!(!valid_glow_color("white"));
+        assert!(!valid_glow_color("#fff"));
+        assert!(!valid_glow_color("##112233"));
+        assert!(!valid_glow_color("#１２３４５６"));
+    }
+
+    #[test]
+    fn older_window_settings_keep_defaults_and_custom_glow_round_trips() {
+        let old: Saved = serde_json::from_str(r#"{"sound_enabled":true,"auto_close_interval":15.0}"#).unwrap();
+        assert_eq!(old.glow_style, None);
+        assert_eq!(old.glow_color, None);
+
+        let saved = Saved { glow_style: Some("rainbow".into()), glow_color: Some("#32A8FF".into()), ..Saved::default() };
+        let restored: Saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(restored.glow_style.as_deref(), Some("rainbow"));
+        assert_eq!(restored.glow_color.as_deref(), Some("#32A8FF"));
+    }
+
+    #[test]
+    fn screen_frame_starts_hidden_and_non_live() {
+        let state = ScreenGlowSnapshot::default();
+        assert!(!state.visible);
+        assert!(!state.live);
+        assert_eq!(state.style, "status");
+    }
+}
+
+#[cfg(test)]
 mod one_pill_window_tests {
     use super::{has_open_app_argument, has_update_shutdown_argument, heartbeat_json, IslandRect, HIT_MARGIN, NEXT_H, NEXT_W, OPEN_APP_ARGUMENT, UPDATE_SHUTDOWN_ARGUMENT};
+
+    #[test]
+    fn startup_lip_only_accepts_clicks_near_the_visible_notch() {
+        for width in [240.0, 720.0, NEXT_W] {
+            let lip = IslandRect::startup_lip(width);
+            assert!(lip.hit(0.0, width / 2.0, 16.0));
+            assert!(!lip.hit(0.0, width / 2.0, 80.0));
+            assert!(!lip.hit(0.0, 0.0, 16.0));
+            assert!(IslandRect::checked(lip.x, lip.y, lip.w, lip.h, width, NEXT_H).is_some());
+        }
+    }
 
     #[test]
     fn only_the_private_installer_argument_requests_shutdown() {
@@ -1414,17 +1580,18 @@ mod one_pill_window_tests {
 
     #[test]
     fn only_a_sane_rectangle_inside_the_window_is_accepted() {
-        assert!(IslandRect::checked(216.0, 0.0, 288.0, 32.0).is_some());
-        assert!(IslandRect::checked(0.0, 0.0, NEXT_W, NEXT_H).is_some());
-        assert!(IslandRect::checked(f64::NAN, 0.0, 10.0, 10.0).is_none());
-        assert!(IslandRect::checked(0.0, 0.0, -1.0, 10.0).is_none());
-        assert!(IslandRect::checked(100.0, 0.0, NEXT_W, 10.0).is_none(), "wider than the window allows");
-        assert!(IslandRect::checked(0.0, 0.0, 10.0, NEXT_H + 50.0).is_none());
+        assert!(IslandRect::checked(216.0, 0.0, 288.0, 32.0, NEXT_W, NEXT_H).is_some());
+        assert!(IslandRect::checked(198.0, 0.0, 704.0, 432.0, NEXT_W, NEXT_H).is_some());
+        assert!(IslandRect::checked(0.0, 0.0, NEXT_W, NEXT_H, NEXT_W, NEXT_H).is_some());
+        assert!(IslandRect::checked(f64::NAN, 0.0, 10.0, 10.0, NEXT_W, NEXT_H).is_none());
+        assert!(IslandRect::checked(0.0, 0.0, -1.0, 10.0, NEXT_W, NEXT_H).is_none());
+        assert!(IslandRect::checked(100.0, 0.0, NEXT_W, 10.0, NEXT_W, NEXT_H).is_none(), "wider than the window allows");
+        assert!(IslandRect::checked(0.0, 0.0, 10.0, 432.0, 720.0, 400.0).is_none());
     }
 
     #[test]
     fn the_island_and_its_margin_are_solid_and_everything_else_is_click_through() {
-        let r = IslandRect::checked(216.0, 0.0, 288.0, 32.0).unwrap();
+        let r = IslandRect::checked(216.0, 0.0, 288.0, 32.0, NEXT_W, NEXT_H).unwrap();
         assert!(r.hit(HIT_MARGIN, 300.0, 10.0));
         assert!(r.hit(HIT_MARGIN, 216.0 - HIT_MARGIN, 0.0), "the margin counts");
         assert!(!r.hit(HIT_MARGIN, 216.0 - HIT_MARGIN - 1.0, 10.0));
@@ -1433,7 +1600,7 @@ mod one_pill_window_tests {
 
     #[test]
     fn a_retracted_island_is_never_hit_even_at_its_old_position() {
-        let r = IslandRect::checked(268.0, 0.0, 184.0, 0.0).unwrap();
+        let r = IslandRect::checked(268.0, 0.0, 184.0, 0.0, NEXT_W, NEXT_H).unwrap();
         assert!(!r.hit(HIT_MARGIN, 300.0, 0.0));
         assert!(!IslandRect::default().hit(HIT_MARGIN, 0.0, 0.0));
     }

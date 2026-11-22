@@ -3,11 +3,14 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 
 test("the packaged broker runs from persistent storage with no CLI or npm cache beside it", async () => {
-  const temporary = mkdtempSync(resolve(".m9r-install-audit-"));
+  // The runtime rejects credential homes inside the Git workspace, so keep
+  // this fixture under the system temp root rather than creating it in-repo.
+  const temporary = mkdtempSync(join(tmpdir(), "m9r-install-audit-"));
   const home = join(temporary, "home");
   const project = join(temporary, "project");
   mkdirSync(project);

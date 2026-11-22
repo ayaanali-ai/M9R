@@ -90,7 +90,7 @@ export type ManagedProviderEvent =
   | { readonly kind: "status"; readonly status: ManagedProviderStatus; readonly doing?: string }
   | { readonly kind: "text"; readonly text: string; /** A raw stream chunk: append verbatim, never trim or overlap-merge. */ readonly delta?: boolean }
   | { readonly kind: "tool"; readonly name: string; readonly summary?: string }
-  | { readonly kind: "result"; readonly text: string; readonly isError: boolean }
+  | { readonly kind: "result"; readonly text: string; readonly isError: boolean; readonly usage?: import("./provider-usage-core").ReportedTurnUsage | null; readonly providerReportedCostUsd?: number | null }
   | { readonly kind: "error"; readonly error: string; readonly retryable: boolean };
 
 /**
@@ -156,7 +156,11 @@ export interface ManagedProviderSupervisor {
 
 const HANDLE_PATTERN = /^[a-z][a-z0-9_-]{0,39}$/;
 const PROVIDER_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
-const CONNECTION_ID_PATTERN = /^[A-Za-z0-9_.:%-]{1,512}$/;
+// encodeURIComponent leaves !'()* unescaped (RFC 2396 "mark" characters) alongside the usual
+// unreserved set, so a cwd containing any of them (confirmed live: a sandbox temp path with
+// "#!sandbox...") produces a defaultConnectionId this pattern then rejected outright, even
+// though the id came from our own encodeURIComponent call, not untrusted input.
+const CONNECTION_ID_PATTERN = /^[A-Za-z0-9_.:%!'()*-]{1,512}$/;
 
 function normalizeHandle(value: string): string {
   const handle = value.trim().replace(/^@/, "").toLowerCase();

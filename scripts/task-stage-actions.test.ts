@@ -3,18 +3,131 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { parseTaskStageAction, runTaskStageAction } from "../src/lib/native/task-stage-actions";
+import { parseTaskStageAction, runTaskStageAction, taskStageActionDeliveryProfile } from "../src/lib/native/task-stage-actions";
 import type { createCuaStageDriver } from "../src/lib/native/cua-stage-driver";
-import { createWebBrokerClient } from "../src/lib/native/web-broker-client";
+import { composeAppendedValue } from "../src/lib/native/cua-stage-driver";
+import { DesktopInputNotDispatchedError } from "../src/lib/native/desktop-input-errors";
+import { createWebBrokerClient, type WebBrokerClient } from "../src/lib/native/web-broker-client";
+import { TASK_STAGE_POLICY_FILE } from "../src/lib/native/task-desktop-stage";
+import { prepareTaskStageNotice } from "../src/lib/native/task-stage-notice";
 
 test("desktop action parser accepts common pointer and keyboard actions but rejects malformed key input", () => {
   assert.deepEqual(parseTaskStageAction({ kind: "double_click", x: 24, y: 68 }), { kind: "double_click", x: 24, y: 68 });
   assert.deepEqual(parseTaskStageAction({ kind: "right_click", x: 24, y: 68 }), { kind: "right_click", x: 24, y: 68 });
   assert.deepEqual(parseTaskStageAction({ kind: "press_key", key: "Enter" }), { kind: "press_key", key: "Enter" });
+  assert.deepEqual(parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "search terms" }),
+    { kind: "type_then_enter", view: "app", text: "search terms" });
+  assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", text: "search terms" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "type_then_enter", view: "app", text: "x".repeat(5_001) }), /Invalid stage input text/);
   assert.deepEqual(parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L"] }), { kind: "hotkey", keys: ["Control", "L"] });
+  assert.deepEqual(parseTaskStageAction({ kind: "type", view: "popup", mode: "replace", x: 32, y: 14, text: "M9R-demo-smoke.txt" }),
+    { kind: "type", view: "popup", mode: "replace", x: 32, y: 14, text: "M9R-demo-smoke.txt" });
+  assert.deepEqual(parseTaskStageAction({ kind: "save_as", view: "app", path: "C:\\Users\\owner\\Desktop\\M9R Benchmark\\F1-Run1\\house.png", createParentDirectories: true }),
+    { kind: "save_as", view: "app", path: "C:\\Users\\owner\\Desktop\\M9R Benchmark\\F1-Run1\\house.png", createParentDirectories: true });
+  assert.deepEqual(parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "down" }),
+    { kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "down" });
+  assert.deepEqual(parseTaskStageAction({ kind: "append_element", view: "app", ref: "window-ui-element-a-1", text: "new line", separator: "newline", expectedRole: "Edit" }),
+    { kind: "append_element", view: "app", ref: "window-ui-element-a-1", text: "new line", separator: "newline", expectedRole: "Edit" });
+  assert.throws(() => parseTaskStageAction({ kind: "append_element", ref: "window-ui-element-a-1", text: "new line" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "append_element", view: "app", ref: "window-ui-element-a-1", text: "new line", separator: "paragraph" }), /Invalid append text or separator/);
+  assert.deepEqual(parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "right", granularity: "large", expectedRole: "Pane" }),
+    { kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "right", granularity: "large", expectedRole: "Pane" });
+  assert.throws(() => parseTaskStageAction({ kind: "scroll_element", view: "app", ref: "window-ui-element-a-1", direction: "bottom" }), /Invalid accessibility scroll direction/);
+  assert.throws(() => parseTaskStageAction({ kind: "scroll_element", ref: "window-ui-element-a-1", direction: "down" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "save_as", view: "app", path: "Desktop\\file.txt" }), /absolute Windows file path/);
+  assert.throws(() => parseTaskStageAction({ kind: "save_as", path: "C:\\Users\\owner\\Desktop\\file.txt" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "type", view: "popup", mode: "replace", text: "filename.txt" }), /Replace text requires an exact field point/);
   assert.throws(() => parseTaskStageAction({ kind: "press_key", key: "not-a-key" }), /Invalid key/);
   assert.throws(() => parseTaskStageAction({ kind: "hotkey", keys: ["Control", "L", "Shift", "F2", "F3"] }), /1–4/);
   assert.throws(() => parseTaskStageAction({ kind: "click", x: 1, y: 2, hwnd: "123" }), /Invalid stage action fields/);
+});
+
+test("drag action parsing treats durationMs as optional, matching its type", () => {
+  assert.deepEqual(parseTaskStageAction({ kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80 }),
+    { kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80 });
+  assert.deepEqual(parseTaskStageAction({ kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80, durationMs: 250 }),
+    { kind: "drag", fromX: 10, fromY: 20, toX: 100, toY: 80, durationMs: 250 });
+  assert.throws(() => parseTaskStageAction({ kind: "drag", fromX: 10, fromY: 20, toX: 100 }), /Invalid stage action fields/);
+});
+
+test("delivery profiles distinguish semantic background routes from shared and foreground input", () => {
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "capture" }), { capabilities: ["observe.accessibility"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "click_element", ref: "e1" }),
+    { capabilities: ["input.click.element"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "append_element", ref: "e1", text: "line", separator: "newline" }),
+    { capabilities: ["input.text.replace"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "click", x: 10, y: 20 }),
+    { capabilities: ["input.shared-os"], backgroundSafe: false, requiresPhysicalInput: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "focus" }),
+    { capabilities: ["window.foreground"], backgroundSafe: false, requiresForegroundTurn: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "system_control", control: "media", action: "play_pause" }),
+    { capabilities: ["input.shared-os", "system.media"], backgroundSafe: false, requiresPhysicalInput: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "system_control", control: "output_audio", action: "get" }),
+    { capabilities: ["system.background-api"], backgroundSafe: true });
+  assert.deepEqual(taskStageActionDeliveryProfile({ kind: "window_frame", x: 0, y: 0, width: 400, height: 300 }),
+    { capabilities: ["window.frame.no-activate"], backgroundSafe: true });
+});
+
+test("append value composition preserves existing content and newline style", () => {
+  assert.equal(composeAppendedValue("first", "second", "newline"), "first\nsecond");
+  assert.equal(composeAppendedValue("first\r\nsecond", "third", "newline"), "first\r\nsecond\r\nthird");
+  assert.equal(composeAppendedValue("first\rsecond", "third", "newline"), "first\rsecond\rthird");
+  assert.equal(composeAppendedValue("first\n", "second", "newline"), "first\nsecond");
+  assert.equal(composeAppendedValue("first", "second", "none"), "firstsecond");
+  assert.equal(composeAppendedValue("", "first", "newline"), "first");
+  assert.throws(() => composeAppendedValue("existing", "too long", "newline", 10), /verification limit/);
+});
+
+test("type-then-Enter is one exact app-stage batch and reports a typed pre-dispatch refusal on step two as partial", async () => {
+  const identity = { handle: "codex", sessionId: "session" };
+  const calls: string[] = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const } };
+  const driver = {
+    typeText: async (_name: string, text: string, _identity: unknown, options?: unknown) => {
+      calls.push(`type:${text}:${JSON.stringify(options)}`); return proof;
+    },
+    pressKey: async (_name: string, key: string, _identity: unknown, options?: unknown) => {
+      calls.push(`key:${key}:${JSON.stringify(options)}`); return proof;
+    },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const complete = await runTaskStageAction(driver, "preview", { kind: "type_then_enter", view: "app", text: "query" }, identity);
+  assert.deepEqual(calls, ["type:query:{\"deliveryMode\":\"owner-preview\",\"allowForegroundEscalation\":true}",
+    "key:Enter:{\"deliveryMode\":\"owner-preview\",\"allowForegroundEscalation\":true}"]);
+  assert.deepEqual((complete as { batchOutcome: unknown }).batchOutcome, { status: "complete", completedSteps: 2, totalSteps: 2 });
+
+  calls.length = 0;
+  const refusesEnter = { ...driver, pressKey: async () => {
+    calls.push("key:Enter"); throw new DesktopInputNotDispatchedError("Owner interaction paused before Enter; no key was sent.", "foreground-lease");
+  } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const partial = await runTaskStageAction(refusesEnter, "preview", { kind: "type_then_enter", view: "app", text: "query" }, identity);
+  assert.equal(calls.length, 2, "the key adapter is consulted, but its typed refusal guarantees that Enter was not dispatched");
+  assert.match(calls[0]!, /^type:query:/);
+  assert.equal(calls[1], "key:Enter");
+  assert.deepEqual((partial as { batchOutcome: unknown }).batchOutcome, { status: "partial", completedSteps: 1, totalSteps: 2,
+    stoppedAt: "enter", message: "Owner interaction paused before Enter; no key was sent." });
+
+  const refusesText = { ...driver, typeText: async () => {
+    throw new DesktopInputNotDispatchedError("The exact input target changed; no text was sent.", "target-identity");
+  }, pressKey: async () => { calls.push("unexpected key"); return proof; } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  await assert.rejects(runTaskStageAction(refusesText, "preview", { kind: "type_then_enter", view: "app", text: "query" }, identity),
+    (error: unknown) => error instanceof DesktopInputNotDispatchedError && error.dispatchState === "not-dispatched");
+  assert.equal(calls.includes("unexpected key"), false, "the key step never runs after a typed text refusal");
+});
+
+test("semantic append uses the dedicated background-safe append adapter", async () => {
+  const identity = { handle: "codex", sessionId: "session" };
+  const calls: unknown[][] = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const } };
+  const driver = { appendElement: async (...args: unknown[]) => { calls.push(args); return proof; } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const action = { kind: "append_element", view: "app", ref: "field-1", text: "new line", expectedRole: "Edit" } as const;
+  await runTaskStageAction(driver, "agent", action, identity, "background");
+  await runTaskStageAction(driver, "agent", { ...action, separator: "none" }, identity, "background");
+  assert.deepEqual(calls, [
+    ["agent", "field-1", "new line", "newline", identity, { expectedRole: "Edit", deliveryMode: "background" }],
+    ["agent", "field-1", "new line", "none", identity, { expectedRole: "Edit", deliveryMode: "background" }],
+  ]);
 });
 
 test("owner-preview actions route through desktop-wide driver methods", async () => {
@@ -37,12 +150,14 @@ test("owner-preview actions route through desktop-wide driver methods", async ()
   await runTaskStageAction(driver, "preview", { kind: "hotkey", keys: ["Control", "L"] }, identity, "owner-preview");
   await runTaskStageAction(driver, "preview", { kind: "cursor", x: 30, y: 45 }, identity);
   assert.deepEqual(calls.map((call) => call.method), ["clickDesktop", "typeTextDesktop", "hotkeyDesktop", "moveDesktopCursor"]);
-  assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity, { count: 2, deliveryMode: "owner-preview" }]);
-  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity, { deliveryMode: "owner-preview" }]);
+  assert.deepEqual(calls[0]?.args, ["preview", 12, 18, identity,
+    { count: 2, deliveryMode: "owner-preview", allowForegroundEscalation: true }]);
+  assert.deepEqual(calls[1]?.args, ["preview", "echo M9R_TERM_OK", identity,
+    { deliveryMode: "owner-preview", allowForegroundEscalation: true }]);
   assert.deepEqual(calls[3]?.args, ["preview", 30, 45, identity]);
 });
 
-test("broker client sends owner-preview when stage mode is omitted", async () => {
+test("broker client leaves omitted action mode to the broker", async () => {
   const root = mkdtempSync(join(tmpdir(), "m9r-stage-broker-client-"));
   const keyPath = join(root, "broker.key");
   writeFileSync(keyPath, "test-key\n");
@@ -58,7 +173,27 @@ test("broker client sends owner-preview when stage mode is omitted", async () =>
     await client.prepareTaskStage!("test-token", "T2");
     await client.taskStageAction!("test-token", "T2", { kind: "capture" });
     await client.taskStageApp!("test-token", "T2", "chrome");
-    assert.deepEqual(requests.map((request) => request.body.mode), ["owner-preview", "owner-preview", "owner-preview"]);
+    assert.deepEqual(requests.map((request) => request.body.mode), [undefined, undefined, "owner-preview"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("task guidance verifies visual artifacts before save and after reopening the exact file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "m9r-visual-artifact-guidance-"));
+  writeFileSync(join(root, TASK_STAGE_POLICY_FILE), JSON.stringify({ version: 1, handles: ["codex"], controlHandles: ["codex"] }));
+  const web = { prepareTaskStage: async () => ({ ok: true }) } as unknown as WebBrokerClient;
+  try {
+    const notice = await prepareTaskStageNotice(root, web, "test-token", "codex", "T-visual");
+    assert.match(notice, /visual artifact/);
+    assert.match(notice, /fresh capture before saving/);
+    assert.match(notice, /reopen the exact path and inspect the rendered file again/);
+    assert.match(notice, /Report completion only when the requested visual elements are visible/);
+    assert.match(notice, /each requested datum in its own labeled field/);
+    assert.match(notice, /Not shown in inspected source/);
+    assert.match(notice, /verify each written field against the source evidence/);
+    assert.match(notice, /Keep the selected title and displayed date tied to the same source entry/);
+    assert.match(notice, /verify that the player title matches that selection/);
+    assert.match(notice, /If an ad is playing, skip it when the user requested ad skipping/);
+    assert.match(notice, /preserve its observed identity and restore that tab/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -78,14 +213,102 @@ test("explicit app view targets the selected window while remaining in owner-pre
   assert.throws(() => parseTaskStageAction({ kind: "capture", view: "other-user-window" }), /Invalid stage action view/);
 });
 
-test("owner-preview app actions preserve semantic delivery until foreground is explicit", async () => {
-  const options: Array<{ confirmFocusForeground?: boolean }> = [];
-  const driver = { clickElement: async (_name: string, _ref: string, _identity: unknown, value: { confirmFocusForeground?: boolean }) => { options.push(value); } } as unknown as ReturnType<typeof createCuaStageDriver>;
+test("scroll_element routes to the exact app tree ref and carries the bounded granularity", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const, summary: "one small scroll increment" } };
+  const driver = { scrollElement: async (...args: unknown[]) => { calls.push({ method: "scrollElement", args }); return proof; } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "scroll-session" };
+  const result = await runTaskStageAction(driver, "settings", parseTaskStageAction({ kind: "scroll_element", view: "app",
+    ref: "window-ui-element-a-1", direction: "down", expectedRole: "List", expectedLabel: "Installed apps" }), identity, "owner-preview");
+  assert.equal(result, proof);
+  assert.deepEqual(calls, [{ method: "scrollElement", args: ["settings", "window-ui-element-a-1", "down", identity,
+    { expectedRole: "List", expectedLabel: "Installed apps", deliveryMode: "owner-preview", allowForegroundEscalation: true }] }]);
+});
+
+test("read_value is a bounded, non-focus, exact app control observation", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const driver = { readElementValue: async (...args: unknown[]) => {
+    calls.push({ method: "readElementValue", args });
+    return { status: "read", value: "432", truncated: false };
+  } } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "value-session" };
+  const action = parseTaskStageAction({ kind: "read_value", view: "app", ref: "window-ui-element-a-1", maxChars: 32,
+    expectedRole: "Text", expectedLabel: "Calculator result" });
+  assert.deepEqual(await runTaskStageAction(driver, "calculator", action, identity),
+    { readValue: { status: "read", value: "432", truncated: false } });
+  assert.deepEqual(calls, [{ method: "readElementValue", args: ["calculator", "window-ui-element-a-1", identity,
+    { expectedRole: "Text", expectedLabel: "Calculator result", maxChars: 32 }] }]);
+  assert.throws(() => parseTaskStageAction({ kind: "read_value", view: "desktop", ref: "window-ui-element-a-1" }), /exact app view/);
+  assert.throws(() => parseTaskStageAction({ kind: "read_value", view: "app", ref: "window-ui-element-a-1", maxChars: 4097 }), /1–4096/);
+  assert.throws(() => parseTaskStageAction({ kind: "read_value", view: "app", ref: "window-ui-element-a-1", confirmFocusForeground: true }), /do not accept foreground input/);
+});
+
+test("text and save shortcuts stay on the selected app while modal controls stay on its popup", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const } };
+  const driver = {
+    typeText: async (...args: unknown[]) => { calls.push({ method: "typeText", args }); return proof; },
+    hotkey: async (...args: unknown[]) => { calls.push({ method: "hotkey", args }); return proof; },
+    capturePopup: async (...args: unknown[]) => { calls.push({ method: "capturePopup", args }); return proof.capture; },
+    clickPopup: async (...args: unknown[]) => { calls.push({ method: "clickPopup", args }); return proof; },
+    typeTextPopup: async (...args: unknown[]) => { calls.push({ method: "typeTextPopup", args }); return proof; },
+    pressKeyPopup: async (...args: unknown[]) => { calls.push({ method: "pressKeyPopup", args }); return proof; },
+  } as unknown as ReturnType<typeof createCuaStageDriver>;
+  const identity = { handle: "codex", sessionId: "session" };
+
+  await runTaskStageAction(driver, "selected-app", { kind: "type", view: "app", text: "M9R demo preparation" }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "hotkey", view: "app", keys: ["Control", "S"] }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "capture", view: "popup" }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "click", view: "popup", x: 20, y: 12 }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "type", view: "popup", mode: "replace", x: 40, y: 20, text: "M9R-demo-smoke.txt" }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "type", view: "popup", mode: "insert", text: "M9R-demo-smoke.txt" }, identity);
+  await runTaskStageAction(driver, "selected-app", { kind: "press_key", view: "popup", key: "Enter" }, identity);
+
+  assert.deepEqual(calls.map(({ method }) => method), ["typeText", "hotkey", "capturePopup", "clickPopup", "typeTextPopup", "typeTextPopup", "pressKeyPopup"]);
+  assert.equal(calls[0]?.args[0], "selected-app", "text is sent through the specifically selected app window");
+  assert.equal(calls[1]?.args[0], "selected-app", "the save shortcut is sent through that same app window");
+  assert.deepEqual(calls[2]?.args, ["selected-app"], "the modal is captured from the selected app's owned popup");
+  assert.equal(calls[3]?.args[0], "selected-app", "popup coordinates are dispatched to the owned popup route");
+  assert.equal(calls[4]?.args[0], "selected-app", "whole-field replacement is dispatched to the popup itself");
+  assert.deepEqual(calls[4]?.args[2], { deliveryMode: "owner-preview", allowForegroundEscalation: true, mode: "replace", x: 40, y: 20 });
+  assert.equal(calls[5]?.args[0], "selected-app", "caret insertion after selecting a popup field stays on the popup route");
+  assert.equal(calls[6]?.args[0], "selected-app", "popup confirmation keys are dispatched to the owned popup route");
+});
+
+test("owner-preview actions use the visible route while explicit background mode remains available", async () => {
+  const options: Array<{ confirmFocusForeground?: boolean; deliveryMode?: string; allowForegroundEscalation?: boolean }> = [];
+  const driver = { clickElement: async (_name: string, _ref: string, _identity: unknown, value: typeof options[number]) => { options.push(value); } } as unknown as ReturnType<typeof createCuaStageDriver>;
   const identity = { handle: "codex", sessionId: "session" };
   await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app" }, identity);
   await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity);
   assert.equal(options[0].confirmFocusForeground, undefined);
   assert.equal(options[1].confirmFocusForeground, true);
-  await assert.rejects(runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity, "background"), /safe background delivery/);
-  assert.equal(options.length, 2, "background refusal must happen before dispatch");
+  assert.equal(options[0].allowForegroundEscalation, true, "owner-preview uses the native owner authorization boundary");
+  assert.equal(options[0].deliveryMode, "owner-preview", "default owner-preview actions stay on the visible route");
+  assert.equal(options[1].allowForegroundEscalation, true);
+  assert.equal(options[1].deliveryMode, "owner-preview", "an explicit action foreground request is kept on the native authorization route");
+  await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app" }, identity, "background");
+  assert.equal(options[2].deliveryMode, "background");
+  assert.equal(options[2].allowForegroundEscalation, undefined, "background actions never enter foreground fallback without an explicit foreground request");
+  await runTaskStageAction(driver, "preview", { kind: "click_element", ref: "e1", view: "app", confirmFocusForeground: true }, identity, "background");
+  assert.equal(options[3].deliveryMode, "owner-preview", "only this action receives the exclusive route");
+  assert.equal(options[3].confirmFocusForeground, true);
+  assert.equal(options[3].allowForegroundEscalation, true);
+  assert.equal(options.length, 4, "the native owner-work policy, not this planner, decides whether the foreground turn proceeds");
+  await assert.rejects(runTaskStageAction(driver, "preview", { kind: "hotkey", keys: ["Ctrl", "V"] }, identity, "background"),
+    /background-only delivery/, "a physical-only shortcut cannot implicitly acquire foreground in background mode");
+});
+
+test("Save As targets one exact app-owned dialog and keeps destination policy explicit", async () => {
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const proof = { capture: { dataUrl: "data:image/png;base64,eA==", width: 1, height: 1, capturedAt: new Date(0).toISOString() },
+    outcome: { status: "confirmed" as const }, saveAs: { path: "C:\\Users\\owner\\Desktop\\report.txt", directory: "C:\\Users\\owner\\Desktop", fileName: "report.txt", persisted: true } };
+  const driver = ({ saveAs: async (...args: unknown[]) => { calls.push({ method: "saveAs", args }); return proof; } }) as unknown as ReturnType<typeof createCuaStageDriver>;
+  const result = await runTaskStageAction(driver, "editor", parseTaskStageAction({ kind: "save_as", view: "app",
+    path: proof.saveAs.path, createParentDirectories: true, replaceExisting: false }), { handle: "codex", sessionId: "session" }, "background");
+  assert.deepEqual(calls, [{ method: "saveAs", args: ["editor", proof.saveAs.path,
+    { createParentDirectories: true, replaceExisting: false, signal: undefined }] }]);
+  assert.equal((result as typeof proof).saveAs.persisted, true);
 });

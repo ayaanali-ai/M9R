@@ -13,9 +13,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
 import { dirname, resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -32,6 +33,22 @@ const pkg = JSON.parse(readFileSync(resolve(repoRoot, "cli", "package.json"), "u
 const core = await import(pathToFileURL(resolve(distDir, "oathlock-cli-core.js")).href);
 
 const EXTERNAL_CWD = "/external/workspace";
+
+async function findFreePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolveListen());
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    throw new Error("Could not reserve an ephemeral loopback port for the packaged CLI test.");
+  }
+  const port = address.port;
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  return port;
+}
 
 async function removeTempWorkspace(workspace: string): Promise<void> {
   // The runtime deliberately detaches its watchdog so it can survive a
@@ -138,7 +155,10 @@ test("built entry has the correct shebang and a relative core import", () => {
   assert.equal(compatibilityEntry, entry, "legacy oathlock entry must remain the same compiled CLI");
   assert.ok(existsSync(resolve(distDir, "adapter-contract.js")));
   assert.ok(existsSync(resolve(distDir, "broker-update-record.js")), "the CLI broker updater must ship its BOM-compatible ownership-record parser");
+  assert.ok(existsSync(resolve(distDir, "broker-startup-core.js")), "the packaged CLI must include its bounded broker startup-health wait");
+  assert.match(entry, /from "\.\/broker-startup-core\.js"/, "the broker updater must use the packaged startup-health wait");
   assert.ok(existsSync(resolve(distDir, "agent-task-routing.js")));
+  assert.ok(existsSync(resolve(distDir, "stage-save-as.js")), "the compiled desktop stage must ship its shared Save As path resolver");
   assert.ok(existsSync(resolve(distDir, "opencode-capture-backfill-core.js")));
   assert.ok(!readFileSync(resolve(distDir, "resident-provider-adapters.js"), "utf8").includes("@/lib/"));
   assert.ok(!readFileSync(resolve(distDir, "oathlock-resident-core.js"), "utf8").includes("@/lib/"));
@@ -151,14 +171,15 @@ test("packaged broker updater parses both legacy BOM and BOM-free ownership reco
   assert.deepEqual(parseBrokerUpdateRecord(Buffer.from(`\uFEFF${JSON.stringify(expected)}`, "utf8"), "web broker install"), expected);
 });
 
-test("built MCP package includes the web broker, turn scheduler, powers, and page-notes runtime dependencies", () => {
+test("built MCP package includes native desktop broker and page-notes runtime dependencies", () => {
   for (const name of ["web-broker-client.js", "web-broker-core.js", "turn-scheduler-core.js", "web-broker-server.js", "web-ui-bridge.js", "web-powers-core.js", "page-notes-core.js", "page-notes-store.js"]) {
     assert.ok(existsSync(resolve(distDir, name)), `missing packaged MCP dependency ${name}`);
   }
   const mcpEntry = readFileSync(resolve(distDir, "m9r-mcp.js"), "utf8");
   const mcpServer = readFileSync(resolve(distDir, "mcp-server.js"), "utf8");
   assert.match(mcpEntry, /\.\/web-broker-client\.js/);
-  assert.match(mcpServer, /m9r_web_scroll/);
+  assert.match(mcpServer, /registerComputerUseTools/);
+  assert.doesNotMatch(mcpServer, /m9r_web_scroll/, "retired extension-backed web tools must not return to the packaged MCP server");
   assert.match(mcpServer, /\.\/page-notes-store\.js/);
 });
 
@@ -195,16 +216,12 @@ test("built standalone web setup includes its broker runtime resolver", () => {
   assert.match(entry, /\.\/web-broker-runtime\.js/);
 });
 
-test("managed extension refresh changes only owned extension files and preserves user files", () => {
-  // Keep the simulated LOCALAPPDATA on the same writable volume as this
-  // checkout. Some Windows sandboxes redirect the system temp directory into
-  // an AppContainer that allows writes but denies atomic replacement renames.
-  const fixtureRoot = resolve(repoRoot, ".workcache", "cli-package-fixtures");
-  mkdirSync(fixtureRoot, { recursive: true });
-  const temporaryRoot = mkdtempSync(join(fixtureRoot, "m9r-extension-refresh-"));
+test("retired extension updater refuses without changing the existing installation", () => {
+  // Keep the synthetic credential root outside the Git workspace and never
+  // inspect or modify the owner's actual extension or broker state.
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-extension-retired-"));
   const home = join(temporaryRoot, "home");
   const localAppData = join(temporaryRoot, "local-app-data");
-  const source = join(temporaryRoot, "source-extension");
   const extensionPath = join(localAppData, "M9R", "extension");
   const m9rHome = join(home, ".m9r");
   const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -214,20 +231,13 @@ test("managed extension refresh changes only owned extension files and preserves
   };
 
   try {
-    const sourceManifest = readFileSync(resolve(repoRoot, "extensions", "browser", "manifest.json"), "utf8");
-    const desiredContent = "current managed content";
-    const desiredEdit = "new packaged file that collides with an untracked user file";
-    const desiredNew = "new managed file";
-    put(join(source, "manifest.json"), sourceManifest);
-    put(join(source, "src", "content.js"), desiredContent);
-    put(join(source, "src", "edited.js"), desiredEdit);
-    put(join(source, "src", "untracked.js"), "new source at untracked destination");
-    put(join(source, "src", "new.js"), desiredNew);
-
+    const sourceManifest = JSON.stringify({ manifest_version: 3, name: "retired M9R extension fixture" });
     put(join(extensionPath, "manifest.json"), sourceManifest);
     put(join(extensionPath, "src", "content.js"), "old managed content");
     put(join(extensionPath, "src", "edited.js"), "user edited after install");
     put(join(extensionPath, "src", "untracked.js"), "untracked user file");
+    const brokerConfigPath = join(m9rHome, "web-broker.json");
+    put(brokerConfigPath, "broker-config-must-remain-unchanged");
 
     const setupManifest = {
       version: 1,
@@ -252,26 +262,141 @@ test("managed extension refresh changes only owned extension files and preserves
       USERPROFILE: home,
       LOCALAPPDATA: localAppData,
       M9R_HOME: m9rHome,
-      M9R_EXTENSION_SOURCE: source,
     };
     const cli = resolve(distDir, "m9r.js");
-    const dryRun = execFileSync(process.execPath, [cli, "web", "update-extension", "--dry-run"], { cwd: repoRoot, env, encoding: "utf8" });
-    assert.match(dryRun, /2 update, 1 unchanged, 2 preserved/);
-    assert.equal(readFileSync(join(extensionPath, "src", "content.js"), "utf8"), "old managed content", "dry-run must not write");
+    const setupManifestPath = join(m9rHome, "web-setup-manifest.json");
+    const snapshotExtension = () => {
+      const files: Array<[string, string]> = [];
+      const visit = (directory: string, prefix = "") => {
+        for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+          const path = join(directory, entry.name);
+          const relative = [prefix, entry.name].filter(Boolean).join("/");
+          if (entry.isDirectory()) visit(path, relative);
+          else files.push([relative, readFileSync(path, "utf8")]);
+        }
+      };
+      visit(extensionPath);
+      return files;
+    };
+    const extensionBefore = snapshotExtension();
+    const setupManifestBefore = readFileSync(setupManifestPath, "utf8");
+    const brokerConfigBefore = readFileSync(brokerConfigPath, "utf8");
 
-    const applied = execFileSync(process.execPath, [cli, "web", "update-extension", "--yes"], { cwd: repoRoot, env, encoding: "utf8" });
-    assert.match(applied, /\[UPDATED\] src\/content\.js/);
-    assert.match(applied, /\[KEEP\] Preserved changed or untracked extension file: src\/edited\.js/);
-    assert.match(applied, /\[KEEP\] Preserved changed or untracked extension file: src\/untracked\.js/);
-    assert.equal(readFileSync(join(extensionPath, "src", "content.js"), "utf8"), desiredContent);
-    assert.equal(readFileSync(join(extensionPath, "src", "edited.js"), "utf8"), "user edited after install");
-    assert.equal(readFileSync(join(extensionPath, "src", "untracked.js"), "utf8"), "untracked user file");
-    assert.equal(readFileSync(join(extensionPath, "src", "new.js"), "utf8"), desiredNew);
-    const updatedManifest = JSON.parse(readFileSync(join(m9rHome, "web-setup-manifest.json"), "utf8")) as typeof setupManifest;
-    assert.equal(updatedManifest.brokerConfigHash, setupManifest.brokerConfigHash);
-    assert.equal(updatedManifest.brokerTaskActionHash, setupManifest.brokerTaskActionHash);
-    assert.equal(updatedManifest.extensionFiles.find((file) => file.path === join(extensionPath, "src", "content.js"))?.hash, hash(desiredContent));
-    assert.equal(updatedManifest.extensionFiles.find((file) => file.path === join(extensionPath, "src", "new.js"))?.hash, hash(desiredNew));
+    for (const flag of ["--dry-run", "--yes"]) {
+      const result = spawnSync(process.execPath, [cli, "web", "update-extension", flag], {
+        cwd: repoRoot,
+        env,
+        encoding: "utf8",
+      });
+      if (result.error) throw result.error;
+      const stdout = result.stdout ?? "";
+      const stderr = result.stderr ?? "";
+      assert.equal(result.status, 2, stderr || stdout);
+      assert.equal(stdout, "");
+      assert.match(stderr, /legacy M9R browser-extension transport is retired/i);
+      assert.deepEqual(snapshotExtension(), extensionBefore, flag + " must not change installed extension files");
+      assert.equal(readFileSync(setupManifestPath, "utf8"), setupManifestBefore, flag + " must not change the setup ownership manifest");
+      assert.equal(readFileSync(brokerConfigPath, "utf8"), brokerConfigBefore, flag + " must not change broker configuration");
+    }
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("retired extension setup and compatibility alias refuse without creating M9R state", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-extension-setup-retired-"));
+  const home = join(temporaryRoot, "home");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  try {
+    const cli = resolve(distDir, "m9r.js");
+    for (const args of [["web", "setup", "--dry-run"], ["setup", "--web", "--dry-run"]]) {
+      const result = spawnSync(process.execPath, [cli, ...args], {
+        cwd: repoRoot,
+        env: { ...process.env, HOME: home, USERPROFILE: home, M9R_HOME: m9rHome },
+        encoding: "utf8",
+      });
+      if (result.error) throw result.error;
+      assert.equal(result.status, 2, result.stderr || result.stdout);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr ?? "", /browser-extension and provider-hook setup is retired/i);
+      assert.equal(existsSync(m9rHome), false, "retired setup must not create broker, extension, or provider state");
+    }
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("legacy web uninstall removes only extension files matching their recorded hashes", { skip: process.platform !== "win32" }, () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-legacy-web-uninstall-"));
+  const home = join(temporaryRoot, "home");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  const extensionPath = join(temporaryRoot, "legacy-extension");
+  const ownedFile = join(extensionPath, "owned.js");
+  const editedFile = join(extensionPath, "edited.js");
+  const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+  const put = (path: string, value: string) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, value);
+  };
+  try {
+    put(ownedFile, "M9R-installed-content");
+    put(editedFile, "owner-edited-content");
+    put(join(m9rHome, "web-setup-manifest.json"), JSON.stringify({
+      version: 1,
+      configs: [],
+      extensionPath,
+      extensionFiles: [
+        { path: ownedFile, hash: sha256("M9R-installed-content") },
+        { path: editedFile, hash: sha256("pre-edit-content") },
+      ],
+      extensionDirectories: [extensionPath],
+      brokerConfigPath: join(m9rHome, "web-broker.json"),
+      brokerConfigHash: "no-owned-broker-config",
+      identityBootstrap: "not-installed",
+      browsers: ["chrome"],
+    }, null, 2));
+
+    const result = spawnSync(process.execPath, [resolve(distDir, "m9r.js"), "web", "uninstall", "--yes"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        APPDATA: join(home, "AppData", "Roaming"),
+        LOCALAPPDATA: join(home, "AppData", "Local"),
+        CODEX_HOME: join(home, ".codex"),
+        M9R_HOME: m9rHome,
+      },
+      encoding: "utf8",
+    });
+    if (result.error) throw result.error;
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(existsSync(ownedFile), false, "an unchanged M9R-owned extension file should be removed");
+    assert.equal(readFileSync(editedFile, "utf8"), "owner-edited-content", "a user-edited file must be preserved");
+    assert.equal(existsSync(join(m9rHome, "web-setup-manifest.json")), false, "the completed legacy ownership record should be removed");
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("retired isolated-browser CLI refuses without opening a profile", () => {
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "m9r-isolated-browser-retired-"));
+  const home = join(temporaryRoot, "home");
+  const m9rHome = join(home, ".m9r");
+  try {
+    const cli = resolve(distDir, "m9r.js");
+    for (const action of ["setup", "start"]) {
+      const result = spawnSync(process.execPath, [cli, "web", "chrome", action], {
+        cwd: repoRoot,
+        env: { ...process.env, HOME: home, USERPROFILE: home, M9R_HOME: m9rHome },
+        encoding: "utf8",
+      });
+      if (result.error) throw result.error;
+      assert.equal(result.status, 2, result.stderr || result.stdout);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr ?? "", /dedicated isolated M9R Chrome profile is retired/i);
+      assert.equal(existsSync(m9rHome), false, `${action} must not create an isolated profile or M9R state`);
+    }
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -285,10 +410,15 @@ test("built mission bridge runtime has no unresolved monorepo source imports", (
 });
 
 test("packed CLI entry boots the terminal runtime without printing a pairing secret", { timeout: 20_000 }, async () => {
-  const port = 43_120;
+  const port = await findFreePort();
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "oathlock-cli-terminal-bridge-"));
+  const workspace = join(temporaryRoot, "workspace");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(m9rHome, { recursive: true });
   const child = spawn(process.execPath, [resolve(distDir, "m9r.js"), "terminal", "bridge"], {
-    cwd: repoRoot,
-    env: { ...process.env, OATHLOCK_BRIDGE_PORT: String(port) },
+    cwd: workspace,
+    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, M9R_HOME: m9rHome, M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -315,12 +445,22 @@ test("packed CLI entry boots the terminal runtime without printing a pairing sec
     assert.doesNotMatch(output, /Pairing token:/);
   } finally {
     child.kill();
+    await new Promise<void>((resolveExit) => {
+      if (child.exitCode !== null) resolveExit();
+      else child.once("exit", () => resolveExit());
+    });
+    await removeTempWorkspace(workspace);
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 
 test("packed CLI runtime uses the compiled mission runner for connected providers", { timeout: 20_000 }, async () => {
   const port = 43_121;
-  const workspace = mkdtempSync(resolve(tmpdir(), "oathlock-cli-runtime-"));
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "oathlock-cli-runtime-"));
+  const workspace = join(temporaryRoot, "workspace");
+  const m9rHome = join(temporaryRoot, "m9r-home");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(m9rHome, { recursive: true });
   const localTokenPath = resolve(workspace, ".m9r", "agents", "codex", "local.json");
   mkdirSync(dirname(localTokenPath), { recursive: true });
   // The token only exercises provider discovery. ACP is disabled for this
@@ -334,7 +474,7 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
     // metadata sync from the OS home directory, independently of cwd.
     // Do not let startup recovery discover or launch the developer's globally
     // installed provider CLIs while this packaging test is running.
-    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
+    env: { ...process.env, HOME: workspace, USERPROFILE: workspace, M9R_HOME: m9rHome, PATH: workspace, ACP_BRIDGE_ENABLED: "false", M9R_TEST_DISABLE_WATCHDOG: "1", OATHLOCK_BRIDGE_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -379,6 +519,7 @@ test("packed CLI runtime uses the compiled mission runner for connected provider
       await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
     }
     await removeTempWorkspace(workspace);
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 

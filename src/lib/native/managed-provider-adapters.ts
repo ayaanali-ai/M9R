@@ -32,6 +32,7 @@ import {
   type ProviderModelSelection,
 } from "./provider-model-core";
 import { redactSecrets } from "./inbox-core";
+import { classifyProviderFailure } from "./provider-health";
 
 interface AsyncEventQueue<T> extends AsyncIterable<T> {
   push(value: T): void;
@@ -226,7 +227,12 @@ abstract class ManagedProviderConnectionBase implements ManagedProviderConnectio
   }
 
   async pause(): Promise<void> {
-    if (this.activeTaskId) throw new Error(`@${this.profile.handle} cannot pause while task ${this.activeTaskId} is active`);
+    // pause() used to require the caller to interrupt() an active turn first
+    // and only then call pause(), an implicit two-step protocol every caller
+    // had to know; a caller that just called pause() to suspend work got
+    // rejected instead. interrupt() is the same operation every subclass
+    // already implements for exactly this purpose, so do it here.
+    if (this.activeTaskId) await this.interrupt(this.activeTaskId);
     if (this.statusValue === "stopped") throw new Error(`@${this.profile.handle} is stopped`);
     this.paused = true;
     this.statusValue = "paused";
@@ -450,7 +456,8 @@ class ClaudeManagedProviderConnection extends ManagedProviderConnectionBase {
               return;
             }
             if (event.sessionId) this.providerSessionRef = event.sessionId;
-            this.queue?.push({ kind: "result", text: event.text, isError: event.isError });
+            this.queue?.push({ kind: "result", text: event.text, isError: event.isError,
+              usage: event.usage ?? null, providerReportedCostUsd: event.reportedCostUsd ?? null });
             const interrupted = this.interruptedTask === this.activeTaskId;
             if (interrupted) this.interruptedTask = undefined;
             this.finishTask();
@@ -756,8 +763,8 @@ function managedCodexAssignment(options: CodexAppServerManagedProviderConnection
   };
 }
 
-function managedCodexPrompt(options: CodexAppServerManagedProviderConnectionOptions, task: ManagedProviderTask): string {
-  return `${options.promptPrefix}\n\nThe owner says:\n${task.prompt}`;
+function managedCodexPrompt(options: CodexAppServerManagedProviderConnectionOptions, task: ManagedProviderTask, includePrefix: boolean): string {
+  return `${includePrefix ? `${options.promptPrefix}\n\n` : ""}The owner says:\n${task.prompt}`;
 }
 
 class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionBase {
@@ -768,6 +775,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
   private startup?: Promise<ManagedProviderReady>;
   private cancelledTask?: string;
   private interruptedTask?: string;
+  private promptPrefixGeneration?: number;
 
   constructor(options: CodexAppServerManagedProviderConnectionOptions) {
     super(options.profile);
@@ -854,6 +862,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     if (this.startup) return this.startup;
     await this.closeRuntime();
     const generation = this.beginStart();
+    this.promptPrefixGeneration = undefined;
     const adapter = this.createAdapter();
     const assignment = this.assignment();
     const promise = (async () => {
@@ -902,6 +911,7 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
       throw new Error(reason);
     }
     const generation = this.generationValue;
+    const includePromptPrefix = this.promptPrefixGeneration !== generation;
     this.beginTask(task.taskId);
     this.cancelledTask = undefined;
     yield { kind: "status", status: "working", doing: "Working" };
@@ -909,9 +919,10 @@ class CodexAppServerManagedProviderConnection extends ManagedProviderConnectionB
     let completed = false;
     let failure: string | undefined;
     try {
-      const iterator = adapter.prompt({ session, text: managedCodexPrompt(this.options, task) })[Symbol.asyncIterator]();
+      const iterator = adapter.prompt({ session, text: managedCodexPrompt(this.options, task, includePromptPrefix) })[Symbol.asyncIterator]();
       const first = iterator.next();
       yield { kind: "accepted" };
+      if (includePromptPrefix) this.promptPrefixGeneration = generation;
       let next = await first;
       while (!next.done) {
         if (generation !== this.generationValue || this.stopping) return;
@@ -993,6 +1004,7 @@ export interface OpenCodeManagedProviderConnectionOptions {
   exe: string;
   environment: Record<string, string | undefined>;
   missionId: string;
+  model?: string;
   runtimeFactory?: (options: OpenCodeLiveRuntimeOptions) => OpenCodeLiveRuntime;
 }
 
@@ -1064,7 +1076,7 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
         env: this.options.environment,
         handle: this.profile.handle,
         missionId: this.options.missionId,
-        model: this.profile.model,
+        model: this.options.model ?? this.profile.model,
         effort: this.profile.effort,
       });
       this.runtime = runtime;
@@ -1077,7 +1089,8 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
       this.availableModels = validateProviderModelCatalog(ready.availableModels ?? null);
       return this.ready("Ready (OpenCode ACP, cold process)");
     })().catch((error: unknown) => {
-      this.fail(error instanceof Error ? error.message : String(error));
+      const classified = classifyProviderFailure("OpenCode", error instanceof Error ? error.message : String(error));
+      this.fail(classified.message);
       throw error instanceof Error ? error : new Error(String(error));
     });
     this.startup = promise;
@@ -1138,9 +1151,10 @@ class OpenCodeManagedProviderConnection extends ManagedProviderConnectionBase {
     }
     if (this.cancelledTask === task.taskId) failure = "Task canceled";
     if (failure || !completed) {
+      const classified = classifyProviderFailure("OpenCode", failure ?? "ended the turn without a completion event");
       this.finishTask();
-      this.fail(failure ?? "OpenCode ended the turn without a completion event");
-      yield { kind: "error", error: failure ?? "OpenCode ended the turn without a completion event", retryable: true };
+      this.fail(classified.message);
+      yield { kind: "error", error: classified.message, retryable: classified.retryable };
       return;
     }
     this.finishTask();

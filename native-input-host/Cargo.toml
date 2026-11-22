@@ -3,13 +3,24 @@ name = "m9r-native-input-host"
 version = "0.1.0"
 edition = "2021"
 license = "BUSL-1.1"
-description = "M9R Chrome Native Messaging host for foreground, visible-tab pointer input"
+description = "M9R broker-owned native Windows desktop observation and input host"
+
+[features]
+test-fixtures = []
+
+[[bin]]
+name = "m9r-native-input-fixture-host"
+path = "test-fixtures/input_stream_host.rs"
+required-features = ["test-fixtures"]
 
 [dependencies]
 serde_json = "1"
+base64 = "0.22"
+png = "0.17"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Ole", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell_PropertiesSystem", "Win32_Storage_EnhancedStorage", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+windows-numerics = "0.3"
 
 [profile.release]
 opt-level = "z"
