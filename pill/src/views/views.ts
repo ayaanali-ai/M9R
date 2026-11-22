@@ -1,4 +1,5 @@
-// Island views: overview (agents sidebar plus the selected agent's activity), approval, error, finished, message composer, settings.
+// Island views: overview (agents sidebar plus the selected agent's activity), error, finished, message composer (approvals
+// render inline there, not as a separate screen), settings.
 
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
@@ -9,7 +10,7 @@ import { State, PROVIDER_COLORS, type AgentTask, type ChatMessage, type LinkOffe
 import type { SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
-import { plainStep, plainStatus, displayName } from "../core/humanize";
+import { plainStep, plainStatus, displayName, approvalSentence } from "../core/humanize";
 import { buildSettingsDrum } from "./settings-drum";
 import { dotSlider } from "./dot-slider";
 
@@ -19,7 +20,13 @@ export interface ViewActions {
   collapse(): void;
   focusWindow?(focused: boolean): void;
   setFocus(id: string): void;
-  decide(d: "allow" | "deny" | "allow_day"): void;
+  /** Open Muse's avatar panel (Activity / Approvals / Identity / Inbox) for this agent, or the
+   * focused one. Idempotent: it never toggles closed, so every avatar click reliably shows it. */
+  openIdentity(id?: string): void;
+  closeIdentity(): void;
+  /** approvalId defaults to the oldest pending approval; pass it explicitly when more than one
+   * card can be on screen at once (the chat log can show several at a time). */
+  decide(d: "allow" | "deny" | "allow_day", approvalId?: string): void;
   send(text: string): Promise<string | void>;
   /** Present only when the host can save to shared memory (the in-page pill). */
   saveMemory?(text: string): Promise<void>;
@@ -34,9 +41,13 @@ export interface ViewActions {
     link(offer: LinkOffer, toSession: string): Promise<void>;
   };
   toggleSound(): void;
+  toggleSettings(): void;
   updateSettings(patch: Partial<Settings>): void;
   setAutoClose(seconds: number): void;
   blip(): void;
+  /** Fill the pill window, or restore the size from before. */
+  toggleMaximize?(): void;
+  isMaximized?(): boolean;
 }
 
 export interface ViewHost {
@@ -107,7 +118,6 @@ export function buildHeader(actions: ViewActions): ViewHost {
   // or do anything else.
   const toggle = h("button", { class: "pill-toggle", type: "button", onclick: () => actions.collapse() });
   const brokerStatus = h("span", { class: "broker-status", role: "status", "aria-live": "polite" });
-  const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.sliders, 14, { stroke: 1.7 }));
   const soundBtn = h("button", { title: "Sound", onclick: () => actions.toggleSound() }, svg(ICONS.speakerOff, 14));
 
   function go(v: IslandViewName) {
@@ -118,10 +128,12 @@ export function buildHeader(actions: ViewActions): ViewHost {
   const el = h(
     "div",
     { id: "header" },
-    h("div", { class: "tabs" }, msgBtn, tabHome),
+    // One interface: every page (chats, agents, apps, settings) and the sound toggle live on the
+    // rail now. The header keeps only the minimize target and the broker's offline status.
     toggle,
-    h("div", { class: "header-actions" }, brokerStatus, workMode, gearBtn, soundBtn),
+    h("div", { class: "header-actions" }, brokerStatus, workMode),
   );
+  void msgBtn; void tabHome;
 
   return {
     el,
@@ -136,7 +148,6 @@ export function buildHeader(actions: ViewActions): ViewHost {
       const v = State.view;
       msgBtn.classList.toggle("on", v === "prompt");
       tabHome.classList.toggle("on", v === "overview" || v === "empty");
-      gearBtn.classList.toggle("on", v === "settings");
       toggle.title = "Minimize pill";
       toggle.setAttribute("aria-label", "Minimize pill");
       const connection = State.brokerConnection;
@@ -239,7 +250,7 @@ function buildOverview(actions: ViewActions): ViewHost {
   const account = h("div", { class: "home-acct" },
     acctAvatar,
     h("span", { class: "home-acct-text" }, h("span", { class: "home-acct-name", text: "M9R on this computer" }), acctStatus),
-    h("button", { class: "home-acct-gear", type: "button", title: "Settings", "aria-label": "Settings", onclick: () => { actions.blip(); actions.setView("settings"); } }, svg(ICONS.gearFill, 14)),
+    h("button", { class: "home-acct-gear", type: "button", title: "Settings", "aria-label": "Settings", onclick: () => { actions.blip(); actions.toggleSettings(); } }, svg(ICONS.gearFill, 14)),
   );
   const side = h("aside", { class: "home-side" },
     h("div", { class: "home-side-top" }, homeBtn),
@@ -270,8 +281,11 @@ function buildOverview(actions: ViewActions): ViewHost {
     dTask,
     dFeed,
   );
-  const main = h("section", { class: "home-main" }, idle, detail, closeBtn);
-  const el = h("div", { class: "view overview home" }, side, main);
+  // One interface: the rail + Chats panel is the only nav now, so the old second sidebar is not
+  // mounted. Its agent faces move into the main pane as a status strip; picking one shows its feed.
+  void side; void closeBtn;
+  const main = h("section", { class: "home-main" }, avatars, idle, detail);
+  const el = h("div", { class: "view overview home home-single" }, main);
 
   let selectedId: string | null = null;
   // When the pill last saw each agent's preview change: the thread carries no timestamps, so this is observation time.
@@ -316,7 +330,7 @@ function buildOverview(actions: ViewActions): ViewHost {
       const b = h("button", {
         class: "home-avatar" + (task.id === selectedId ? " on" : ""), type: "button",
         title: `${displayName(task)} · ${plainStatus(task).label}`, "aria-label": displayName(task),
-        onclick: () => select(task.id),
+        onclick: () => select(task.id === selectedId ? null : task.id),
       }, h("span", { class: "home-avatar-circle", style: `--tint:${task.color}` }, buddy(task.color, 40, { seed: task.id })),
         h("span", { class: "home-avatar-label", text: displayName(task) }));
       b.classList.toggle("live", plainStatus(task).live);
@@ -329,7 +343,8 @@ function buildOverview(actions: ViewActions): ViewHost {
     const requests = needle ? null : h("button", {
       class: "home-row home-row-requests", type: "button", role: "option", "aria-selected": "false",
       "aria-label": waiting ? `Requests: ${waiting} waiting on you` : "Requests: nothing waiting",
-      onclick: () => { if (!waiting) return; actions.blip(); actions.setView("approval"); },
+      // Approvals are folded into the one main chat as inline cards, not a separate screen.
+      onclick: () => { if (!waiting) return; actions.blip(); actions.setView("prompt"); },
     },
       h("span", { class: "home-row-thumb home-row-spark" }, svg(ICONS.star, 13)),
       h("span", { class: "home-row-body" },
@@ -409,7 +424,7 @@ function buildOverview(actions: ViewActions): ViewHost {
     dTask.hidden = !task.task;
 
     dActions.replaceChildren(...[
-      pending.length ? btn("Review", "primary", () => { actions.setFocus(task.id); actions.setView("approval"); }) : null,
+      pending.length ? btn("Review", "primary", () => { actions.setFocus(task.id); actions.setView("prompt"); }) : null,
       btn("Message", pending.length ? "secondary" : "primary", () => {
         actions.setFocus(task.id);
         State.composeTo = [task.id];
@@ -478,77 +493,6 @@ function buildEmpty(actions: ViewActions): ViewHost {
     btn("Send a message", "primary", () => actions.setView("prompt")),
   );
   return { el: h("div", { class: "view" }, card(null, body)), sync() {} };
-}
-
-// ── Approval ─────────────────────────────────────────────────────
-
-/** "Post to the page" → "Codex wants to post to the page." */
-function approvalSentence(name: string, title: string | undefined): string {
-  const t = (title ?? "").trim().replace(/[.!]+$/, "");
-  if (!t) return `${name} needs your OK.`;
-  return `${name} wants to ${t.charAt(0).toLowerCase()}${t.slice(1)}.`;
-}
-
-/** The drum's band, holding a decision: same mark, same place, so the wheel itself is what asks. */
-function buildApproval(actions: ViewActions): ViewHost {
-  const name = h("span", { class: "ask-name" });
-  const count = h("span", { class: "ask-count" });
-  const sentence = h("div", { class: "ask-sentence" });
-  // The line being authorised: the action, path or address, never just the name of the tool asking.
-  const exact = h("div", { class: "ask-exact" });
-  const status = h("div", { class: "ask-status", role: "status", "aria-live": "polite" });
-  const buttons = h("div", { class: "ask-buttons" });
-  const later = h("div", { class: "ask-later" });
-  const band = h("div", { class: "ask-band" },
-    h("div", { class: "ask-text" },
-      h("div", { class: "ask-head" }, name, h("span", { class: "drum-tag ask-tag", text: "Needs you" }), count),
-      sentence,
-      exact,
-    ),
-    h("div", { class: "ask-side" }, buttons, later, status),
-  );
-  const el = h("div", { class: "view approval-view" }, band);
-  let built = false;
-  let shownId = "";
-  return {
-    el,
-    sync() {
-      const req = State.pendingApproval;
-      const agent = State.tasks.find((t) => t.id === req?.agent) ?? State.focusTask;
-      const label = agent ? displayName(agent) : "An agent";
-      name.textContent = label;
-      count.textContent = State.approvals.length > 1 ? `1 of ${State.approvals.length}` : "";
-      sentence.textContent = approvalSentence(label, req?.title);
-      exact.textContent = req?.detail || "";
-      exact.hidden = !req?.detail;
-      const decisionError = req && State.decisionError?.approvalId === req.id ? State.decisionError.message : null;
-      status.textContent = decisionError
-        ? "That didn't go through. Try again."
-        : req?.unconfirmed
-          ? "M9R will double-check this before it runs."
-          : "";
-      status.title = decisionError ?? "";
-      status.dataset.state = decisionError ? "error" : req?.unconfirmed ? "unconfirmed" : "";
-      status.hidden = !decisionError && !req?.unconfirmed;
-      // A new request replays the arrival so a queued second approval doesn't slip in unnoticed.
-      if (req && req.id !== shownId) {
-        shownId = req.id;
-        band.classList.remove("arrive");
-        void band.offsetWidth;
-        band.classList.add("arrive");
-      }
-      // Built once: rebuilding buttons between a mouse-down and a mouse-up would swallow the click.
-      if (built) return;
-      built = true;
-      buttons.append(
-        btn("Deny", "secondary", () => actions.decide("deny"), "N"),
-        btn("Allow", "primary", () => actions.decide("allow"), "Y"),
-      );
-      if (actions.canAllowForADay()) {
-        later.append(h("button", { class: "link-btn ask-day", text: "Allow for a day", onclick: () => actions.decide("allow_day") }));
-      }
-    },
-  };
 }
 
 // ── Error ────────────────────────────────────────────────────────
@@ -683,7 +627,8 @@ function settingsCard(title: string, control: HTMLElement): HTMLElement {
   return h("div", { class: "settings-card" }, h("div", { class: "settings-card-title", text: title }), control);
 }
 
-function buildSettings(actions: ViewActions): ViewHost {
+/** Settings, Muse's own way: a modal over whatever chat is open, not a page that replaces it. */
+export function buildSettings(actions: ViewActions, onClose: () => void): ViewHost {
   const ONOFF = ["Off", "On"];
   const sound = dotSlider(ONOFF, "Sound", (i) => { if (State.settings.soundEnabled !== (i === 1)) actions.toggleSound(); });
   const voice = dotSlider(ONOFF, "Spoken updates", (i) => actions.updateSettings({ voiceEnabled: i === 1 }));
@@ -701,16 +646,39 @@ function buildSettings(actions: ViewActions): ViewHost {
   const glowColorReset = h("button", { class: "settings-btn", type: "button", text: "Auto", title: "Use the current status colors again",
     onclick: () => actions.updateSettings({ glowColor: null }) });
 
-  const drum = buildSettingsDrum([
-    settingsCard("Sound", sound.el),
-    settingsCard("Spoken updates", voice.el),
-    settingsCard("Speed", rate.el),
-    settingsCard("Auto-close", autoClose.el),
-    settingsCard("Edge glow", glow.el),
-    settingsCard("Custom color", h("div", { class: "settings-color" }, glowColorButton, glowColorReset, glowColorInput)),
-  ], () => actions.blip());
+  // Muse's Settings layout: a category list on the left, the active category's cards on the right.
+  // "Sound and voice" is hidden for now: core/sound.ts is a no-op, so its Sound toggle did nothing.
+  // The controls stay built (and synced) so the category returns by re-adding this one line:
+  //   { id: "sound", label: "Sound and voice", icon: ICONS.railSoundOn, cards: [settingsCard("Sound", sound.el), settingsCard("Spoken updates", voice.el), settingsCard("Speed", rate.el)] },
+  const CATEGORIES: { id: string; label: string; icon: string; cards: HTMLElement[] }[] = [
+    { id: "general", label: "General", icon: ICONS.gear, cards: [settingsCard("Auto-close", autoClose.el)] },
+    { id: "appearance", label: "Appearance", icon: ICONS.display, cards: [
+      settingsCard("Edge glow", glow.el),
+      settingsCard("Custom color", h("div", { class: "settings-color" }, glowColorButton, glowColorReset, glowColorInput))] },
+  ];
+  let activeCat = "general";
+  const paneTitle = h("div", { class: "set-pane-title" });
+  const paneBody = h("div", { class: "set-pane-body" });
+  const catButtons = CATEGORIES.map((c) => {
+    const icon = c.icon.startsWith("M4 9.5") ? svg(c.icon, 15, { stroke: 1.7 }) : svg(c.icon, 15);
+    const b = h("button", { class: "set-cat", type: "button", onclick: () => { actions.blip(); showCat(c.id); } }, icon, h("span", { text: c.label }));
+    b.dataset.cat = c.id;
+    return b;
+  });
+  function showCat(id: string) {
+    activeCat = id;
+    const c = CATEGORIES.find((x) => x.id === id) ?? CATEGORIES[0];
+    paneTitle.textContent = c.label;
+    paneBody.replaceChildren(...c.cards);
+    for (const b of catButtons) b.classList.toggle("on", b.dataset.cat === activeCat);
+  }
+  showCat(activeCat);
+  void buildSettingsDrum;
 
-  const el = h("div", { class: "view" }, h("div", { class: "settings-view" }, drum.el));
+  const closeBtn = h("button", { class: "settings-close", type: "button", title: "Close Settings", "aria-label": "Close Settings", onclick: () => { actions.blip(); onClose(); } }, svg(ICONS.xmark, 13));
+  const el = h("div", { class: "settings-page" },
+    h("aside", { class: "set-side" }, h("div", { class: "set-side-title", text: "Settings" }), ...catButtons),
+    h("section", { class: "set-pane" }, h("div", { class: "set-pane-head" }, paneTitle, closeBtn), paneBody));
 
   /** Index of the stop nearest `value`, so an off-list saved value still lands on a stop. */
   const nearest = (list: readonly number[], value: number) =>
@@ -738,9 +706,9 @@ function buildSettings(actions: ViewActions): ViewHost {
 // labels and configuration badges, and a preview panel with the Reasoning
 // configuration. Only provider-reported data is shown; nothing is invented.
 
-type PickerProvider = "claude" | "codex" | "opencode" | "agent";
+export type PickerProvider = "claude" | "codex" | "opencode" | "agent";
 
-function pickerProvider(provider: string): PickerProvider {
+export function pickerProvider(provider: string): PickerProvider {
   const value = provider.toLowerCase();
   if (value.startsWith("claude")) return "claude";
   if (value.startsWith("codex")) return "codex";
@@ -748,10 +716,10 @@ function pickerProvider(provider: string): PickerProvider {
   return "agent";
 }
 
-const PROVIDER_NAMES: Record<PickerProvider, string> = { claude: "Anthropic", codex: "OpenAI", opencode: "OpenCode", agent: "Agent" };
+export const PROVIDER_NAMES: Record<PickerProvider, string> = { claude: "Anthropic", codex: "OpenAI", opencode: "OpenCode", agent: "Agent" };
 
 /** Providers report effort ids like "low" or "xhigh" as labels; show them as words. */
-function effortLabel(label: string): string {
+export function effortLabel(label: string): string {
   if (label.toLowerCase() === "xhigh") return "Extra high";
   return label === label.toLowerCase() ? label.charAt(0).toUpperCase() + label.slice(1) : label;
 }
@@ -766,7 +734,9 @@ export function buildModelPicker(actions: ViewActions): ViewHost {
   const left = h("div", { class: "mp-left" }, tabs, searchGroup, listWrap);
   const preview = h("div", { class: "mp-preview", "aria-live": "polite" });
   const body = h("div", { class: "mp-body" }, left, preview);
-  const el = h("div", { class: "view model-picker-view" }, card(null, body));
+  // Muse's Apps page (the grid icon on the rail): for M9R, the connected agent apps and their models.
+  const el = h("div", { class: "view model-picker-view apps-page" },
+    h("div", { class: "page-title", text: "Apps" }), card(null, body));
 
   let key = "";
   let activeHandle = "";
@@ -972,13 +942,13 @@ export function buildViews(actions: ViewActions, onChatHeightChange: () => void)
   const map = new Map<IslandViewName, ViewHost>();
   map.set("overview", buildOverview(actions));
   map.set("empty", buildEmpty(actions));
-  map.set("approval", buildApproval(actions));
   map.set("error", buildError(actions));
   map.set("finished", buildFinished(actions));
   map.set("drop", buildDrop());
   map.set("note", buildNote());
-  map.set("settings", buildSettings(actions));
   map.set("prompt", buildPrompt(actions, onChatHeightChange));
   map.set("models", buildModelPicker(actions));
+  // Identity is not a view any more: it is Muse's right-hand avatar panel, built by the island
+  // (see buildIdentity in ./identity) and shown beside whatever view is open.
   return map;
 }

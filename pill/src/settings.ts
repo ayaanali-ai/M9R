@@ -43,6 +43,7 @@ function normalize(raw: unknown): Settings {
   if (r.glowColor === null || (typeof r.glowColor === "string" && HEX_COLOR.test(r.glowColor))) {
     out.glowColor = r.glowColor === null ? null : r.glowColor.toLowerCase();
   }
+  if (r.approvalDefault === "ask_some" || r.approvalDefault === "always_ask") out.approvalDefault = r.approvalDefault;
   return out;
 }
 
@@ -223,6 +224,43 @@ function renderGlow(): HTMLElement {
   return group;
 }
 
+const APPROVAL_DEFAULTS: ReadonlyArray<{ value: Settings["approvalDefault"]; title: string; note: string }> = [
+  { value: "ask_some", title: "Ask for some actions", note: "Before actions that may share your information or make important changes." },
+  { value: "always_ask", title: "Always ask", note: "Before any action." },
+];
+
+/** A stack of selectable cards with a checkmark on the active one, rather than a row
+ * of pills -- for a choice between policies, not a single value. */
+function renderApprovalDefault(): HTMLElement {
+  const group = el("section", "settings-group");
+  group.append(
+    groupHead("Approval defaults", settings.approvalDefault === "always_ask" ? "always ask" : "ask for some"),
+    el("p", "settings-note", "How often M9R checks with you before an agent acts."),
+  );
+  const stack = el("div", "settings-policy");
+  stack.setAttribute("role", "radiogroup");
+  stack.setAttribute("aria-label", "Approval defaults");
+  for (const option of APPROVAL_DEFAULTS) {
+    const active = option.value === settings.approvalDefault;
+    const card = el("button", `settings-policy-option${active ? " is-active" : ""}`);
+    card.type = "button";
+    card.dataset.key = `approval:${option.value}`;
+    card.setAttribute("role", "radio");
+    card.setAttribute("aria-checked", String(active));
+    card.append(
+      el("span", "settings-policy-title", option.title),
+      el("span", "settings-policy-note", option.note),
+    );
+    if (active) card.append(el("span", "settings-policy-check", "✓"));
+    card.addEventListener("click", () => {
+      if (!active) void update({ approvalDefault: option.value });
+    });
+    stack.append(card);
+  }
+  group.append(stack);
+  return group;
+}
+
 function statusText(): string {
   if (saveState === "saved") return "Saved";
   if (saveState === "offline") return "Not saved — no desktop backend";
@@ -269,7 +307,7 @@ function render(): void {
   toolbar.append(el("span", "", "Notch"), el("span", "", "Voice"), el("span", "", "Glow"));
 
   const pane = el("div", "ds-window-pane settings-pane");
-  pane.append(renderSound(), renderVoice(), renderAutoClose(), renderGlow());
+  pane.append(renderSound(), renderVoice(), renderAutoClose(), renderGlow(), renderApprovalDefault());
 
   const status = el("div", "ds-window-status");
   const grip = el("img");

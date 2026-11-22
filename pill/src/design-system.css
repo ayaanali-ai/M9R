@@ -26,6 +26,12 @@
   --ds-font-technical: "M9R Technical", var(--ds-font-display);
   --ds-font-ui: system-ui, "Segoe UI Variable Text", "Segoe UI", sans-serif;
 
+  /* Muse's own curve (Material's "standard" ease) -- the island's physical motion keeps its
+     springs, but quick UI feedback (hover, a selected state, a panel's chrome) uses this. */
+  --ds-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ds-dur-fast: 120ms;
+  --ds-dur-base: 180ms;
+
   /* Palette (light study theme). */
   --ds-bezel: #141414;                     /* the dark shell around the screen */
   --ds-desk: #f5f5f5;                      /* the paper desktop */

@@ -12,7 +12,10 @@ import { displayName, plainStep } from "../core/humanize";
 import { browserSpeechEnv } from "../core/speech";
 import { State, type PillSnapshot } from "../core/state";
 import type { Decision, FileDropHandlers, PillTransport } from "../core/transport";
-import { buildHeader, buildViews, type ViewActions, type ViewHost } from "../views/views";
+import { buildHeader, buildSettings, buildViews, type ViewActions, type ViewHost } from "../views/views";
+import { buildSidebar, type SidebarHost } from "../views/sidebar";
+import { buildIdentity } from "../views/identity";
+import { buildAgentDrum, type AgentDrum } from "../views/agent-drum";
 import { providerLogo } from "../views/provider";
 import { h, svg } from "../views/dom";
 import { IslandStateMachine } from "./fsm";
@@ -108,7 +111,12 @@ export class Island {
   private wakeStrip!: HTMLElement;
 
   private header!: ViewHost;
+  private sidebar!: SidebarHost;
+  private agentDrum!: AgentDrum;
+  private identityHost!: ViewHost;
   private views!: Map<IslandViewName, ViewHost>;
+  private settingsHost!: ViewHost;
+  private settingsOverlayEl!: HTMLElement;
 
   private width = new Tracked(LIP_W);
   private height = new Tracked(0);
@@ -148,8 +156,8 @@ export class Island {
   }
 
   private loadOpenSize() {
-    const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() * 0.96);
-    const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight * 0.92);
+    const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+    const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
     try {
       const savedWidth = Number(localStorage.getItem("notch-preview-w"));
       const savedHeight = Number(localStorage.getItem("notch-preview-h"));
@@ -159,6 +167,27 @@ export class Island {
       this.openWidth = Math.min(DEFAULT_OPEN_W, maxWidth);
       this.openHeight = Math.min(DEFAULT_OPEN_H, maxHeight);
     }
+  }
+
+  /** Size before the last maximize; null while not maximized. */
+  private preMaximize: { w: number; h: number } | null = null;
+
+  /** Fill the whole pill window (the native window is the hard ceiling), or restore the previous size. */
+  private toggleMaximize() {
+    if (this.preMaximize) {
+      this.openWidth = this.preMaximize.w;
+      this.openHeight = this.preMaximize.h;
+      this.preMaximize = null;
+    } else {
+      this.preMaximize = { w: this.openWidth, h: this.openHeight };
+      this.openWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+      this.openHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
+    }
+    this.islandEl.classList.toggle("maximized", this.preMaximize !== null);
+    if (State.mode === "expanded") this.animateGeometry(false);
+    this.dirty = true;
+    this.ensureRunning();
+    State.notify();
   }
 
   private wireResize(container: HTMLElement) {
@@ -178,6 +207,7 @@ export class Island {
         event.preventDefault();
         event.stopPropagation();
         start = { x: event.clientX, y: event.clientY, w: this.openWidth, h: this.openHeight };
+        if (this.preMaximize) { this.preMaximize = null; this.islandEl.classList.remove("maximized"); }
         handle.setPointerCapture(event.pointerId);
         this.islandEl.classList.add("resizing");
       });
@@ -185,8 +215,8 @@ export class Island {
         if (!start) return;
         const dx = event.clientX - start.x;
         const dy = event.clientY - start.y;
-        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() * 0.96);
-        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight * 0.92);
+        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
         if (edge === "left" || edge === "right" || edge === "corner") {
           const sign = edge === "left" ? -1 : 1;
           this.openWidth = clamp(start.w + sign * 2 * dx, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
@@ -208,8 +238,8 @@ export class Island {
         if (State.mode !== "expanded" || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
         event.preventDefault();
         const step = event.shiftKey ? 20 : 8;
-        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() * 0.96);
-        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight * 0.92);
+        const maxWidth = Math.max(MIN_OPEN_W, this.panelWidth() - 8);
+        const maxHeight = Math.max(MIN_OPEN_H, window.innerHeight - 6);
         if (event.key === "ArrowLeft") this.openWidth = clamp(this.openWidth - step, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
         if (event.key === "ArrowRight") this.openWidth = clamp(this.openWidth + step, Math.min(MIN_OPEN_W, maxWidth), maxWidth);
         if (event.key === "ArrowUp") this.openHeight = clamp(this.openHeight - step, MIN_OPEN_H, maxHeight);
@@ -238,7 +268,16 @@ export class Island {
         State.setFocus(id);
         Sound.play("blip");
       },
-      decide: (d) => this.decide(d),
+      openIdentity: (id) => {
+        if (id) State.setFocus(id);
+        State.identityOpen = true;
+        State.notify();
+      },
+      closeIdentity: () => {
+        State.identityOpen = false;
+        State.notify();
+      },
+      decide: (d, approvalId) => this.decide(d, approvalId),
       send: (text) => this.transport.send(text),
       canAllowForADay: () => this.transport.capabilities?.allowForADay === true,
       dictation: this.transport.capabilities?.dictation
@@ -270,6 +309,12 @@ export class Island {
         State.notify();
       },
       blip: () => Sound.play("blip"),
+      toggleMaximize: () => this.toggleMaximize(),
+      isMaximized: () => this.preMaximize !== null,
+      toggleSettings: () => {
+        State.settingsOpen = !State.settingsOpen;
+        State.notify();
+      },
     };
 
     this.wakeStrip = h("div", { id: "wake-strip" });
@@ -279,10 +324,20 @@ export class Island {
     this.countdown = h("div", { id: "countdown" });
 
     this.header = buildHeader(actions);
+    // Agent identity lives at the top, centred (Muse's avatar slot), as a drum of every agent.
+    this.agentDrum = buildAgentDrum(actions);
+    this.header.el.append(this.agentDrum.el);
+    this.sidebar = buildSidebar(actions);
     this.views = buildViews(actions, () => this.animateGeometry(false));
     this.viewsEl = h("div", { id: "views" });
     for (const v of this.views.values()) this.viewsEl.append(v.el);
-    this.contentEl = h("div", { id: "content" }, this.header.el, this.viewsEl);
+    this.identityHost = buildIdentity(actions);
+    const body = h("div", { id: "body" }, this.sidebar.el, this.viewsEl, this.identityHost.el);
+    this.settingsHost = buildSettings(actions, () => { State.settingsOpen = false; State.notify(); });
+    this.settingsOverlayEl = h("div", { class: "settings-overlay", onclick: (e: Event) => {
+      if (e.target === this.settingsOverlayEl) { State.settingsOpen = false; State.notify(); }
+    } }, this.settingsHost.el);
+    this.contentEl = h("div", { id: "content" }, this.header.el, body, this.settingsOverlayEl);
 
     this.clipEl = h("div", { id: "island-clip" }, this.contentEl);
     const resizeHandles = h("div", { id: "resize-handles", "aria-label": "Resize conversation panel" },
@@ -337,12 +392,14 @@ export class Island {
     this.applyGeometry();
   }
 
-  private deciding = false;
+  // Keyed by approval id, not a single flag: inline cards in the shared chat can show several
+  // approvals at once, and deciding one must never block or get confused with another.
+  private deciding = new Set<string>();
 
-  private async decide(d: "allow" | "deny" | "allow_day") {
-    const req = State.pendingApproval;
-    if (!req || this.deciding) return;
-    this.deciding = true;
+  private async decide(d: "allow" | "deny" | "allow_day", approvalId?: string) {
+    const req = approvalId ? State.approvals.find((a) => a.id === approvalId) ?? null : State.pendingApproval;
+    if (!req || this.deciding.has(req.id)) return;
+    this.deciding.add(req.id);
     const decision: Decision = d;
     State.setDecisionError(req.id, null);
     try {
@@ -353,14 +410,17 @@ export class Island {
       Sound.play("error");
       return;
     } finally {
-      this.deciding = false;
+      this.deciding.delete(req.id);
     }
     // Keep the approval until the transport accepts the owner's decision.
-    State.resolveApproval(req.id);
+    State.resolveApproval(req.id, decision);
     if (State.approvals.length === 0) {
       State.isPinned = false;
       this.fsm.pinned = false;
-      this.setView(State.defaultView());
+      // The approval was docked above the chat composer: answering it leaves you in the chat
+      // (as in Muse), rather than bouncing to another page.
+      if (State.view !== "prompt") this.setView(State.defaultView());
+      else State.notify();
     } else {
       State.notify();
     }
@@ -382,16 +442,19 @@ export class Island {
       const asking = State.approvals.find((a) => a.id === newApprovals[0]);
       if (asking) State.setFocus(asking.agent);
       State.isPinned = true;
-      this.alert("approval");
+      // Approvals fold into the one main chat as inline cards; open straight into it.
+      this.alert("prompt");
       const who = State.tasks.find((t) => t.id === asking?.agent);
       if (asking && who) {
         const what = asking.title.trim().replace(/[.!]+$/, "");
         speak(`${displayName(who)} needs your OK${what ? ` to ${what.charAt(0).toLowerCase()}${what.slice(1)}` : ""}.`);
       }
-    } else if (State.approvals.length === 0 && State.view === "approval") {
+    } else if (State.approvals.length === 0 && State.isPinned) {
+      // Resolved from elsewhere (another client, or a day-long allow) rather than this
+      // pill's own decide(): drop the forced-open pin, but never yank the owner out of
+      // "prompt" if they're mid-conversation -- only decide() itself picks a new view.
       State.isPinned = false;
       this.dropPin();
-      this.setView(State.defaultView());
     } else if (newFinished.length > 0 && State.approvals.length === 0 && !typing) {
       // A finished task opens its card out of the drum; it never interrupts an approval or a message being typed.
       State.setFocus(newFinished[newFinished.length - 1]);
@@ -783,7 +846,7 @@ export class Island {
       // Clicking the empty part of the header folds the island away, even while an approval waits (it stays pending and
       // its badge stays on the agent). Buttons, tabs and fields keep their own clicks.
       const target = e.target as HTMLElement;
-      if (target.closest("#header") && !target.closest("button")) this.collapse();
+      if (target.closest("#header") && !target.closest("button") && !target.closest(".agent-drum")) this.collapse();
     });
 
     window.addEventListener("keydown", (e) => {
@@ -949,6 +1012,13 @@ export class Island {
     this.contentEl.inert = !expanded;
 
     this.header.sync();
+    this.settingsOverlayEl.classList.toggle("on", State.settingsOpen);
+    if (State.settingsOpen) this.settingsHost.sync();
+    this.sidebar.sync();
+    this.agentDrum.sync();
+    this.identityHost.el.classList.toggle("on", State.identityOpen && State.tasks.length > 0);
+    this.identityHost.el.inert = !State.identityOpen;
+    if (State.identityOpen) this.identityHost.sync();
     for (const [name, view] of this.views) {
       const on = name === State.view;
       view.el.classList.toggle("on", on);

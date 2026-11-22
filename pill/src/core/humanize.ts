@@ -37,6 +37,14 @@ export function displayName(task: Pick<AgentTask, "provider" | "name">): string 
   return PRODUCT_NAMES[task.provider] ?? task.name.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/** "Post to the page" → "Codex wants to post to the page." Shared by the sidebar preview and the
+ * inline approval card (approvals fold into the one main chat, not a separate full-screen view). */
+export function approvalSentence(name: string, title: string | undefined): string {
+  const t = (title ?? "").trim().replace(/[.!]+$/, "");
+  if (!t) return `${name} needs your OK.`;
+  return `${name} wants to ${t.charAt(0).toLowerCase()}${t.slice(1)}.`;
+}
+
 const RAW = /timeout|timed out|\d{3,}\s*ms|initiali[sz]e|app-server|\b(?:ACP|MCP|UIA|CDP|RPC)\b|ECONN|ENOENT|EPIPE|exit code|stack|exception|\bapi error\b|error:|\bat \w+\.|undefined|null|stderr|json|broker|dispatchState|targetRevision|screenPoint|renderer=|m9r_[\w-]+|foreground lease|input stream|operation id|task id|provider turn|sendTextToWindow|WM_CHAR|PostMessageW|SendInput/i;
 const FIRST_PERSON = /^(?:i(?:['’]m| am| will|['’]ll| have|['’]ve)|we(?:['’]re| are| will|['’]ll| have)|let me)\s+/i;
 const VERB_START: Readonly<Record<string, string>> = {
@@ -78,6 +86,27 @@ export function plainStep(task: AgentTask, step: string | undefined): string {
   if (!match) return text;
   const replacement = VERB_START[match[1]!.toLowerCase()];
   return replacement ? `${replacement}${text.slice(match[0].length)}` : text;
+}
+
+// A teammate picking up a message says "on it," not "Got it: 'the message, quoted back'." Pools are
+// kept short and plain -- real provider replies will say something real; this is only what the mock
+// dev transport shows standing in for that, and what a host can fall back on before the first real
+// reply lands.
+const ACK_POOL: readonly string[] = [
+  "On it.",
+  "Yep, looking into that now.",
+  "Got it, give me a sec.",
+  "Sure thing, starting now.",
+  "Alright, taking a look.",
+  "Okay, digging in now.",
+];
+let ackTurn = 0;
+
+/** A short, human first line to show while an agent picks up what the owner just sent. */
+export function agentAck(): string {
+  const text = ACK_POOL[ackTurn % ACK_POOL.length]!;
+  ackTurn++;
+  return text;
 }
 
 function fallback(task: AgentTask): string {

@@ -107,8 +107,8 @@ const TOP_MARGIN: f64 = 0.0;
 // wake handle), and when it needs the keyboard (the message field). The old overlay UI does not use any of this.
 
 /// The new UI's panel width (its `PANEL_W`); the island is centred in it, and tall enough for its largest view.
-const NEXT_W: f64 = 1100.0;
-const NEXT_H: f64 = 700.0;
+const NEXT_W: f64 = 1440.0;
+const NEXT_H: f64 = 900.0;
 const NOTCH_LIP_W: f64 = 288.0;
 const NOTCH_LIP_H: f64 = 32.0;
 /// Margin around the island that still counts as over it, matching the UI.

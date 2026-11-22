@@ -3,6 +3,7 @@
 
 import type { DroppedFile, LinkOffer, PillSnapshot, Settings } from "./state";
 import type { SpeechEnv } from "./speech";
+import { agentAck } from "./humanize";
 
 export type Decision = "allow" | "deny" | "allow_day";
 
@@ -134,7 +135,7 @@ export function createMockTransport(): PillTransport {
     subscribe(l) { listener = l; setTimeout(push, 0); },
     async send(text) {
       const target = /@(\w+)/.exec(text)?.[1] ?? "claude";
-      snap.thread.push({ id: `t${snap.thread.length + 1}`, from: target, text: `Got it: “${text.replace(/\n\nAttached:[\s\S]*$/, "").replace(/@\w+\s*/g, "").slice(0, 80)}”` });
+      snap.thread.push({ id: `t${snap.thread.length + 1}`, from: target, text: agentAck() });
       const agent = snap.agents.find((a) => a.handle === target);
       if (agent) { agent.state = "working"; agent.activity.push("Working on your message"); }
       push();

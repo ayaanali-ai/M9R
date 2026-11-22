@@ -120,6 +120,46 @@ html, body {
 .settings-sub .settings-choices { margin-top: 0; }
 .settings-sub.is-muted { opacity: 0.45; }
 
+/* Approval defaults: a stack of selectable cards with a checkmark, not pills --
+   this is a policy choice, not a single value, so each option needs room for its
+   own sentence of context. */
+.settings-policy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 11px;
+}
+.settings-policy-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 36px 9px 12px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--ds-dur-base) var(--ds-ease), border-color var(--ds-dur-base) var(--ds-ease);
+}
+.settings-policy-option:hover { background: rgba(255, 255, 255, 0.8); }
+.settings-policy-option.is-active {
+  border-color: var(--ds-accent, #2f6fed);
+  background: rgba(47, 111, 237, 0.08);
+}
+.settings-policy-title { font: 15px/1.3 var(--ds-font-serif); color: var(--ds-ink); }
+.settings-policy-note { font: 13px/1.3 var(--ds-font-serif); color: var(--ds-ink-muted); }
+.settings-policy-check {
+  position: absolute;
+  top: 9px;
+  right: 12px;
+  color: var(--ds-accent, #2f6fed);
+  font-size: 14px;
+}
+
 .settings-sublabel {
   min-width: 38px;
   font: 11px/16.5px var(--ds-font-pixel);

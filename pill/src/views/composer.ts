@@ -5,12 +5,13 @@ import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
 import { Sound } from "../core/sound";
 import { createDictation, type Dictation } from "../core/speech";
-import { State, type AgentTask, type ChatMessage, type DroppedFile, type LinkOffer } from "../core/state";
+import { State, type AgentTask, type ApprovalInfo, type ChatMessage, type DroppedFile, type LinkOffer } from "../core/state";
 import type { SessionRow } from "../core/transport";
 import type { ViewActions, ViewHost } from "./views";
 import { providerLogo } from "./provider";
-import { displayName } from "../core/humanize";
+import { displayName, approvalSentence } from "../core/humanize";
 import { botGlowColor } from "../core/layout";
+import { buildModelChip } from "./model-chip";
 
 let nextId = 1;
 
@@ -70,7 +71,40 @@ function splitRecipients(text: string): { to: AgentTask[]; body: string } {
   return to.length ? { to, body: text.slice(lead.length) } : { to: [], body: text };
 }
 
-function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () => void): HTMLElement {
+/** React / Reply / More -- Muse's own hover row, vertically centred beside the bubble: to its left
+ * for the owner's own (right-aligned) bubble, to its right for an agent's (left-aligned) one. The
+ * owner's own bubble gets no Reply (there's no one to @-address), just React and More. */
+function msgActions(message: ChatMessage, side: "left" | "right", startReply: (() => void) | null): HTMLElement {
+  const react = h("button", { class: "msg-act", type: "button", title: "React" }, svg(ICONS.heart, 13));
+  react.classList.toggle("on", !!message.reaction);
+  react.addEventListener("click", () => {
+    State.setReaction(message.id, "❤️");
+    react.classList.toggle("on", message.reaction === "❤️");
+  });
+  const reply = startReply
+    ? h("button", { class: "msg-act", type: "button", title: "Reply" }, svg(ICONS.reply, 13))
+    : null;
+  reply?.addEventListener("click", startReply!);
+  const menu = h("div", { class: "msg-more-menu" });
+  menu.hidden = true;
+  const copy = h("button", { class: "msg-more-item", type: "button", text: "Copy text" });
+  copy.addEventListener("click", () => {
+    void navigator.clipboard?.writeText(message.content).catch(() => {});
+    menu.hidden = true;
+  });
+  menu.append(copy);
+  const more = h("button", { class: "msg-act", type: "button", title: "More" }, svg(ICONS.ellipsis, 13));
+  more.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menu.hidden = !menu.hidden;
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (!menu.hidden && !more.contains(e.target as Node) && !menu.contains(e.target as Node)) menu.hidden = true;
+  });
+  return h("div", { class: `msg-actions on-${side}` }, react, reply, more, menu);
+}
+
+function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () => void, startReply: (to: string) => void): HTMLElement {
   if (message.role === "user") {
     const { to, body } = splitRecipients(message.content);
     const who = to.length
@@ -81,6 +115,7 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
     const said = cut < 0 ? body : body.slice(0, cut);
     const files = cut < 0 ? [] : body.slice(cut + ATTACHED.length).split("\n").filter(Boolean);
     const bubbleEl = h("div", { class: "bubble", text: said });
+    bubbleEl.append(msgActions(message, "left", null));
     if (files.length) {
       bubbleEl.append(h("span", { class: "bubble-files" }, ...files.map((f) => h("span", { class: "file-chip sent", title: f },
         svg(ICONS.doc, 11), h("span", { text: f.split(/[\\/]/).pop() ?? f })))));
@@ -102,8 +137,11 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
     ? `${speaker} → ${recipient ? displayName(recipient) : message.to}` : speaker });
   if (sender) {
     heading.prepend(providerLogo(sender.provider, 11));
+    heading.classList.add("is-clickable");
+    heading.addEventListener("click", () => actions.openIdentity(sender.id));
   }
   reply.prepend(heading);
+  reply.append(msgActions(message, "right", () => startReply(from?.[1] ?? speaker)));
   const clearNotice = message.dismissTaskId && actions.dismissTask
     ? h("button", { class: "save-note", type: "button", text: "Clear notice", title: "Hide this notice; keep its task record" })
     : null;
@@ -128,6 +166,52 @@ function bubble(message: ChatMessage, actions: ViewActions, onHeightChange: () =
   }
   if (message.link && actions.linking) return h("div", { class: "chat-row link-row" }, reply, linkPicker(message.link, actions.linking, onHeightChange), clearNotice);
   return h("div", { class: "chat-row" }, reply, clearNotice);
+}
+
+function smallBtn(label: string, kind: "primary" | "secondary", onClick: () => void, kbd?: string): HTMLElement {
+  return h("button", { class: `btn ${kind}`, onclick: onClick },
+    h("span", { text: label }), kbd ? h("span", { class: "kbd", text: kbd }) : null);
+}
+
+/** A pending approval as Muse shows it: a banner docked directly above the composer bar, outside
+ * the scrolling message log, so it stays in view whatever the scroll position. Muse's own shape:
+ * an icon beside the bold question, the exact action folded under a disclosure row, then
+ * Allow (primary) / Deny. `position`/`total` say which of several waiting approvals this is. */
+function approvalCard(approval: ApprovalInfo, actions: ViewActions, position = 1, total = 1): HTMLElement {
+  const agent = State.tasks.find((t) => t.id === approval.agent);
+  const label = agent ? displayName(agent) : "An agent";
+  const icon = h("span", { class: "ask-icon", title: label }, agent ? providerLogo(agent.provider, 17) : null);
+  if (agent) {
+    icon.classList.add("is-clickable");
+    icon.addEventListener("click", () => actions.openIdentity(agent.id));
+  }
+  const decisionError = State.decisionError?.approvalId === approval.id ? State.decisionError.message : null;
+  const status = h("div", { class: "ask-status", role: "status", "aria-live": "polite" });
+  status.textContent = decisionError
+    ? "That didn't go through. Try again."
+    : approval.unconfirmed ? "M9R will double-check this before it runs." : "";
+  status.dataset.state = decisionError ? "error" : approval.unconfirmed ? "unconfirmed" : "";
+  status.hidden = !decisionError && !approval.unconfirmed;
+  const buttons = h("div", { class: "ask-buttons" },
+    smallBtn("Allow", "primary", () => actions.decide("allow", approval.id), "Y"),
+    smallBtn("Deny", "secondary", () => actions.decide("deny", approval.id), "N"),
+  );
+  // "Allow for a day" is parked for now -- it'll come back as a third equal-width button
+  // ("Allow forever") once that's actually built, not as a quiet link under the two main ones.
+  let detail: HTMLElement | null = null;
+  if (approval.detail) {
+    const text = h("span", { class: "ask-detail-text", text: approval.detail });
+    const chev = svg(ICONS.chevronDown, 12);
+    detail = h("button", { class: "ask-detail", type: "button" }, text, chev);
+    detail.addEventListener("click", () => detail!.classList.toggle("open"));
+  }
+  const count = total > 1 ? h("span", { class: "ask-count", text: `${position} of ${total}` }) : null;
+  return h("div", { class: "approval-card", role: "region", "aria-label": `Approval: ${label}` },
+    h("div", { class: "ask-top" }, icon, h("div", { class: "ask-sentence", text: approvalSentence(label, approval.title) }), count),
+    detail,
+    status,
+    buttons,
+  );
 }
 
 /** One line by default; grows with the draft, but a pasted document never consumes the island. */
@@ -280,10 +364,16 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
   for (let i = 0; i < 24; i += 1) wave.append(document.createElement("i"));
   const said = h("span", { class: "said" });
   live.append(h("span", { class: "dictation-label", text: "Listening" }), wave, said);
-  const line = h("div", { class: "composer-line" }, agents, h("span", { class: "composer-rule", "aria-hidden": "true" }), draft, mic, send);
+  const modelChip = buildModelChip(actions);
+  const line = h("div", { class: "composer-line" }, agents, h("span", { class: "composer-rule", "aria-hidden": "true" }), draft, modelChip.el, mic, send);
   const bar = h("div", { class: "chat-bar" }, live, tray, line);
+  // Pending approvals dock here, between the log and the bar -- never inside the scrolling log.
+  const dock = h("div", { class: "approval-dock", "aria-live": "polite" });
+  dock.hidden = true;
+  const stack = h("div", { class: "composer-stack" }, dock, bar);
 
-  const el = h("div", { class: "view prompt-view" }, h("div", { class: "chat-body" }, log, asks, bar));
+  const el = h("div", { class: "view prompt-view" }, h("div", { class: "chat-body" }, log, asks, stack));
+  let dockFingerprint = "";
 
   let sending = false;
   let renderedFingerprint = "";
@@ -295,6 +385,16 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
     draft.style.height = `${next}px`;
     send.disabled = sending || !input.value.trim() || !!dictation?.listening;
     if (next !== draftHeight) { draftHeight = next; onHeightChange(); }
+  }
+
+  /** The hover row's Reply: addresses the field at whoever sent that bubble and puts the caret in it. */
+  function startReply(handle: string) {
+    const prefix = `@${handle} `;
+    if (!input.value.startsWith(prefix)) input.value = `${prefix}${input.value}`;
+    resizeDraft();
+    syncFiles();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
   }
   if (typeof ResizeObserver !== "undefined") {
     let width = 0;
@@ -418,19 +518,31 @@ export function buildPrompt(actions: ViewActions, onHeightChange: () => void): V
       const narrationText = working ? working.steps.at(-1)! : "";
       const fingerprint = JSON.stringify([
         State.chatHistory.map((message) =>
-          [message.id, message.content, message.from, message.to, message.delivery, message.link, message.dismissTaskId]),
+          [message.id, message.content, message.from, message.to, message.delivery, message.link, message.dismissTaskId, message.reaction]),
         narrationText,
       ]);
       if (fingerprint !== renderedFingerprint) {
         const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
         renderedFingerprint = fingerprint;
         clear(log);
-        for (const m of State.chatHistory) log.append(bubble(m, actions, onHeightChange));
+        for (const m of State.chatHistory) log.append(bubble(m, actions, onHeightChange, startReply));
         if (narrationText) log.append(h("div", { class: "chat-row narration-row" }, h("span", { class: "narration-text", role: "status", text: narrationText })));
         if (nearBottom) log.scrollTop = log.scrollHeight;
       }
+      // The docked approval: the oldest pending one, with a count when more are queued behind it.
+      // Its own state (unconfirmed, a failed decision) re-renders it, independent of the log.
+      const first = State.approvals[0];
+      const nextDock = JSON.stringify([first && [first.id, first.title, first.detail, first.unconfirmed], State.approvals.length,
+        State.decisionError, first && State.tasks.find((t) => t.id === first.agent)?.provider]);
+      if (nextDock !== dockFingerprint) {
+        dockFingerprint = nextDock;
+        dock.replaceChildren(...(first ? [approvalCard(first, actions, 1, State.approvals.length)] : []));
+        dock.hidden = !first;
+        onHeightChange();
+      }
       syncAgents();
       syncFiles();
+      modelChip.sync();
       input.disabled = sending;
       if (mic) mic.disabled = sending;
       send.disabled = sending || !input.value.trim() || !!dictation?.listening;

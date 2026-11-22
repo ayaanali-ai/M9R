@@ -6,13 +6,11 @@ export type IslandMode = "hidden" | "compact" | "expanded";
 export type IslandViewName =
   | "overview"
   | "empty"
-  | "approval"
   | "error"
   | "finished"
   | "prompt"
   | "models"
   | "note"
-  | "settings"
   | "drop";
 
 export type BotStateName =
@@ -60,15 +58,12 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   // Taller than the other views: the wheel needs room for two rows either side of the centred one.
   overview: { height: 196, botX: 68, botY: 114, botDiameter: 58, agentMode: "pills" },
   empty: { height: 160, botX: 70, botY: null, botDiameter: 62, agentMode: "none" },
-  // Same mark position as the drum so an approval reads as the wheel's centred agent asking, not a new screen.
-  approval: { height: 160, botX: 68, botY: 96, botDiameter: 58, agentMode: "column" },
   error: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   // Grows downward: the band leads with what finished, the steps unfold beneath it.
   finished: { height: 232, botX: 68, botY: 79, botDiameter: 52, agentMode: "column" },
   prompt: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
   models: { height: 300, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
-  settings: { height: 220, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   drop: { height: 200, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
 };
 

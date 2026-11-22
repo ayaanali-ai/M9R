@@ -80,6 +80,9 @@ async function main() {
     setView() {},
     collapse() {},
     setFocus(id) { State.setFocus(id); },
+    // This standalone window has no avatar panel; picking an agent just focuses it.
+    openIdentity(id) { if (id) State.setFocus(id); },
+    closeIdentity() {},
     decide() {},
     async send(text) {
       const reply = await transport.send(text);
@@ -87,6 +90,7 @@ async function main() {
     },
     canAllowForADay() { return false; },
     toggleSound() {},
+    toggleSettings() {},
     updateSettings() {},
     setAutoClose() {},
     blip() {},
