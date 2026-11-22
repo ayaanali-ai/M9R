@@ -172,6 +172,22 @@ export class Island {
   /** Size before the last maximize; null while not maximized. */
   private preMaximize: { w: number; h: number } | null = null;
 
+  /** Set by a periodic check_for_update poll; null means nothing to offer. */
+  private updateAvailableVersion: string | null = null;
+
+  private pollForUpdate() {
+    if (!this.transport.capabilities?.update || !this.transport.checkForUpdate) return;
+    const check = () => {
+      void this.transport.checkForUpdate!().then((version) => {
+        if (version === this.updateAvailableVersion) return;
+        this.updateAvailableVersion = version;
+        this.sidebar?.sync();
+      });
+    };
+    check();
+    setInterval(check, 30 * 60 * 1000);
+  }
+
   /** Fill the whole pill window (the native window is the hard ceiling), or restore the previous size. */
   private toggleMaximize() {
     if (this.preMaximize) {
@@ -311,6 +327,10 @@ export class Island {
       blip: () => Sound.play("blip"),
       toggleMaximize: () => this.toggleMaximize(),
       isMaximized: () => this.preMaximize !== null,
+      updateAvailable: this.transport.capabilities?.update ? () => this.updateAvailableVersion : undefined,
+      applyUpdate: this.transport.capabilities?.update && this.transport.applyUpdate
+        ? () => { void this.transport.applyUpdate!(this.updateAvailableVersion!); }
+        : undefined,
       toggleSettings: () => {
         State.settingsOpen = !State.settingsOpen;
         State.notify();
@@ -328,6 +348,7 @@ export class Island {
     this.agentDrum = buildAgentDrum(actions);
     this.header.el.append(this.agentDrum.el);
     this.sidebar = buildSidebar(actions);
+    this.pollForUpdate();
     this.views = buildViews(actions, () => this.animateGeometry(false));
     this.viewsEl = h("div", { id: "views" });
     for (const v of this.views.values()) this.viewsEl.append(v.el);

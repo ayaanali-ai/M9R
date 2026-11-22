@@ -23,7 +23,7 @@ export interface FileDropHandlers {
 export interface PillTransport {
   setOwnerWorkMode?(mode: "working" | "agents-free"): Promise<void>;
   /** What this host can actually do; the UI hides controls a host cannot honour instead of faking them. */
-  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean; dismissTask?: boolean };
+  capabilities?: { allowForADay?: boolean; linkSessions?: boolean; dictation?: boolean; saveMemory?: boolean; dismissTask?: boolean; update?: boolean };
   /** Opens the one-time microphone setup. Only with `capabilities.dictation`. */
   openMicSetup?(): void;
   /** Creates a shell-specific speech environment when browser permission behavior differs by host. */
@@ -57,6 +57,11 @@ export interface PillTransport {
   saveSettings?(settings: Settings): void;
   /** Reads back the last saved settings, if the host can persist them. Called once at boot. */
   loadSettings?(): Promise<Partial<Settings> | void>;
+  /** Asks whether a newer, signed release exists. Resolves to the new version, or null when
+   * there isn't one, not configured, or the host can't check. Only with `capabilities.update`. */
+  checkForUpdate?(): Promise<string | null>;
+  /** Applies a version `checkForUpdate` already offered. The host restarts itself when done. */
+  applyUpdate?(version: string): Promise<void>;
 }
 
 declare global {
@@ -131,7 +136,9 @@ export function createMockTransport(): PillTransport {
     }, 9000);
   }
   return {
-    capabilities: { allowForADay: true },
+    capabilities: { allowForADay: true, update: params.has("update") },
+    async checkForUpdate() { return params.has("update") ? "9.9.9" : null; },
+    async applyUpdate() { /* dev mock: nothing to actually apply */ },
     subscribe(l) { listener = l; setTimeout(push, 0); },
     async send(text) {
       const target = /@(\w+)/.exec(text)?.[1] ?? "claude";

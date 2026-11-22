@@ -54,24 +54,25 @@ export function buildSidebar(actions: ViewActions): SidebarHost {
   // Hidden: core/sound.ts plays nothing yet, so this toggle had no audible effect. Kept wired
   // (not deleted) so it comes back by flipping this line once the pill has real sounds.
   soundBtn.hidden = true;
-  const maxBtn = railIcon(ICONS.railMaximize, 18, "Maximize", () => { actions.blip(); actions.toggleMaximize?.(); });
-  maxBtn.hidden = !actions.toggleMaximize;
+  const updateBtn = railIcon(ICONS.arrowUp, 18, "Update available", () => { actions.blip(); actions.applyUpdate?.(); });
+  updateBtn.hidden = true;
+  updateBtn.classList.add("rail-icon-update");
   const gearBtn = railIcon(ICONS.railMenu, 18, "Settings", () => { setPanelOpen(false); actions.blip(); actions.toggleSettings(); });
-  for (const b of [chatsBtn, searchBtn, agentsBtn, composeBtn, soundBtn, maxBtn, gearBtn]) {
+  for (const b of [chatsBtn, searchBtn, agentsBtn, composeBtn, soundBtn, updateBtn, gearBtn]) {
     for (const p of b.querySelectorAll("path")) {
       p.setAttribute("fill", "none"); p.setAttribute("stroke", "currentColor"); p.setAttribute("stroke-width", "1.7");
       p.setAttribute("stroke-linecap", "round"); p.setAttribute("stroke-linejoin", "round");
     }
   }
   let soundKey = "";
-  let maxKey = "";
+  let updateKey = "";
   function setIcon(b: HTMLElement, path: string) {
     b.querySelector("path")?.setAttribute("d", path);
   }
 
   const rail = h("div", { class: "app-rail" },
     h("div", { class: "app-rail-top" }, chatsBtn, searchBtn, agentsBtn, h("i", { class: "app-rail-divider" }), composeBtn),
-    h("div", { class: "app-rail-bottom" }, soundBtn, maxBtn, gearBtn),
+    h("div", { class: "app-rail-bottom" }, soundBtn, updateBtn, gearBtn),
   );
 
   const el = h("div", { class: "shell-nav" }, rail, panel);
@@ -100,12 +101,15 @@ export function buildSidebar(actions: ViewActions): SidebarHost {
       soundBtn.title = sk === "on" ? "Sound on" : "Sound off";
       soundBtn.setAttribute("aria-pressed", String(sk === "on"));
     }
-    const mk = actions.isMaximized?.() ? "max" : "normal";
-    if (mk !== maxKey) {
-      maxKey = mk;
-      setIcon(maxBtn, mk === "max" ? ICONS.railRestore : ICONS.railMaximize);
-      maxBtn.title = mk === "max" ? "Restore size" : "Maximize";
-      maxBtn.setAttribute("aria-label", maxBtn.title);
+    const version = actions.updateAvailable?.() ?? null;
+    const uk = version ?? "";
+    if (uk !== updateKey) {
+      updateKey = uk;
+      updateBtn.hidden = !version;
+      if (version) {
+        updateBtn.title = `Update to v${version}`;
+        updateBtn.setAttribute("aria-label", updateBtn.title);
+      }
     }
 
     const items = State.tasks.map((task) => ({ task, preview: chatPreview(task), pending: State.approvals.filter((a) => a.agent === task.id).length }));

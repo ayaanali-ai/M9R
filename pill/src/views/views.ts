@@ -48,6 +48,10 @@ export interface ViewActions {
   /** Fill the pill window, or restore the size from before. */
   toggleMaximize?(): void;
   isMaximized?(): boolean;
+  /** The version a background check already found, or null. Present only when the host can check. */
+  updateAvailable?(): string | null;
+  /** Applies the version updateAvailable() is currently offering; the host restarts itself. */
+  applyUpdate?(): void;
 }
 
 export interface ViewHost {

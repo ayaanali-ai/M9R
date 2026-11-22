@@ -60,8 +60,20 @@ export function createDesktopTransport(invoke: Invoke): PillTransport {
   return {
     // The desktop runtime owns long-lived provider processes. Session linking
     // belongs only to the legacy extension transport and must not surface here.
-    capabilities: { allowForADay: false, dictation: true, saveMemory: true, dismissTask: true },
+    capabilities: { allowForADay: false, dictation: true, saveMemory: true, dismissTask: true, update: true },
     createDictationEnvironment() { return desktopNativeSpeechEnv(() => { void invoke("open_microphone_settings").catch(() => {}); }); },
+    async checkForUpdate() {
+      try {
+        const raw = (await invoke("check_for_update")) as string;
+        const data = JSON.parse(raw) as { phase?: string; availableVersion?: string };
+        return data.phase === "available" && typeof data.availableVersion === "string" ? data.availableVersion : null;
+      } catch {
+        return null; // no desktop backend, no update-config.json yet, or the check itself failed -- same as "nothing to offer"
+      }
+    },
+    async applyUpdate(version) {
+      await invoke("apply_update", { version });
+    },
     subscribe(listener) {
       let lastPillState = "";
       let connection: "connected" | "disconnected" = "disconnected";

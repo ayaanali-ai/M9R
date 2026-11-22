@@ -3278,6 +3278,8 @@ body.pill-preview { background: radial-gradient(ellipse at 13% 78%, #ddc9b8, tra
 .rail-icon:hover { background: var(--muse-raised); transform: none; }
 .rail-icon.on { background: var(--muse-raised); color: #fff; }
 .rail-icon[hidden] { display: none; }
+.rail-icon-update { color: #3b9eff; }
+.rail-icon-update:hover { background: rgba(59, 158, 255, 0.16); color: #3b9eff; }
 .app-rail-divider { display: block; width: 22px; height: 1px; margin: 4px 0; background: rgba(255, 255, 255, 0.12); }
 
 /* Agents page (was Home): no second sidebar; agent faces sit in a strip above the greeting/feed. */
