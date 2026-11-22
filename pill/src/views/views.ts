@@ -6,7 +6,7 @@ import { ICONS } from "./icons";
 import { providerLogo } from "./provider";
 import { buildPrompt } from "./composer";
 import { buddy } from "./buddy";
-import { State, PROVIDER_COLORS, type AgentTask, type ChatMessage, type LinkOffer, type PillModelAgent, type Settings } from "../core/state";
+import { State, PROVIDER_COLORS, type AgentTask, type ChatMessage, type LinkOffer, type Settings } from "../core/state";
 import type { SessionRow } from "../core/transport";
 import type { SpeechEnv } from "../core/speech";
 import { washRGBA, botGlowColor, type IslandViewName, type Wash } from "../core/layout";
@@ -204,16 +204,6 @@ function greeting(now = new Date()): string {
 /** The desktop shell's hold-to-talk hotkey is Ctrl+Alt held on its own (overlay/src-tauri/src/ctrl_alt_hold.rs). */
 const HOLD_HINT = "Hold Ctrl + Alt and tell me what to take off your plate.";
 
-/** Connected agent apps: each distinct provider among live agents and the model picker's agents. */
-function connectedApps(): AgentTask["provider"][] {
-  const seen = new Set<AgentTask["provider"]>();
-  for (const t of State.tasks) seen.add(t.provider);
-  for (const a of State.models?.agents ?? []) {
-    if (a.availability !== "not_connected" && (a.provider === "claude" || a.provider === "codex" || a.provider === "opencode")) seen.add(a.provider);
-  }
-  return [...seen];
-}
-
 const CONNECTION_LABEL: Record<typeof State.brokerConnection, string> = {
   connected: "Connected", connecting: "Connecting", disconnected: "Offline", unknown: "Local",
 };
@@ -244,7 +234,6 @@ function buildOverview(actions: ViewActions): ViewHost {
   } }, svg(ICONS.plus, 12));
   const avatars = h("div", { class: "home-avatars", role: "group", "aria-label": "Active agents" });
   const rows = h("div", { class: "home-rows", role: "listbox", "aria-label": "Conversations" });
-  const apps = h("button", { class: "home-apps", type: "button", title: "Connected agent apps and their models", onclick: () => { actions.blip(); actions.setView("models"); } });
   const acctAvatar = h("span", { class: "home-acct-avatar", text: "M" });
   const acctStatus = h("span", { class: "home-acct-status" });
   const account = h("div", { class: "home-acct" },
@@ -256,7 +245,6 @@ function buildOverview(actions: ViewActions): ViewHost {
     h("div", { class: "home-side-top" }, homeBtn),
     h("div", { class: "home-search-row" }, searchGroup, newBtn),
     avatars, rows,
-    h("div", { class: "home-apps-row" }, apps),
     account,
   );
 
@@ -318,11 +306,10 @@ function buildOverview(actions: ViewActions): ViewHost {
     const shown = needle
       ? items.filter((i) => `${displayName(i.task)} ${i.task.name} ${i.preview}`.toLowerCase().includes(needle))
       : items;
-    const providers = connectedApps();
     const conn = State.brokerConnection;
     const firstApproval = State.approvals[0];
     const key = JSON.stringify([selectedId, needle, items.map((i) => [i.task.id, i.task.color, i.task.state, i.preview, shortTime(i.at), i.pending]),
-      providers, conn, State.approvals.length, firstApproval?.id]);
+      conn, State.approvals.length, firstApproval?.id]);
     if (key === rowsKey) return;
     rowsKey = key;
 
@@ -381,16 +368,6 @@ function buildOverview(actions: ViewActions): ViewHost {
       ? h("div", { class: "mp-empty-title", text: "No matches" })
       : h("div", { class: "mp-empty-title", text: "No agents yet" }), items.length ? "Try a different name." : "Connected agents show up here.");
     rows.replaceChildren(...([requests, ...agentRows, empty] as (HTMLElement | null)[]).filter((x): x is HTMLElement => !!x));
-
-    // Apps strip: the connected agent apps' own logos, then the count past four.
-    const shownApps = providers.slice(0, 4);
-    apps.replaceChildren(...[
-      ...shownApps.map((p) => h("span", { class: "home-app-icon" }, providerLogo(p, 13))),
-      providers.length > 4 ? h("span", { class: "home-apps-more", text: `+${providers.length - 4}` }) : null,
-      h("span", { class: "home-apps-label", text: providers.length === 1 ? "App" : "Apps" }),
-      svg(ICONS.plus, 10),
-    ].filter((x): x is HTMLElement | SVGSVGElement => !!x));
-    apps.hidden = false;
 
     acctStatus.replaceChildren(h("span", { text: CONNECTION_LABEL[conn] }), h("i", { class: "home-acct-ring" }));
     acctStatus.dataset.state = conn;
@@ -701,10 +678,10 @@ export function buildSettings(actions: ViewActions, onClose: () => void): ViewHo
   };
 }
 
-// ── Models ───────────────────────────────────────────────────────
-// Modeled on the owner's ModelSelectorPrompt: a searchable list with provider
-// labels and configuration badges, and a preview panel with the Reasoning
-// configuration. Only provider-reported data is shown; nothing is invented.
+// ── Model/effort helpers ─────────────────────────────────────────
+// Shared by the composer's model chip (./model-chip.ts); the owner's full model-picker
+// page was retired once the chip could show and change the focused agent's model/effort
+// on its own -- a dedicated page for that one job was redundant with it.
 
 export type PickerProvider = "claude" | "codex" | "opencode" | "agent";
 
@@ -724,218 +701,6 @@ export function effortLabel(label: string): string {
   return label === label.toLowerCase() ? label.charAt(0).toUpperCase() + label.slice(1) : label;
 }
 
-export function buildModelPicker(actions: ViewActions): ViewHost {
-  const tabs = h("div", { class: "mp-agents", role: "tablist", "aria-label": "Agent" });
-  const search = h("input", { class: "mp-search-input", type: "text", placeholder: "Search models...", "aria-label": "Search models" }) as HTMLInputElement;
-  const searchGroup = h("label", { class: "mp-search" }, search, svg(ICONS.search, 12, { stroke: 2 }));
-  const rows = h("div", { class: "mp-rows", role: "listbox", "aria-label": "Models" });
-  const fade = h("div", { class: "mp-fade", "aria-hidden": "true" });
-  const listWrap = h("div", { class: "mp-list" }, rows, fade);
-  const left = h("div", { class: "mp-left" }, tabs, searchGroup, listWrap);
-  const preview = h("div", { class: "mp-preview", "aria-live": "polite" });
-  const body = h("div", { class: "mp-body" }, left, preview);
-  // Muse's Apps page (the grid icon on the rail): for M9R, the connected agent apps and their models.
-  const el = h("div", { class: "view model-picker-view apps-page" },
-    h("div", { class: "page-title", text: "Apps" }), card(null, body));
-
-  let key = "";
-  let activeHandle = "";
-  let previewId = "";
-  let pending: { handle: string; model: string; effort: string | null; applying: boolean } | null = null;
-  let failure: { handle: string; text: string } | null = null;
-
-  const agents = (): PillModelAgent[] => State.models?.agents ?? [];
-  const activeAgent = (): PillModelAgent | undefined => agents().find((agent) => agent.handle === activeHandle);
-  const effectiveModel = (agent: PillModelAgent): string =>
-    (pending?.handle === agent.handle ? pending.model : null) ?? agent.selectedModel ?? agent.currentModel ?? "";
-  const effectiveEffort = (agent: PillModelAgent): string =>
-    (pending?.handle === agent.handle ? pending.effort : null) ?? agent.selectedEffort ?? agent.currentEffort ?? "";
-
-  function updateFade() {
-    fade.classList.toggle("on", rows.scrollHeight - rows.scrollTop - rows.clientHeight > 4);
-  }
-  rows.addEventListener("scroll", updateFade, { passive: true });
-
-  async function pick(agent: PillModelAgent, model: string, effort: string | null) {
-    if (!actions.selectModel) return;
-    const request = { handle: agent.handle, model, effort, applying: true };
-    pending = request;
-    failure = null;
-    renderRows();
-    renderPreview();
-    try {
-      await actions.selectModel(agent.handle, model || null, effort);
-      if (pending !== request) return;
-      request.applying = false;
-      renderRows();
-      // Keep the choice shown until the provider's own state confirms it, but never indefinitely.
-      setTimeout(() => { if (pending === request) { pending = null; key = ""; sync(); } }, 10_000);
-    } catch {
-      if (pending !== request) return;
-      pending = null;
-      failure = { handle: agent.handle, text: `Could not change @${agent.handle}; the previous model is still active.` };
-      renderRows();
-      renderPreview();
-    }
-  }
-
-  function badge(agent: PillModelAgent, modelId: string): HTMLElement | null {
-    if (modelId !== effectiveModel(agent)) return null;
-    const effortId = effectiveEffort(agent);
-    const label = agent.models.find((model) => model.id === modelId)?.efforts?.find((effort) => effort.id === effortId)?.label;
-    return label ? h("span", { class: "mp-badge" }, svg(ICONS.brain, 10), effortLabel(label)) : null;
-  }
-
-  function renderTabs() {
-    tabs.replaceChildren();
-    for (const agent of agents()) {
-      const on = agent.handle === activeHandle;
-      tabs.append(h("button", {
-        class: "mp-agent" + (on ? " on" : ""), role: "tab", "aria-selected": on ? "true" : "false",
-        onclick: () => {
-          if (activeHandle === agent.handle) return;
-          activeHandle = agent.handle;
-          previewId = "";
-          search.value = "";
-          renderAll();
-        },
-      }, providerLogo(pickerProvider(agent.provider), 13), h("span", { text: "@" + agent.handle })));
-    }
-  }
-
-  function renderRows() {
-    rows.replaceChildren();
-    const agent = activeAgent();
-    searchGroup.hidden = !agent || agent.availability !== "available" || agent.models.length === 0;
-    if (!agent) {
-      rows.append(h("div", { class: "mp-empty", text: "No connected agents yet." }));
-      updateFade();
-      return;
-    }
-    if (agent.availability === "not_connected") {
-      rows.append(h("div", { class: "mp-empty", text: `@${agent.handle} is not connected.` }));
-      updateFade();
-      return;
-    }
-    if (agent.availability !== "available" || agent.models.length === 0) {
-      rows.append(h("div", { class: "mp-empty", text: `@${agent.handle} has not reported a live model catalog yet.` }));
-      updateFade();
-      return;
-    }
-    const needle = search.value.trim().toLowerCase();
-    const options = needle
-      ? agent.models.filter((model) => model.label.toLowerCase().includes(needle) || model.id.toLowerCase().includes(needle))
-      : agent.models;
-    if (!options.length) {
-      rows.append(h("div", { class: "mp-empty" }, h("div", { class: "mp-empty-title", text: "No models found" }), "Maybe try a different search."));
-      updateFade();
-      return;
-    }
-    const providerName = PROVIDER_NAMES[pickerProvider(agent.provider)];
-    const current = effectiveModel(agent);
-    for (const model of options) {
-      const on = model.id === current;
-      const applying = pending?.handle === agent.handle && pending.model === model.id && pending.applying;
-      const row = h("button", {
-        class: "mp-row" + (on ? " on" : "") + (model.id === previewId ? " preview" : ""),
-        role: "option", "aria-selected": on ? "true" : "false",
-        onclick: () => { if (model.id !== current) void pick(agent, model.id, null); },
-        onmouseenter: () => { previewId = model.id; renderPreview(); markPreview(); },
-        onfocus: () => { previewId = model.id; renderPreview(); markPreview(); },
-      },
-        h("span", { class: "mp-row-text" },
-          h("span", { class: "mp-row-label", text: model.label }),
-          h("span", { class: "mp-row-provider" }, providerLogo(pickerProvider(agent.provider), 10), providerName)),
-        badge(agent, model.id),
-        applying ? h("span", { class: "mp-spin", "aria-label": "Applying" }) : on ? svg(ICONS.check, 12) : null,
-      );
-      row.dataset.id = model.id;
-      rows.append(row);
-    }
-    requestAnimationFrame(updateFade);
-  }
-
-  function markPreview() {
-    for (const row of rows.querySelectorAll<HTMLElement>(".mp-row")) row.classList.toggle("preview", row.dataset.id === previewId);
-  }
-
-  function renderPreview() {
-    preview.replaceChildren();
-    const agent = activeAgent();
-    if (!agent || agent.availability !== "available" || !agent.models.length) {
-      preview.hidden = true;
-      return;
-    }
-    preview.hidden = false;
-    const model = agent.models.find((option) => option.id === (previewId || effectiveModel(agent))) ?? agent.models[0];
-    const provider = pickerProvider(agent.provider);
-    const isCurrent = model.id === effectiveModel(agent);
-    const head = h("div", { class: "mp-p-head" },
-      h("div", { class: "mp-p-title", text: model.label }),
-      h("div", { class: "mp-p-provider" }, providerLogo(provider, 11), PROVIDER_NAMES[provider], isCurrent ? h("span", { class: "mp-p-current", text: "In use" }) : null),
-      model.description ? h("p", { class: "mp-p-desc", text: model.description }) : null,
-    );
-    const config = h("div", { class: "mp-p-config" }, h("div", { class: "mp-p-kicker", text: "Configuration" }));
-    if (model.efforts?.length) {
-      const chosen = isCurrent ? effectiveEffort(agent) : "";
-      const group = h("div", { class: "mp-radio", role: "radiogroup", "aria-label": "Reasoning level" });
-      for (const effort of model.efforts) {
-        const on = effort.id === chosen;
-        group.append(h("button", {
-          class: "mp-radio-item" + (on ? " on" : ""), role: "radio", "aria-checked": on ? "true" : "false",
-          onclick: () => void pick(agent, model.id, effort.id),
-        }, effortLabel(effort.label)));
-      }
-      config.append(h("div", { class: "mp-p-label", text: "Reasoning" }), group);
-    } else {
-      config.append(h("div", { class: "mp-p-none", text: "This model has no reasoning levels to configure." }));
-    }
-    preview.append(head, config);
-    if (failure?.handle === agent.handle) preview.append(h("div", { class: "mp-p-error", role: "alert", text: failure.text }));
-  }
-
-  function renderAll() {
-    const list = agents();
-    if (!list.some((agent) => agent.handle === activeHandle)) {
-      activeHandle = (list.find((agent) => agent.availability === "available" && agent.models.length) ?? list[0])?.handle ?? "";
-    }
-    renderTabs();
-    renderRows();
-    renderPreview();
-    requestAnimationFrame(() => {
-      rows.querySelector<HTMLElement>(".mp-row.on")?.scrollIntoView({ block: "nearest" });
-      updateFade();
-    });
-  }
-
-  search.addEventListener("input", renderRows);
-
-  function sync() {
-    const list = agents();
-    // A confirmed selection from the provider replaces the optimistic one.
-    if (pending && !pending.applying) {
-      const agent = list.find((item) => item.handle === pending!.handle);
-      if (agent && (agent.selectedModel ?? agent.currentModel) === pending.model
-        && (!pending.effort || (agent.selectedEffort ?? agent.currentEffort) === pending.effort)) pending = null;
-    }
-    const nextKey = JSON.stringify([pending, list.map((agent) => [agent.handle, agent.provider, agent.availability, agent.currentModel, agent.currentEffort,
-      agent.selectedModel, agent.selectedEffort, agent.models])]);
-    if (nextKey === key && rows.childElementCount > 0) return;
-    key = nextKey;
-    renderAll();
-  }
-
-  sync();
-  return { el, sync, activate() {
-    const focused = State.focusTask?.name;
-    if (focused && agents().some((agent) => agent.handle === focused)) activeHandle = focused;
-    previewId = "";
-    search.value = "";
-    key = "";
-    sync();
-  } };
-}
-
 // ── Registry ─────────────────────────────────────────────────────
 
 export function buildViews(actions: ViewActions, onChatHeightChange: () => void): Map<IslandViewName, ViewHost> {
@@ -947,7 +712,6 @@ export function buildViews(actions: ViewActions, onChatHeightChange: () => void)
   map.set("drop", buildDrop());
   map.set("note", buildNote());
   map.set("prompt", buildPrompt(actions, onChatHeightChange));
-  map.set("models", buildModelPicker(actions));
   // Identity is not a view any more: it is Muse's right-hand avatar panel, built by the island
   // (see buildIdentity in ./identity) and shown beside whatever view is open.
   return map;

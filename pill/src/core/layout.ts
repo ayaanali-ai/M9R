@@ -9,7 +9,6 @@ export type IslandViewName =
   | "error"
   | "finished"
   | "prompt"
-  | "models"
   | "note"
   | "drop";
 
@@ -62,7 +61,6 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   // Grows downward: the band leads with what finished, the steps unfold beneath it.
   finished: { height: 232, botX: 68, botY: 79, botDiameter: 52, agentMode: "column" },
   prompt: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
-  models: { height: 300, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
   drop: { height: 200, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
 };
@@ -115,7 +113,7 @@ export function botPosition(
       return { cx: 40, cy: 16, diameter: 20, opacity: 0 };
     case "expanded": {
       // Home (overview) draws its own idle mark inside its main pane; the island's mark would sit on the sidebar.
-      if (view === "overview" || view === "models" || view === "prompt" || view === "drop") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
+      if (view === "overview" || view === "prompt" || view === "drop") return { cx: 54, cy: 100, diameter: 46, opacity: 0 };
       const layout = VIEW_LAYOUTS[view];
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };

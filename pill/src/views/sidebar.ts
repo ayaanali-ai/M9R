@@ -37,8 +37,9 @@ export function buildSidebar(actions: ViewActions): SidebarHost {
   const panel = h("div", { class: "chats-panel" }, panelHead, rows);
 
   // Muse's rail, top to bottom: Chat, Search, (Spaces -- excluded), (Ideas -- no M9R equivalent),
-  // Goals -> Agents (what each agent is working on), Apps -> connected agent apps and their models,
-  // divider, New chat. Bottom: sound, maximize, then the menu icon that opens Settings.
+  // Goals -> Agents (what each agent is working on), divider, New chat. Apps (the old model-picker
+  // page) is retired -- the composer's own model chip does that job now, right where it's used.
+  // Bottom: sound, maximize, then the menu icon that opens Settings.
   const go = (v: IslandViewName) => { actions.blip(); actions.setView(v); };
   const chatsBtn = railIcon(ICONS.railChat, 18, "Chats", () => {
     // First click opens the chat; clicking again while there slides the Chats column in or out.
@@ -48,7 +49,6 @@ export function buildSidebar(actions: ViewActions): SidebarHost {
     actions.blip(); setPanelOpen(true); actions.focusWindow?.(true); search.focus();
   });
   const agentsBtn = railIcon(ICONS.railGoals, 18, "Agents", () => { setPanelOpen(false); go("overview"); });
-  const appsBtn = railIcon(ICONS.railApps, 18, "Apps", () => { setPanelOpen(false); go("models"); });
   const composeBtn = railIcon(ICONS.railNew, 18, "New chat", () => { State.composeTo = null; go("prompt"); });
   const soundBtn = railIcon(ICONS.railSoundOff, 18, "Sound", () => actions.toggleSound());
   // Hidden: core/sound.ts plays nothing yet, so this toggle had no audible effect. Kept wired
@@ -57,7 +57,7 @@ export function buildSidebar(actions: ViewActions): SidebarHost {
   const maxBtn = railIcon(ICONS.railMaximize, 18, "Maximize", () => { actions.blip(); actions.toggleMaximize?.(); });
   maxBtn.hidden = !actions.toggleMaximize;
   const gearBtn = railIcon(ICONS.railMenu, 18, "Settings", () => { setPanelOpen(false); actions.blip(); actions.toggleSettings(); });
-  for (const b of [chatsBtn, searchBtn, agentsBtn, appsBtn, composeBtn, soundBtn, maxBtn, gearBtn]) {
+  for (const b of [chatsBtn, searchBtn, agentsBtn, composeBtn, soundBtn, maxBtn, gearBtn]) {
     for (const p of b.querySelectorAll("path")) {
       p.setAttribute("fill", "none"); p.setAttribute("stroke", "currentColor"); p.setAttribute("stroke-width", "1.7");
       p.setAttribute("stroke-linecap", "round"); p.setAttribute("stroke-linejoin", "round");
@@ -70,7 +70,7 @@ export function buildSidebar(actions: ViewActions): SidebarHost {
   }
 
   const rail = h("div", { class: "app-rail" },
-    h("div", { class: "app-rail-top" }, chatsBtn, searchBtn, agentsBtn, appsBtn, h("i", { class: "app-rail-divider" }), composeBtn),
+    h("div", { class: "app-rail-top" }, chatsBtn, searchBtn, agentsBtn, h("i", { class: "app-rail-divider" }), composeBtn),
     h("div", { class: "app-rail-bottom" }, soundBtn, maxBtn, gearBtn),
   );
 
@@ -92,7 +92,6 @@ export function buildSidebar(actions: ViewActions): SidebarHost {
     const view = highlightFor();
     chatsBtn.classList.toggle("on", view === "prompt" || panelOpen);
     agentsBtn.classList.toggle("on", view === "overview" || view === "empty");
-    appsBtn.classList.toggle("on", view === "models");
     gearBtn.classList.toggle("on", State.settingsOpen);
     const sk = State.settings.soundEnabled ? "on" : "off";
     if (sk !== soundKey) {

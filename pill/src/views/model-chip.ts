@@ -1,8 +1,8 @@
 // The composer's own model/effort picker: a small chip (provider logo + model name + effort),
 // opening a popover above the composer with a plain model list and a "molten fill" effort slider
 // -- a thick track whose fill heats up from cool blue (Light) to white-hot (Max) as you drag.
-// Built off the owner's ModelSelectorPrompt data (State.models), the same source buildModelPicker
-// in views.ts reads; this chip shows only the currently-focused agent, not the whole roster.
+// Built off the owner's ModelSelectorPrompt data (State.models); this chip shows only the
+// currently-focused agent, not the whole roster. Replaces the old standalone Apps/model-picker page.
 
 import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
