@@ -27,6 +27,15 @@ const root = document.getElementById("settings-root")!;
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let saveState: SaveState = "idle";
 
+type UpdatePhase = "checking" | "up_to_date" | "available" | "applying" | "failed" | "unconfigured";
+interface UpdateCheckState {
+  phase: UpdatePhase;
+  currentVersion?: string;
+  availableVersion?: string;
+  error?: string;
+}
+let updateState: UpdateCheckState = { phase: "checking" };
+
 /** Coerces whatever the backend (or an event) hands us into a full Settings,
  * field by field, falling back to the defaults for anything missing or malformed. */
 function normalize(raw: unknown): Settings {
@@ -60,6 +69,55 @@ async function update(patch: Partial<Settings>): Promise<void> {
     saveState = "offline";
   }
   renderStatus();
+}
+
+/** Parses the JSON `m9r-cli update check` returns, via the check_for_update Tauri command. */
+function parseUpdateResult(raw: string): UpdateCheckState {
+  try {
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    const phase = data.phase;
+    if (phase === "up_to_date" || phase === "available" || phase === "failed") {
+      return {
+        phase,
+        currentVersion: typeof data.currentVersion === "string" ? data.currentVersion : undefined,
+        availableVersion: typeof data.availableVersion === "string" ? data.availableVersion : undefined,
+        error: typeof data.error === "string" ? data.error : undefined,
+      };
+    }
+    return { phase: "failed", error: "Unexpected response from the update checker." };
+  } catch {
+    return { phase: "failed", error: "Unexpected response from the update checker." };
+  }
+}
+
+async function checkForUpdate(): Promise<void> {
+  updateState = { ...updateState, phase: "checking" };
+  render();
+  try {
+    const raw = await invoke<string>("check_for_update");
+    updateState = parseUpdateResult(raw);
+  } catch (error) {
+    // No desktop backend, or update-config.json doesn't exist yet (older install, or this
+    // build was never released through the signed pipeline) -- not a failure to alarm over.
+    const message = error instanceof Error ? error.message : String(error);
+    updateState = message.includes("not configured")
+      ? { phase: "unconfigured" }
+      : { phase: "failed", error: message };
+  }
+  render();
+}
+
+async function applyUpdate(): Promise<void> {
+  if (updateState.phase !== "available" || !updateState.availableVersion) return;
+  updateState = { ...updateState, phase: "applying" };
+  render();
+  try {
+    await invoke("apply_update", { version: updateState.availableVersion });
+    // From here the installer stops this very process and relaunches it; nothing more to render.
+  } catch (error) {
+    updateState = { ...updateState, phase: "failed", error: error instanceof Error ? error.message : String(error) };
+    render();
+  }
 }
 
 async function previewVoice(): Promise<void> {
@@ -261,6 +319,44 @@ function renderApprovalDefault(): HTMLElement {
   return group;
 }
 
+function renderUpdates(): HTMLElement | null {
+  if (updateState.phase === "unconfigured") return null; // nothing to show on a dev build or one never released
+  const group = el("section", "settings-group");
+  const current = updateState.currentVersion ? `v${updateState.currentVersion}` : "";
+
+  let valueText = current || (updateState.phase === "checking" ? "checking…" : "unknown");
+  let note = "M9R checks for a signed, newer release. Nothing installs without you clicking the button below.";
+  if (updateState.phase === "checking") note = "Checking for a newer version…";
+  if (updateState.phase === "failed") note = updateState.error ?? "Could not check for updates right now.";
+
+  group.append(groupHead("Updates", valueText), el("p", "settings-note", note));
+
+  if (updateState.phase === "available" && updateState.availableVersion) {
+    const row = el("div", "settings-row");
+    const button = el("button", "ds-pill-button settings-update-button", `Update to v${updateState.availableVersion}`);
+    button.type = "button";
+    button.dataset.key = "update:apply";
+    button.addEventListener("click", () => void applyUpdate());
+    row.append(button);
+    group.append(row);
+  } else if (updateState.phase === "applying") {
+    const row = el("div", "settings-row");
+    row.append(el("span", "settings-update-progress", "Updating — M9R will restart in a moment…"));
+    group.append(row);
+  } else if (updateState.phase === "checking") {
+    // no action yet
+  } else {
+    const row = el("div", "settings-row");
+    const button = el("button", "ds-chrome-button settings-check-button", "Check now");
+    button.type = "button";
+    button.dataset.key = "update:check";
+    button.addEventListener("click", () => void checkForUpdate());
+    row.append(button);
+    group.append(row);
+  }
+  return group;
+}
+
 function statusText(): string {
   if (saveState === "saved") return "Saved";
   if (saveState === "offline") return "Not saved — no desktop backend";
@@ -308,6 +404,8 @@ function render(): void {
 
   const pane = el("div", "ds-window-pane settings-pane");
   pane.append(renderSound(), renderVoice(), renderAutoClose(), renderGlow(), renderApprovalDefault());
+  const updates = renderUpdates();
+  if (updates) pane.append(updates);
 
   const status = el("div", "ds-window-status");
   const grip = el("img");
@@ -334,6 +432,7 @@ async function refresh(): Promise<void> {
 async function start(): Promise<void> {
   render();
   await refresh();
+  void checkForUpdate();
   try {
     await listen<unknown>("settings-update", (event) => {
       // Use the pushed settings when the event carries them; otherwise re-read.

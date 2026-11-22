@@ -227,7 +227,18 @@ html, body {
 .settings-row .settings-choices { margin-top: 0; }
 
 .settings-preview,
-.settings-reset { margin-left: auto; }
+.settings-reset,
+.settings-check-button { margin-left: auto; }
+
+.settings-update-button {
+  background: #3b9eff;
+  color: #fff;
+}
+
+.settings-update-progress {
+  font: 11px/16.5px var(--ds-font-pixel);
+  color: #6b6b6b;
+}
 
 @media (max-height: 520px) {
   .settings-hero { padding: 16px 4px 12px; }

@@ -894,6 +894,49 @@ async fn check_for_update() -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+fn plain_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Applies a verified update the pill already offered via check_for_update. Re-runs the exact
+/// installer that was itself hashed as part of the currently-installed release (persisted to
+/// M9R_HOME/tools by install-m9r.ps1), with -Yes standing in for the consent this button's own
+/// "Update available" screen already collected. Detached so it survives this process being
+/// stopped and relaunched by that same script, the same way it handles a normal install.
+#[tauri::command]
+async fn apply_update(version: String) -> Result<(), String> {
+    if !plain_version(&version) {
+        return Err("Bad version".into());
+    }
+    let installer = m9r_home().join("tools").join("install-m9r.ps1");
+    if !installer.is_file() {
+        return Err("No local installer was found to apply this update. Reinstall M9R from a current release first.".into());
+    }
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ])
+    .arg(&installer)
+    .args(["-Version", &version, "-Yes"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW: this installer
+        // stops and relaunches the overlay itself, so the update must not be a child of
+        // the process it is about to stop.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200 | 0x0800_0000);
+    }
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Saves a fact or decision to the shared project memory agents read at session start (`m9r note`).
 #[tauri::command]
 async fn save_memory(text: String) -> Result<String, String> {
@@ -1335,7 +1378,7 @@ fn main() {
         // merged-feed, provider-session linking, or compatibility decision
         // commands to the production window; those paths could resurrect
         // historical provider/session state after a restart.
-        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, set_owner_work_mode, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings, read_screen_glow, set_screen_glow, check_for_update])
+        .invoke_handler(tauri::generate_handler![resize_pill, read_pill_state, send_message, select_model, set_owner_work_mode, pill_decide, save_memory, dismiss_task, start_dictation, stop_dictation, log_debug, pill_set_rect, pill_set_focus, open_microphone_settings, open_app_window, app_window_action, open_output_reference, save_settings, load_settings, read_screen_glow, set_screen_glow, check_for_update, apply_update])
         .setup(move |app| {
             // If no pill instance exists, the installer handoff can start this process. Exit
             // before creating the tray, heartbeat, feed watcher, or engine supervisor.

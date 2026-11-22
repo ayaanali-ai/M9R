@@ -45,7 +45,8 @@ param(
     [switch]$Uninstall,
     [switch]$Web,
     [switch]$NoAutostart,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    [switch]$Yes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -184,7 +185,7 @@ function Expand-VerifiedPackage([string]$ZipPath, [string]$Destination) {
         }
     } finally { $archive.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
-    foreach ($name in @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt', 'update-public-key.pem', 'VERSION')) {
+    foreach ($name in @('m9r-engine.exe', 'm9r-native-input-host.exe', 'm9r-web-broker.exe', 'm9r-overlay.exe', 'm9r-build-info.json', 'INSTALLATION.txt', 'update-public-key.pem', 'VERSION', 'install-m9r.ps1', 'install-m9r.cmd')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Destination $name) -PathType Leaf)) {
             throw "The release package is incomplete; '$name' is missing."
         }
@@ -502,6 +503,11 @@ function Remove-ManagedWebBroker {
 }
 
 function Read-Consent([string]$Prompt) {
+    # -Yes is for the pill's own in-app "Update now" button: the click itself is
+    # the consent, already shown an exact plan on an earlier check_for_update
+    # screen. It does nothing for a human running this script by hand, who
+    # still sees and must answer every prompt below.
+    if ($Yes) { Write-Host "$Prompt [auto-approved via -Yes]"; return $true }
     # Read-Host only reads an interactive console. Release tests and scripted
     # maintenance use redirected stdin, so consume one line directly there
     # instead of hanging after printing the consent plan.
@@ -832,6 +838,13 @@ try {
             }
         }
         ($updateConfig | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $env:M9R_HOME 'update-config.json') -Encoding UTF8
+        # Persist a copy of this exact verified installer (it was itself hashed as part of
+        # this ZIP) so the pill's in-app "Update now" button has something local and trusted
+        # to re-run later, without needing to fetch and unpack a fresh release just for that.
+        $toolsDir = Join-Path $env:M9R_HOME 'tools'
+        if (-not (Test-Path -LiteralPath $toolsDir -PathType Container)) { [void](New-Item -ItemType Directory -Path $toolsDir) }
+        Copy-Item -LiteralPath (Join-Path $payload 'install-m9r.ps1') -Destination (Join-Path $toolsDir 'install-m9r.ps1') -Force
+        Copy-Item -LiteralPath (Join-Path $payload 'install-m9r.cmd') -Destination (Join-Path $toolsDir 'install-m9r.cmd') -Force
     }
     Write-Host ''
     Write-Host 'M9R setup finished. The broker-owned provider processes are ready.' -ForegroundColor Green
