@@ -17,5 +17,5 @@ test("long drafts stay inside a 120px typing area and a 300px island", () => {
 test("the full-width composer has no decorative mark over its input", () => {
   assert.equal(botPosition("expanded", "prompt", 300).opacity, 0);
   assert.equal(botPosition("expanded", "overview", 160).opacity, 0, "home draws its own idle mark in its main pane");
-  assert.equal(botPosition("expanded", "approval", 160).opacity, 1, "other views keep their mark");
+  assert.equal(botPosition("expanded", "note", 160).opacity, 1, "other views keep their mark");
 });

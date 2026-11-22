@@ -66,9 +66,9 @@ test("approvals are reported once, queue in order, and mark the asking agent", (
   assert.equal(State.pendingApproval?.unconfirmed, false);
   State.setDecisionError("a1", "broker unavailable");
   assert.deepEqual(State.decisionError, { approvalId: "a1", message: "broker unavailable" });
-  State.resolveApproval("a1", now + 4);
+  State.resolveApproval("a1", "allow", now + 4);
   assert.equal(State.decisionError, null, "resolving the same approval clears its delivery error");
-  State.resolveApproval("a2", now + 4);
+  State.resolveApproval("a2", "allow", now + 4);
   State.apply(snap({ approvals: [a1, a2] }), now + 5);
   assert.equal(State.approvals.length, 0, "accepted owner decisions suppress stale snapshots from restoring old cards");
   assert.equal(State.defaultView(), "overview");
