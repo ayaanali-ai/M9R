@@ -324,7 +324,7 @@ function renderUpdates(): HTMLElement | null {
   const group = el("section", "settings-group");
   const current = updateState.currentVersion ? `v${updateState.currentVersion}` : "";
 
-  let valueText = current || (updateState.phase === "checking" ? "checking…" : "unknown");
+  const valueText = current || (updateState.phase === "checking" ? "checking…" : "unknown");
   let note = "M9R checks for a signed, newer release. Nothing installs without you clicking the button below.";
   if (updateState.phase === "checking") note = "Checking for a newer version…";
   if (updateState.phase === "failed") note = updateState.error ?? "Could not check for updates right now.";

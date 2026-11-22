@@ -79,7 +79,7 @@ export default function SettingsView({ email, userId, username, billingEnabled }
               <h2 id="connect-agent-title" className="text-base font-semibold">Connect an agent</h2>
               <p className="mt-1 text-sm">Run this from any terminal with Node.js and npm installed, then approve the connection in your browser.</p>
               <code className="ol-mono mt-2 block rounded border p-2">npx m9r-cli connect</code>
-              <p className="mt-2 text-sm">Browser and app work use M9R's native desktop controls; no browser extension is required. On Windows, run <code>npx m9r-cli web setup --broker-only</code> only if you want the local broker to start at login.</p>
+              <p className="mt-2 text-sm">Browser and app work use M9R&apos;s native desktop controls; no browser extension is required. On Windows, run <code>npx m9r-cli web setup --broker-only</code> only if you want the local broker to start at login.</p>
             </section>
             <ConnectedAgentsSection />
             <ConnectComputerSection />

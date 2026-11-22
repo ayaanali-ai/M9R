@@ -1,4 +1,5 @@
 // Run with Electron as the executable. Uses only fixture-owned WebContents.
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS fixture run directly by the electron binary, not bundled */
 const assert = require("node:assert/strict");
 const { app, BrowserWindow, WebContentsView, webContents } = require("electron");
 

@@ -535,11 +535,9 @@ test("a structured reply wakes an exact wait during an unfinished teammate task"
 
 test("an explicitly selected structured answer prevents a duplicate result reply and survives retry", async () => {
   let forwarded: string | undefined;
-  let resultStore: ReturnType<typeof createLocalStore>;
   const t = setup({ web: { recordAgentTaskResult: async (token, id, summary, completion, handled, replyMessageId) => {
-    forwarded = replyMessageId; return resultStore.recordTaskResult(token, id, summary, completion, handled, replyMessageId);
+    forwarded = replyMessageId; return t.store.recordTaskResult(token, id, summary, completion, handled, replyMessageId);
   } } });
-  resultStore = t.store;
   try {
     const request = t.store.addTask({ from: "claude", to: "codex", goal: "Verify the value", origin: "agent_initiated", standingRuleApplies: true,
       fromSession: "c1", targetSession: "x1", idempotencyKey: "explicit-question", a2a: { conversationId: "explicit-answer", messageId: "explicit-question",

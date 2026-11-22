@@ -216,14 +216,13 @@ function killProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
     // also bounded in case process creation or teardown stops responding.
     return new Promise<void>((resolve) => {
       let settled = false;
-      let fallbackTimer: NodeJS.Timeout | undefined;
       const finish = () => {
         if (settled) return;
         settled = true;
-        if (fallbackTimer) clearTimeout(fallbackTimer);
+        clearTimeout(fallbackTimer);
         resolve();
       };
-      fallbackTimer = setTimeout(() => {
+      const fallbackTimer = setTimeout(() => {
         try { child.kill(); } catch { /* already exited */ }
         finish();
       }, 3_500);
@@ -576,9 +575,8 @@ export class CodexAppServerAdapter implements InteractiveProviderAdapter {
     if (state.child.exitCode === null && !state.child.killed) {
       const childExited = new Promise<void>((resolveExit) => {
         if (state.child.exitCode !== null || state.child.signalCode !== null) return resolveExit();
-        let timeout: NodeJS.Timeout;
         const finish = () => { clearTimeout(timeout); resolveExit(); };
-        timeout = setTimeout(finish, 5_000);
+        const timeout = setTimeout(finish, 5_000);
         state.child.once("exit", finish);
       });
       await Promise.all([killProcessTree(state.child), childExited]);
